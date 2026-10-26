@@ -35,20 +35,22 @@ class SourceRepository:
                 break
         return out
 
-    def request_source_fetch(self, bot: str, count: int) -> int:
+    def request_source_fetch(self, bot: str, count: int, *, search: str | None = None) -> int:
+        if search is not None and (not search.strip() or len(search) > 100):
+            raise ValueError("搜索片名必须为 1–100 个字符")
         now = time.time()
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM source_fetches WHERE created_at<?", (now - 3600,))
             return self._conn.execute(
-                "INSERT INTO source_fetches (bot, max_count, created_at, updated_at) VALUES (?,?,?,?)",
-                (bot, count, now, now)).lastrowid
+                "INSERT INTO source_fetches (bot, max_count, search_query, created_at, updated_at) VALUES (?,?,?,?,?)",
+                (bot, count, search, now, now)).lastrowid
 
     def claim_source_fetches(self) -> list[dict[str, Any]]:
         """主进程领取待处理的读取请求；一分钟前的请求管理台早已放弃等待，不再处理。"""
         now = time.time()
         with self._lock, self._conn:
             rows = [dict(r) for r in self._conn.execute(
-                "SELECT id, bot, max_count FROM source_fetches WHERE status='pending' AND created_at>=?", (now - 60,))]
+                "SELECT id, bot, max_count, search_query FROM source_fetches WHERE status='pending' AND created_at>=?", (now - 60,))]
             self._conn.executemany("UPDATE source_fetches SET status='running', updated_at=? WHERE id=?",
                                    [(now, r["id"]) for r in rows])
             return rows
