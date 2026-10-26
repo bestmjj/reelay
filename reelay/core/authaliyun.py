@@ -30,7 +30,8 @@ _PARAMS = {"appName": "aliyun_drive", "fromSite": "52", "appEntrance": "web",
 def _passport_request(path: str, params: dict[str, str], *, post: bool = False) -> dict:
     """Only fixed upstream URLs are used. No user-controlled URL or response body is logged."""
     data = urlencode(params).encode("utf-8") if post else None
-    url = PASSPORT + path + "?appName=aliyun_drive&fromSite=52"
+    query = {"appName": "aliyun_drive", "fromSite": "52"} if post else params
+    url = PASSPORT + path + "?" + urlencode(query)
     request = Request(url, data=data, headers={
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0 Reelay",
