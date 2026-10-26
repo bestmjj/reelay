@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS source_fetches (
     id INTEGER PRIMARY KEY AUTOINCREMENT, -- 管理台请主进程读取来源最近的消息（监听会话只在主进程里）
     bot TEXT NOT NULL,
     max_count INTEGER NOT NULL,
+    search_query TEXT,                     -- optional read-only Telegram title query
     status TEXT NOT NULL DEFAULT 'pending', -- pending | running | done | failed
     result TEXT,                         -- 消息列表（JSON）
     error TEXT,
@@ -211,7 +212,14 @@ def _subscription_destinations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE subscriptions ADD COLUMN save_to TEXT")
 
 
-MIGRATIONS = (lambda conn: None, _episode_work_keys, _subscription_destinations)
+def _source_fetch_search(conn: sqlite3.Connection) -> None:
+    """v4: allow the Web process to request read-only title search via Telegram listener."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(source_fetches)")}
+    if "search_query" not in columns:
+        conn.execute("ALTER TABLE source_fetches ADD COLUMN search_query TEXT")
+
+
+MIGRATIONS = (lambda conn: None, _episode_work_keys, _subscription_destinations, _source_fetch_search)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
