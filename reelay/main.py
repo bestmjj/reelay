@@ -18,7 +18,7 @@ import asyncio
 import logging
 import time
 
-from .core import messages, paths
+from .core import discovery, messages, paths
 from .core.config import ensure_config, load_config, normalize_config
 from .core.contracts import PipelineContext, RawMessage, TaskState
 from .core.pipeline import Pipeline
@@ -130,6 +130,30 @@ async def _serve_fetch(store: Store, source, request: dict) -> None:
     store.finish_source_fetch(request["id"], messages=messages)
 
 
+async def _serve_subscription_discovery(pipeline: Pipeline, source, emit) -> None:
+    """Search existing authorized Telegram sources for recent subscribed releases.
+
+    This only emits RawMessages through the same persisted accept/dedup path as
+    NewMessage; the normal worker makes all actual parse/transfer decisions.
+    """
+    store = pipeline.store
+    try:
+        result = await source.discover_subscriptions(
+            emit, store.subscriptions(), store.state_get, store.state_set)
+        store.heartbeat("subscription_discovery", **result,
+                        interval=discovery.INTERVAL_SEC, check_interval=discovery.INTERVAL_SEC)
+        if result.get("candidates"):
+            logging.getLogger("reelay.source").info(
+                "主动追剧检索 %d 次，发现 %d 条候选消息（重复消息由任务库跳过）",
+                result["queries"], result["candidates"])
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - still keep live listening healthy
+        logging.getLogger("reelay.source").warning("主动追剧检索失败：%s", type(exc).__name__)
+        store.heartbeat("subscription_discovery", status="error", error=type(exc).__name__,
+                        check_interval=discovery.INTERVAL_SEC)
+
+
 async def _source_loop(pipeline: Pipeline, emit, *, poll_interval: float = 1) -> None:
     """监听来源、目标清单都跟随有效配置；切换来源先关闭旧会话。
 
@@ -146,6 +170,8 @@ async def _source_loop(pipeline: Pipeline, emit, *, poll_interval: float = 1) ->
             source.bind_watermark(pipeline.store.source_watermark)
         listener = asyncio.create_task(source.listen(emit))
         fetches: set[asyncio.Task] = set()  # 管理台请求读取的最近消息，见 _serve_fetch
+        discovery_task: asyncio.Task | None = None
+        next_discovery = 0.0
         status, error = "stopped", None
         down_since = time.monotonic()
         backfilled = getattr(source, "backfilled", 0)
@@ -164,6 +190,14 @@ async def _source_loop(pipeline: Pipeline, emit, *, poll_interval: float = 1) ->
                         "点下方按钮查看需要确认的资源。", pipeline.notify_targets(), buttons=messages.PENDING_BUTTONS)
                 health = source.health() if hasattr(source, "health") else {"status": "unobserved"}
                 pipeline.store.heartbeat("source", provider=name, config_revision=pipeline.revision, **health)
+                if (health.get("status") == "connected" and
+                        getattr(source, "backfill_done", True) and
+                        hasattr(source, "discover_subscriptions") and
+                        time.monotonic() >= next_discovery and
+                        (discovery_task is None or discovery_task.done())):
+                    discovery_task = asyncio.create_task(
+                        _serve_subscription_discovery(pipeline, source, emit))
+                    next_discovery = time.monotonic() + discovery.INTERVAL_SEC
                 if health.get("status") in ("connected", "unobserved"):
                     down_since = None
                     pipeline.store.clear_alert("source", f"消息源 {name} 已恢复连接", pipeline.notify_targets())
@@ -185,9 +219,12 @@ async def _source_loop(pipeline: Pipeline, emit, *, poll_interval: float = 1) ->
                 pipeline.notify_targets())
             raise
         finally:
-            for task in (listener, *fetches):
+            all_tasks = [listener, *fetches]
+            if discovery_task:
+                all_tasks.append(discovery_task)
+            for task in all_tasks:
                 task.cancel()
-            await asyncio.gather(listener, *fetches, return_exceptions=True)
+            await asyncio.gather(*all_tasks, return_exceptions=True)
             try:
                 if hasattr(source, "close"):
                     await source.close()
