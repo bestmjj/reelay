@@ -99,6 +99,26 @@ export interface ISubscriptionSimulation {
   dedup_checked?: false;
 }
 
+export interface IExistingVideo {
+  file_key: string;
+  provider: 'aliyun' | 'p115';
+  alias: string;
+  drive_id: string;
+  name: string;
+  path: string;
+  season: number;
+  episode: number;
+  size?: number | null;
+  associated: boolean;
+}
+export interface IExistingPreview {
+  items: IExistingVideo[];
+  total: number;
+  next_offset: number | null;
+  scan_complete: boolean;
+  subscription: { id: number; title: string; season: number; tmdbid: number | null };
+}
+
 export const subscriptionApi = {
   list: () => get<ISubscriptionsResp>('subscriptions'),
   simulate: (id: number, text?: string) =>
@@ -109,6 +129,10 @@ export const subscriptionApi = {
   add: (item: { title: string; season?: number | null; tmdbid?: number | null; total?: number | null; auto?: boolean; start_episode?: number | null }) =>
     post<IAddSubscriptionResp>('subscriptions', item),
   addFromTask: (taskId: string) => post<IAddSubscriptionResp>(`subscriptions/from-task/${taskId}`),
+  existing: (id: number, offset = 0) =>
+    get<IExistingPreview>(`subscriptions/existing?id=${id}&offset=${offset}`),
+  associateExisting: (id: number, fileKeys: string[]) =>
+    post<{ ok: boolean; associated: number; note: string }>('subscriptions/existing/associate', { id, file_keys: fileKeys }),
   setStart: (id: number, startEpisode: number | null) =>
     post<ISubscription>('subscriptions/start', { id, start_episode: startEpisode }),
   remove: (item: ShowKey) => post<{ ok: boolean }>('subscriptions/remove', item),
