@@ -133,7 +133,7 @@ export default function AuthAliyunCard() {
     <Panel
       icon={Cloud}
       title="阿里云盘连接"
-      description="扫码一次登录：分享转存、目录浏览和文件整理共用凭证。过期后自动刷新，失效时可重新扫码。"
+      description="扫码一次登录，默认使用资源库（数据盘），不是备份盘；分享转存、目录浏览和整理共用凭证。"
       actions={<ToneBadge tone={meta.tone}>{meta.label}</ToneBadge>}
       bodyClassName="space-y-4 p-4 sm:p-5"
     >
@@ -153,7 +153,7 @@ export default function AuthAliyunCard() {
           <p className="text-sm font-semibold">账户授权状态</p>
           {status?.configured ? (
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              已保存登录信息{status.drive_id ? ' · 网盘 ' + status.drive_id : ''}
+              已保存登录信息{status.drive_id ? ' · 资源库 ID ' + status.drive_id : ''}
               {status.checked_at ? <span title={fullTime(status.checked_at)}> · 上次验证 {relativeTime(status.checked_at)}</span> : ' · 尚未检测有效性'}
             </p>
           ) : (
@@ -227,7 +227,7 @@ export default function AuthAliyunCard() {
         </div>
       </details>
       <p className="text-xs leading-5 text-muted-foreground">
-        与 115 不同，阿里云盘只需要这一处登录。切换默认存储为 Aliyun 后，保存目录也必须选择阿里云盘里的文件夹。
+        与 115 不同，阿里云盘只需要这一处登录。切换默认存储为 Aliyun 后，保存目录必须选择阿里云盘资源库里的文件夹；备份盘目录不可用于资源库转存。
       </p>
     </Panel>
   );
