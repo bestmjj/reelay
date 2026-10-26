@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Any
 
-from .. import ai, discovery, existing_media, ignored, messages, subscriptions, tmdb, works
+from .. import ai, discovery, existing_media, ignored, library_scan_progress, messages, subscriptions, tmdb, works
 from ..contracts import PipelineContext, TaskState
 from ..media import format_episodes
 from ..rules import tv_category
@@ -36,7 +36,7 @@ class FollowMixin(ServiceBase):
         stored = self.store.stored_series()
         scan = self.store.state_get("library_scan", "snapshot") or {}
         observed_files = existing_media.apply_associations(
-            self.store.state_get("library_scan", "files", []) or [],
+            existing_media.scan_observations(self.store),
             self.store.state_get("media_associations", "confirmed", {}) or {})
         report = (self.pipeline.query("episode_report") or {}).get("series", {})
         items = []
@@ -153,16 +153,101 @@ class FollowMixin(ServiceBase):
             "share_checked": False, "dedup_checked": False,
         }
 
+    def scan_existing_subscription_folder(self, subscription_id: int,
+                                          provider: str, cid: str) -> dict[str, Any]:
+        """User-selected folder inventory, not a saved destination or a transfer.
+
+        Keep its resume cursor separate from the configured library scan. The
+        selected folder's title is only a *candidate* for this show; individual
+        remote file identities require explicit selection and live verification.
+        """
+        from ..media import season_of
+
+        item = self.store.subscription(subscription_id)
+        if not item:
+            raise NotFoundError("该订阅不存在")
+        if not item.get("tmdbid"):
+            raise ValueError("请先选择正确的 TMDB 作品，再关联已有视频")
+        if provider not in ("p115", "aliyun") or not isinstance(cid, str) or len(cid) > 128:
+            raise ValueError("请选择有效的网盘和文件夹")
+        if provider == "p115":
+            if not cid.isascii() or not cid.isdecimal() or cid == "0":
+                raise ValueError("请选择 115 网盘中的具体影视文件夹，不能选根目录")
+        elif cid in ("0", "root") or not cid.isascii() or not cid.replace("_", "").replace("-", "").isalnum():
+            raise ValueError("请选择阿里云盘资源库中的具体影视文件夹，不能选根目录")
+
+        storage = self.pipeline.reg.get_provider("storage", provider)
+        if not storage.ready():
+            raise ValueError("网盘尚未登录，请在设置中连接后选择")
+        with self.pipeline.scope():
+            listing = storage.browse(cid, 0, 1)
+        nodes = listing.get("path") or []
+        if not nodes or str(nodes[-1].get("id")) != cid:
+            raise ConflictError("选中目录的实际路径无法核验，请重新选择")
+        drive_id = str(storage.client.drive_id) if provider == "aliyun" else "115"
+        if provider == "aliyun" and str(listing.get("drive_id")) != drive_id:
+            raise ConflictError("阿里云盘资源库发生变化，请刷新后重新选择")
+        path = " / ".join(str(node.get("name") or "") for node in nodes
+                          if str(node.get("id")) not in ("0", "root"))
+        # Root folder names may carry "Season 02", even if video names only
+        # contain "41 4K.mp4". This preserves the actual season boundary.
+        folder_season = next((s for node in reversed(nodes) if
+                              (s := season_of(str(node.get("name") or ""))) is not None), None)
+
+        key = str(subscription_id)
+        scopes = self.store.state_get("subscription_folder_scan", "scopes", {}) or {}
+        old = scopes.get(key) or {}
+        same = (old.get("provider") == provider and old.get("cid") == cid
+                and old.get("drive_id") == drive_id)
+        scan_cfg = {"save_dirs": {"所选文件夹": f"aliyun:{cid}" if provider == "aliyun" else cid},
+                    "defaults": {"storage": provider, "save_to": "所选文件夹"},
+                    "sources": []}
+        snapshot, progress = library_scan_progress.step(
+            scan_cfg, lambda name: self.pipeline.reg.get_provider("storage", name),
+            cursor=old.get("cursor") if same else None)
+        if not snapshot["scanned_roots"] and not snapshot["has_more"]:
+            raise ValueError("无法读取所选文件夹：" + ("；".join(snapshot["errors"][:2]) or "请检查目录权限"))
+        matched, skipped = [], 0
+        for row in progress["records"]:
+            # Ignore internal staging, unrelated seasons and conflicting work IDs.
+            if any(str(part).startswith(".reelay-") for part in row.get("parents") or []):
+                skipped += 1
+                continue
+            ep = row.get("episode")
+            explicit_season = season_of(row["name"])
+            season = explicit_season or next(
+                (s for part in reversed(row.get("parents") or []) if
+                 (s := season_of(part)) is not None), folder_season or 1)
+            if (type(ep) is not int or ep <= 0 or season != item["season"]
+                    or (row.get("tmdbid") and row["tmdbid"] != item["tmdbid"])):
+                skipped += 1
+                continue
+            matched.append({**row, "title": item["title"], "media_type": "tv",
+                            "season": season, "alias": "手选文件夹",
+                            "parents": [*[node.get("name", "") for node in nodes
+                                           if str(node.get("id")) not in ("0", "root")],
+                                        *(row.get("parents") or [])]})
+        scopes[key] = {"provider": provider, "cid": cid, "drive_id": drive_id,
+                       "path": path, "snapshot": snapshot,
+                       "cursor": progress if snapshot["has_more"] else None,
+                       "records": matched, "skipped": skipped}
+        self.store.state_set("subscription_folder_scan", "scopes", scopes)
+        return {"ok": True, "provider": provider, "path": path,
+                "file_count": snapshot["file_count"], "eligible": len(matched),
+                "skipped": skipped, "complete": snapshot["complete"],
+                "has_more": snapshot["has_more"], "errors": snapshot["errors"]}
+
     def existing_subscription_candidates(self, subscription_id: int, *, offset: int = 0) -> dict[str, Any]:
         """Only suggest strongly named historical files; never move or mark transfers."""
         item = self.store.subscription(subscription_id)
         if not item:
             raise NotFoundError("该订阅不存在")
-        scanned = self.store.state_get("library_scan", "files", []) or []
+        scanned = existing_media.scan_observations(self.store)
         found = existing_media.candidates_for_subscription(scanned, item, limit=10000)
         if not 0 <= offset <= len(found):
             raise ValueError("分页偏移量无效")
         bound = self.store.state_get("media_associations", "confirmed", {}) or {}
+        folder = (self.store.state_get("subscription_folder_scan", "scopes", {}) or {}).get(str(subscription_id))
         return {"items": [{
             "file_key": existing_media.record_key(row), "provider": row["provider"],
             "alias": row["alias"], "drive_id": row["drive_id"], "name": row["name"],
@@ -172,8 +257,10 @@ class FollowMixin(ServiceBase):
             "associated": existing_media.same_observed_file(bound.get(existing_media.record_key(row), {}), row),
         } for row in found[offset:offset + 50]], "total": len(found),
             "next_offset": offset + 50 if offset + 50 < len(found) else None,
-            "scan_complete": bool(
-            (self.store.state_get("library_scan", "snapshot") or {}).get("complete")),
+            "scan_complete": bool((folder or {}).get("snapshot", {}).get("complete")
+                                  if folder else (self.store.state_get("library_scan", "snapshot") or {}).get("complete")),
+            "folder": ({key: folder.get(key) for key in
+                        ("provider", "cid", "path", "drive_id", "skipped", "snapshot")} if folder else None),
             "subscription": {"id": item["id"], "title": item["title"], "season": item["season"],
                              "tmdbid": item.get("tmdbid")}}
 
@@ -191,7 +278,7 @@ class FollowMixin(ServiceBase):
             raise ValueError("需要先为订阅匹配正确的 TMDB 作品，才能关联历史文件")
         if not file_keys or len(file_keys) > 50 or len(set(file_keys)) != len(file_keys):
             raise ValueError("请选择 1–50 个不重复的历史文件")
-        records = self.store.state_get("library_scan", "files", []) or []
+        records = existing_media.scan_observations(self.store)
         candidates = {existing_media.record_key(row): row
                       for row in existing_media.candidates_for_subscription(records, item, limit=10000)}
         if not set(file_keys).issubset(candidates):
