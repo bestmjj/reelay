@@ -118,7 +118,18 @@ export interface IExistingPreview {
   total: number;
   next_offset: number | null;
   scan_complete: boolean;
+  folder?: {
+    provider: 'p115' | 'aliyun'; cid: string; path: string; drive_id: string;
+    skipped: number; snapshot: {
+      complete: boolean; has_more: boolean; file_count: number; errors: string[];
+    };
+  } | null;
   subscription: { id: number; title: string; season: number; tmdbid: number | null };
+}
+export interface IFolderScanResult {
+  ok: boolean; provider: 'p115' | 'aliyun'; path: string;
+  file_count: number; eligible: number; skipped: number;
+  complete: boolean; has_more: boolean; errors: string[];
 }
 
 export const subscriptionApi = {
@@ -133,6 +144,8 @@ export const subscriptionApi = {
   addFromTask: (taskId: string) => post<IAddSubscriptionResp>(`subscriptions/from-task/${taskId}`),
   existing: (id: number, offset = 0) =>
     get<IExistingPreview>(`subscriptions/existing?id=${id}&offset=${offset}`),
+  scanExistingFolder: (id: number, provider: 'p115' | 'aliyun', cid: string) =>
+    post<IFolderScanResult>('subscriptions/existing/scan-folder', { id, provider, cid }),
   associateExisting: (id: number, fileKeys: string[]) =>
     post<{ ok: boolean; associated: number; note: string }>('subscriptions/existing/associate', { id, file_keys: fileKeys }),
   setStart: (id: number, startEpisode: number | null) =>
