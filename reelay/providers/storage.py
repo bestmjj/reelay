@@ -442,9 +442,9 @@ class P115Storage(ShareStorage):
             return {'status': 'available', **extra}
         return {**describe_share(P115ShareFileSystem(client, parsed.share_code, parsed.receive_code), parsed), **extra}
 
-    def browse(self, cid: str, offset: int = 0, limit: int = 100) -> dict[str, Any]:
-        """管理台选目录：列出 cid 下的子目录（分页）与面包屑。"""
-        return browse_dirs(self._auth, cid, offset, limit)
+    def browse(self, cid: str, offset: int = 0, limit: int = 100, *, include_files: bool = False) -> dict[str, Any]:
+        """目录选择器仅列目录；文件管理页也列出普通文件。"""
+        return browse_dirs(self._auth, cid, offset, limit, include_files=include_files)
 
     def _require_client(self) -> None:
         if self._cookie_client() is None:
@@ -604,8 +604,8 @@ class P115Storage(ShareStorage):
         return out
 
 
-def browse_dirs(credentials, cid: str, offset: int = 0, limit: int = 100) -> dict:
-    """只读列出 cid 下的子目录：保留长 ID、显式分页，错误不伪装成空目录。"""
+def browse_dirs(credentials, cid: str, offset: int = 0, limit: int = 100, *, include_files: bool = False) -> dict:
+    """只读按原分页列出目录；管理工具可要求同时显示普通文件。"""
     from p115client import check_response
     mode = 'oauth' if credentials.has_oauth else 'cookie'
     try:
@@ -646,13 +646,16 @@ def browse_dirs(credentials, cid: str, offset: int = 0, limit: int = 100) -> dic
                 is_dir = not item.get('fid')
                 fid, name = item.get('cid'), item.get('n')
                 pid = item.get('pid', cid)
-            if is_dir:
-                if fid is None or not str(fid).isascii() or not str(fid).isdecimal():
-                    raise StorageBrowseError('invalid_response', '115 返回了无效的目录 ID。', 502)
-                items.append({'id': str(fid), 'name': str(name or ''), 'pid': str(pid)})
+            if is_dir or include_files:
+                if not str(fid or '').isascii() or not str(fid or '').isdecimal():
+                    raise StorageBrowseError('invalid_response', '115 返回了无效的文件或目录 ID。', 502)
+                size = item.get('s', item.get('file_size', item.get('size')))
+                size = int(size) if isinstance(size, (int, str)) and str(size).isdecimal() else None
+                items.append({'id': str(fid), 'name': str(name or ''), 'pid': str(pid),
+                              'is_dir': is_dir, 'size': None if is_dir else size})
         total = int(result.get('count', offset + len(data)))
         next_offset = offset + len(data) if offset + len(data) < total and data else None
-        return {'items': sorted(items, key=lambda x: x['name']), 'cid': cid, 'path': breadcrumbs,
+        return {'items': sorted(items, key=lambda x: (not x['is_dir'], x['name'].casefold())), 'cid': cid, 'path': breadcrumbs,
                 'next_offset': next_offset, 'total_entries': total, 'via': mode}
     except StorageBrowseError:
         raise
