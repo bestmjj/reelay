@@ -218,6 +218,52 @@ class TelegramUserbotSource:
         return out
 
 
+    async def search_messages(self, target: str, title: str, limit: int = 5) -> list[dict]:
+        """Read-only subscribed-show examples from an already authorized channel.
+
+        This is intentionally separate from discover_subscriptions: results
+        NEVER enter accept_task, dedup claims or the transfer queue. Unlike
+        automatic discovery, simulation may inspect older channel history.
+        """
+        if not (self._client and self._authorized and self._client.is_connected()):
+            raise RuntimeError("Telegram 监听会话未连接，无法查询频道历史")
+        target = target.strip()
+        if target.casefold() not in {name.casefold() for name in self._targets}:
+            raise ValueError("只能查询已经配置的监听来源")
+        if not title.strip() or len(title) > 100:
+            raise ValueError("订阅片名不合法")
+        limit = min(max(int(limit), 1), 5)
+        entity = await self._client.get_entity(
+            int(target) if target.lstrip("-").isdigit() else target)
+        found: list[dict] = []
+        seen: set[int] = set()
+
+        def add(msg) -> bool:
+            raw_text = getattr(msg, "raw_text", "") or ""
+            if not raw_text or getattr(msg, "action", None):
+                return False
+            from ..core.parse_rules import parse_share_url
+            urls = _extract_urls(msg)
+            if (not discovery.contains_title(raw_text, title)
+                    or not parse_share_url(raw_text, urls)[0]
+                    or int(msg.id) in seen):
+                return False
+            seen.add(int(msg.id))
+            found.append({"text": raw_text, "urls": urls, "msg_id": str(msg.id),
+                          "source": target})
+            return len(found) >= limit
+
+        # Telegram's search index can omit spellings used in Chinese titles.
+        # Fetch at most 60 search results and, if none matched, 80 recent posts.
+        async for msg in self._client.iter_messages(entity, search=title, limit=60):
+            if add(msg):
+                return found
+        if not found:
+            async for msg in self._client.iter_messages(entity, limit=80):
+                if add(msg):
+                    break
+        return found
+
     async def discover_subscriptions(self, emit: EmitFn, active: list[dict],
                                      load: Callable[[str, str, dict], dict],
                                      save: Callable[[str, str, dict], None]) -> dict:
