@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -29,9 +30,72 @@ class AliyunWebTest(WebCase):
                 "refresh_token": "bad-refresh-token-123456"})
         self.assertEqual(failed.status_code, 409, failed.text)
         self.assertEqual(secret_store.get("aliyun_refresh_token"), "rotated-manual-token-123456")
+        self.assertEqual(self.client.get("/api/dashboard").json()["connections"]["aliyun"]["status"], "active")
         response = self.client.delete("/api/authaliyun/token")
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["status"]["configured"])
+        self.assertEqual(self.client.get("/api/dashboard").json()["connections"]["aliyun"]["status"],
+                         "not_configured")
+
+    def test_ping_success_reaches_dashboard_and_survives_a_status_read(self):
+        """Regression: the login card was active while Dashboard stayed unverified."""
+        secret_store.current().update({"aliyun_refresh_token": "preexisting-refresh-token-123"})
+        before = self.client.get("/api/dashboard").json()["connections"]["aliyun"]
+        self.assertEqual(before["status"], "unverified")
+        with patch("reelay.core.authaliyun.AliyunAuth._exchange",
+                   return_value=("rotated-after-ping-12345", "drive123")):
+            ping = self.client.post("/api/authaliyun/ping")
+        self.assertEqual(ping.status_code, 200, ping.text)
+        self.assertEqual(ping.json()["state"], "active")
+        dashboard = self.client.get("/api/dashboard").json()
+        self.assertEqual(dashboard["connections"]["aliyun"]["status"], "active")
+        self.assertEqual(dashboard["runtime"]["aliyun"]["status"], "active")
+        self.assertEqual(dashboard["runtime"]["aliyun"]["check_interval"], 3600)
+        self.assertNotIn("rotated-after-ping-12345", json.dumps(dashboard))
+        self.assertEqual(secret_store.get("aliyun_refresh_token"), "rotated-after-ping-12345")
+
+    def test_ping_expired_or_network_error_reaches_dashboard(self):
+        secret_store.current().update({"aliyun_refresh_token": "saved-refresh-token-12345"})
+        for exception, expected in (
+            (AliyunAPIError(401, "InvalidToken"), "expired"),
+            (ConnectionError("temporary failure"), "error"),
+        ):
+            with self.subTest(expected=expected):
+                with patch("reelay.core.authaliyun.AliyunAuth._exchange", side_effect=exception):
+                    response = self.client.post("/api/authaliyun/ping")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["state"], expected)
+                dashboard = self.client.get("/api/dashboard").json()["connections"]["aliyun"]
+                self.assertEqual(dashboard["status"], expected)
+                self.assertEqual(secret_store.get("aliyun_refresh_token"), "saved-refresh-token-12345")
+
+    def test_aliyun_probe_expires_to_stale_then_clears(self):
+        secret_store.current().update({"aliyun_refresh_token": "refresh-token-123456789"})
+        with patch("reelay.core.authaliyun.AliyunAuth._exchange",
+                   return_value=("refresh-token-rotated-123", "drive123")):
+            self.assertEqual(self.client.post("/api/authaliyun/ping").json()["state"], "active")
+        store = self.app.state.store
+        # No continuously running probe: a successful observation is not immortal.
+        with store._lock, store._conn:
+            store._conn.execute(
+                "UPDATE runtime_health SET updated_at=? WHERE component='aliyun'",
+                (time.time() - 7201,),
+            )
+        self.assertEqual(self.client.get("/api/dashboard").json()["connections"]["aliyun"]["status"], "stale")
+        self.assertEqual(self.client.delete("/api/authaliyun/token").status_code, 200)
+        dashboard = self.client.get("/api/dashboard").json()["connections"]["aliyun"]
+        self.assertEqual((dashboard["configured"], dashboard["status"]), (False, "not_configured"))
+        self.assertEqual(store.health_status()["aliyun"]["status"], "not_configured")
+
+    def test_credential_removed_by_other_settings_route_never_looks_connected(self):
+        secret_store.current().update({"aliyun_refresh_token": "refresh-token-123456789"})
+        with patch("reelay.core.authaliyun.AliyunAuth._exchange",
+                   return_value=("refresh-token-rotated-123", "drive123")):
+            self.client.post("/api/authaliyun/ping")
+        # Generic secret management also allows clearing the token.
+        secret_store.current().update({"aliyun_refresh_token": None})
+        self.assertEqual(self.client.get("/api/dashboard").json()["connections"]["aliyun"]["status"],
+                         "not_configured")
 
     def test_qr_image_scan_confirm_and_replay(self):
         code = base64.b64encode(json.dumps({
@@ -57,6 +121,7 @@ class AliyunWebTest(WebCase):
             self.assertTrue(self.client.post("/api/authaliyun/qr/status", json={"uid": uid}).json()["authenticated"])
         self.assertEqual(secret_store.get("aliyun_refresh_token"), "qr-rotated-token-123456")
         self.assertNotIn("qr-rotated-token", confirmed.text)
+        self.assertEqual(self.client.get("/api/dashboard").json()["connections"]["aliyun"]["status"], "active")
 
     def test_restricted_management_endpoints_require_login(self):
         secret_store.current().update({"web_password": "test-password-123"})
