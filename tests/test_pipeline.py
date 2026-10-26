@@ -937,6 +937,20 @@ class AliyunDirectoryResolution(PipelineCase):
         with self.assertRaisesRegex(ValueError, "属于阿里云盘"):
             pipeline._resolve_directory(other)
 
+    def test_aliyun_never_uses_numeric_115_alias_even_root(self):
+        pipeline = self.pipeline({"save_dirs": {
+            "默认": "0", "115影片": "123456", "阿里根目录": "aliyun:0"}})
+        for alias in ("默认", "115影片"):
+            with self.subTest(alias=alias):
+                ctx = message()
+                ctx.source_rule = {"save_to": alias, "storage": "aliyun"}
+                with self.assertRaisesRegex(ValueError, "属于 115"):
+                    pipeline._resolve_directory(ctx)
+        valid = message()
+        valid.source_rule = {"save_to": "阿里根目录", "storage": "aliyun"}
+        pipeline._resolve_directory(valid)
+        self.assertEqual(valid.save_dir_cid, "0")
+
 
 if __name__ == "__main__":
     unittest.main()
