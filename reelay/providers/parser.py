@@ -22,7 +22,7 @@ import time
 from collections import OrderedDict
 
 from ..core import ai, parse_rules, release, runtime
-from ..core.parse_rules import AD_KEYWORDS, parse_115_url, prefilter_reason, regex_fields
+from ..core.parse_rules import AD_KEYWORDS, parse_share_url, share_provider, prefilter_reason, regex_fields
 from ..core.ai import response_format
 from ..core.contracts import ParsedResource, PipelineContext
 from ..core.registry import register
@@ -31,7 +31,7 @@ from ..core.validation import MEDIA_SCHEMA, validate_resource
 
 def _regex_parse(ctx: PipelineContext) -> ParsedResource:
     text = ctx.raw.text or ""
-    share_url, share_code, recv = parse_115_url(text, ctx.raw.urls)
+    share_url, share_code, recv = parse_share_url(text, ctx.raw.urls)
 
     is_ad = any(kw in text for kw in AD_KEYWORDS) and share_code is None
     is_media = share_code is not None
@@ -57,7 +57,7 @@ def _regex_parse(ctx: PipelineContext) -> ParsedResource:
         share_code=share_code,
         receive_code=recv,
         reason=reason,
-        raw_fields={"share_url": share_url},
+        raw_fields={"share_url": share_url, "share_provider": share_provider(share_url)},
     )
 
 
@@ -170,7 +170,7 @@ class LLMParser(ai.UsesAI):
 
     async def parse(self, ctx: PipelineContext) -> ParsedResource:
         # 链接始终用确定性代码抽，不依赖 LLM
-        share_url, share_code, recv = parse_115_url(ctx.raw.text, ctx.raw.urls)
+        share_url, share_code, recv = parse_share_url(ctx.raw.text, ctx.raw.urls)
 
         ctx.ns("parse").clear()
         request = ctx.meta.pop("parse_request", {})
@@ -223,7 +223,7 @@ class LLMParser(ai.UsesAI):
             share_code=share_code,          # 以确定性结果为准
             receive_code=recv,
             reason=data.get("reason") or "LLM 解析",
-            raw_fields={"share_url": share_url, "llm_raw": data},
+            raw_fields={"share_url": share_url, "share_provider": share_provider(share_url), "llm_raw": data},
         )
 
     def _fallback(self, ctx: PipelineContext, category: str) -> ParsedResource:
