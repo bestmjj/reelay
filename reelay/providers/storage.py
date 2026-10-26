@@ -556,6 +556,11 @@ class P115Storage(ShareStorage):
             return {'status': 'available', **extra}
         return {**describe_share(P115ShareFileSystem(client, parsed.share_code, parsed.receive_code), parsed), **extra}
 
+    def share_folder_choices(self, parsed) -> list[dict]:
+        """List source-version folders read-only; never write to the cloud."""
+        from types import SimpleNamespace
+        return share_folder_choices(self._list_share_sync(SimpleNamespace(parsed=parsed)))
+
     def browse(self, cid: str, offset: int = 0, limit: int = 100, *, include_files: bool = False) -> dict[str, Any]:
         """目录选择器仅列目录；文件管理页也列出普通文件。"""
         return browse_dirs(self._auth, cid, offset, limit, include_files=include_files)
