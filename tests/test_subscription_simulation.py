@@ -110,6 +110,18 @@ class SubscriptionSimulationWebTests(WebCase):
         self.assertEqual(blocked.json()["status"], "blocked")
         self.assertEqual(self.app.state.store.counts_by_state(), {})
 
+    def test_subscribe_start_api_changes_only_future_episode_floor(self):
+        sub = self.subscribe()
+        response = self.client.post("/api/subscriptions/start", json={
+            "id": sub["id"], "start_episode": 100})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["start_episode"], 100)
+        self.assertEqual(self.client.get("/api/subscriptions").json()["items"][0]["start_episode"], 100)
+        invalid = self.client.post("/api/subscriptions/start", json={
+            "id": sub["id"], "start_episode": 0})
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(self.app.state.store.subscription(sub["id"])["start_episode"], 100)
+
     def test_discovery_health_is_visible_in_subscription_list(self):
         sub = self.subscribe()
         key = discovery.state_key("@shareAliyun", sub)
