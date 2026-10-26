@@ -30,12 +30,15 @@ CONFLICT_STRATEGIES = {"manual", "skip", "suffix", "upgrade"}
 DEFAULTS: dict[str, Any] = {
     "naming": dict(DEFAULT_NAMING),
     "conflict": "manual",
+    "no_delete": True,  # Never remove or overwrite user media during sorting.
     "layout": "category",
     "type_dirs": dict(DEFAULT_TYPE_DIRS),
 }
 
 
 def normalize(section: dict) -> None:
+    if type(section.get("no_delete", True)) is not bool:
+        raise ValueError("plugins.organizer.no_delete 必须是布尔值")
     if section.get("conflict") not in CONFLICT_STRATEGIES:
         raise ValueError("plugins.organizer.conflict 必须为 manual、skip、suffix 或 upgrade")
     naming = section.get("naming")
