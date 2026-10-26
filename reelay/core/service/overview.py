@@ -93,6 +93,10 @@ class OverviewMixin(ServiceBase):
         for key, conn in connections.items():
             conn["status"] = "unverified" if conn["configured"] else "not_configured"
             observation = health.get(observed_as.get(key, key))
+            # A deleted Aliyun credential must never appear connected solely
+            # because a previously successful probe remains in runtime_health.
+            if key == "aliyun" and not conn["configured"]:
+                continue
             if observation and observation.get("status") != "unknown":
                 stale = observation["stale"]
                 if observation.get("check_interval"):  # 定时探活：超过两个探活周期没有新结果才算过期
