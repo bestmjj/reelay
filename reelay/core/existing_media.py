@@ -27,15 +27,18 @@ def candidates(records: list[dict], parsed, tmdb_meta: dict | None,
                 or record.get("media_type") not in ("tv", "anime")):
             continue
         name = tmdb.normalize(record.get("title") or "")
-        if not name:
-            continue
         observed_id = record.get("tmdbid")
         trusted_id = work.get("tmdb")
+        # A TMDB ID in a scanned folder is stronger than a filename; renamed
+        # releases may not include the canonical show title at all.
         if observed_id and trusted_id:
             if trusted_id != f"tv:{observed_id}":
                 continue
-            strong.append(record)
-        elif name == work["title"]:
+            if record.get("year") and work.get("year") and record["year"] != work["year"]:
+                ambiguous.append(record)
+            else:
+                strong.append(record)
+        elif name and name == work["title"]:
             if record.get("year") and work.get("year") and record["year"] != work["year"]:
                 continue
             if record.get("year") and work.get("year"):
