@@ -48,6 +48,24 @@ def _item(data: dict) -> dict:
             "size": data.get("size"), "sha1": digest if algorithm == "sha1" else None}
 
 
+def _resource_drive_id(payload: dict) -> str:
+    """Choose the non-backup (resource/data) drive; never silently use backup.
+
+    Some older accounts only expose default_drive_id. Accept that legacy ID
+    only when it is not explicitly identified as the backup drive.
+    """
+    resource = payload.get("resource_drive_id")
+    if isinstance(resource, str) and resource.strip():
+        return resource
+    default = payload.get("default_drive_id")
+    backup = payload.get("backup_drive_id")
+    if isinstance(default, str) and default.strip() and (not backup or default != backup):
+        return default
+    raise ValueError(
+        "阿里云盘未返回资源库（数据盘）ID，拒绝自动使用备份盘；请核实账号盘位"
+    )
+
+
 class AliyunAPIError(RuntimeError):
     """Structured upstream error; do not log response bodies containing credentials."""
 
@@ -110,9 +128,9 @@ class AliyunClient:
                 return
             result = self._send(TOKEN_API, {"grant_type": "refresh_token", "refresh_token": saved})
             token = result.get("access_token")
-            drive = result.get("default_drive_id") or result.get("resource_drive_id")
-            if not token or not drive:
-                raise RuntimeError("阿里云盘令牌刷新缺少 access_token / drive_id")
+            if not token:
+                raise RuntimeError("阿里云盘令牌刷新缺少 access_token")
+            drive = _resource_drive_id(result)
             # Save rotated refresh token before using access_token, so restarts
             # and other processes do not continue using the obsolete credential.
             replacement = result.get("refresh_token") or saved
@@ -358,9 +376,17 @@ class AliyunStorage(ShareStorage):
         selection = await self.select(ctx, listing)
         return await run_blocking(self._stage, ctx, selection)
 
+    def _assert_manifest_drive(self, manifest: dict) -> None:
+        saved = manifest.get("drive_id")
+        if not saved:
+            # Legacy manifests were produced before a resource-drive selection
+            # was persisted. Reading/writing them on another disk is unsafe.
+            raise NeedsManual("旧转存清单缺少目标 Drive ID，需人工核对原网盘后恢复")
+        if str(saved) != self.client.drive_id:
+            raise NeedsManual("任务原目标盘与当前资源库不同，禁止跨盘恢复、重复复制或删除")
+
     def _actual(self, manifest: dict) -> list[dict]:
-        if manifest.get("drive_id") and manifest["drive_id"] != self.client.drive_id:
-            raise NeedsManual("网盘账号发生变化，不能在新账号上恢复旧任务，请重新登录原账号")
+        self._assert_manifest_drive(manifest)
         return self.client.children(manifest["staging_cid"])
 
     def _verify(self, manifest: dict) -> dict:
@@ -413,6 +439,7 @@ class AliyunStorage(ShareStorage):
         return await run_blocking(verify)
 
     def _remove_stage(self, manifest: dict, *, must_be_empty: bool) -> None:
+        self._assert_manifest_drive(manifest)
         parent = manifest["to_cid"]
         stage = str(manifest["staging_cid"])
         found = [x for x in self.client.children(parent) if x["id"] == stage]
