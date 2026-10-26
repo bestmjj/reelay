@@ -1,8 +1,9 @@
-import { Ban, BellPlus, BellRing, CircleAlert, Flag, FlaskConical, Lightbulb, Loader2, RefreshCw, Search, Trash2, Undo2 } from 'lucide-react';
+import { Ban, BellPlus, BellRing, CircleAlert, Flag, FlaskConical, FolderSearch, Lightbulb, Loader2, RefreshCw, Search, Trash2, Undo2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { subscriptionApi, type IExistingPreview, type IIgnoredWork, type IResolveResp, type IShowCandidate, type ISubscription, type ISubscriptionSimulation } from '@/api/subscriptions';
+import DirectoryPicker, { type PickedDir } from '@/components/DirectoryPicker';
 import { ErrorState } from '@/components/app/ErrorState';
 import { MediaCover } from '@/components/app/MediaCover';
 import { Page } from '@/components/app/Page';
@@ -145,6 +146,7 @@ export default function SubscriptionsPage() {
   const [existingData, setExistingData] = useState<IExistingPreview | null>(null);
   const [existingOffset, setExistingOffset] = useState(0);
   const [existingBusy, setExistingBusy] = useState(false);
+  const [existingPicker, setExistingPicker] = useState(false);
   const [existingSelected, setExistingSelected] = useState<string[]>([]);
   const [startOnAdd, setStartOnAdd] = useState('');
   const [startItem, setStartItem] = useState<ISubscription | null>(null);
@@ -246,6 +248,28 @@ export default function SubscriptionsPage() {
       setExistingOffset(offset);
     } catch (e) {
       toast.error(errorMessage(e, '读取网盘历史文件失败'));
+    } finally {
+      setExistingBusy(false);
+    }
+  };
+  const scanSelectedFolder = async (picked: PickedDir) => {
+    if (!existingItem || existingBusy) return;
+    if (picked.id === '0' || picked.id === 'root') {
+      toast.error('请进入保存旧视频的具体文件夹，不要扫描整个网盘根目录');
+      return;
+    }
+    setExistingBusy(true);
+    setExistingPicker(false);
+    setExistingSelected([]);
+    try {
+      const scan = await subscriptionApi.scanExistingFolder(existingItem.id, picked.provider, picked.id);
+      setExistingData(await subscriptionApi.existing(existingItem.id, 0));
+      setExistingOffset(0);
+      toast.success(`已检查 ${scan.file_count} 个视频，其中 ${scan.eligible} 个有可识别集号${scan.has_more ? '；目录较多，可继续扫描' : ''}`);
+      if (scan.errors.length) toast.warning(scan.errors[0]);
+      subs.reload();
+    } catch (e) {
+      toast.error(errorMessage(e, '扫描所选网盘文件夹失败'));
     } finally {
       setExistingBusy(false);
     }
@@ -490,21 +514,48 @@ export default function SubscriptionsPage() {
         </div>
       </div>
       <Dialog open={Boolean(existingItem)} onOpenChange={(open) => {
-        if (!open && !existingBusy) { setExistingItem(null); setExistingData(null); setExistingSelected([]); }
+        if (!open && !existingBusy && !existingPicker) {
+          setExistingItem(null); setExistingData(null); setExistingSelected([]);
+        }
       }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>关联已有文件 · {existingItem?.title} 第 {existingItem?.season} 季</DialogTitle>
             <DialogDescription>
-              从当前网盘扫描索引中找出可能属于这部剧的历史文件。
-              选中文件并确认后，只核实其所在网盘、文件 ID 和实际属性，不移动、不覆盖、不删除、不重复转存。
+              直接从阿里云盘或 115 浏览并选择已有视频的文件夹，无需去设置保存目录。
+              扫描后勾选确实属于这部作品的集数，确认只核验文件，不移动、覆盖或转存。
             </DialogDescription>
           </DialogHeader>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" disabled={existingBusy} onClick={() => setExistingPicker(true)}>
+              <FolderSearch />选择已有视频文件夹
+            </Button>
+            {existingData?.folder?.snapshot.has_more ? (
+              <Button variant="outline" disabled={existingBusy || !existingItem}
+                onClick={() => existingItem && existingData?.folder &&
+                  void scanSelectedFolder({ id: existingData.folder.cid, name: existingData.folder.path,
+                    path: existingData.folder.path, provider: existingData.folder.provider })}>
+                <RefreshCw />继续扫描
+              </Button>
+            ) : null}
+          </div>
+          {existingData?.folder ? (
+            <p className="text-xs leading-5 text-muted-foreground">
+              已选择 {existingData.folder.provider === 'aliyun' ? '阿里云盘' : '115'} / {existingData.folder.path}；
+              累计扫描 {existingData.folder.snapshot.file_count} 个视频，
+              {existingData.folder.skipped} 个无法确认集号或不属于本季。
+              {existingData.folder.snapshot.has_more ? '尚有目录未扫描。' : ''}
+              {existingData.folder.snapshot.errors?.map((message, i) =>
+                <span key={i} className="block text-destructive">{message}</span>)}
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">还没有选择旧视频目录；您可以直接点击上方按钮浏览网盘。</p>
+          )}
           {existingData ? (
             <div className="space-y-2">
               <p className="text-xs text-muted-foreground">
-                共 {existingData.total} 个候选；当前显示第 {existingOffset + 1}–{existingOffset + existingData.items.length} 个。
-                {existingData.scan_complete ? '' : ' 网盘扫描未完成，候选可能不完整。'}
+                共 {existingData.total} 个候选；{existingData.items.length ? `本页显示第 ${existingOffset + 1}–${existingOffset + existingData.items.length} 个。` : '暂无匹配集数。'}
+                {existingData.scan_complete ? '' : ' 索引可能不完整。'}
               </p>
               <div className="max-h-64 space-y-1 overflow-auto rounded-lg border border-border p-2">
                 {existingData.items.map((file) => {
@@ -525,7 +576,7 @@ export default function SubscriptionsPage() {
                   );
                 })}
                 {!existingData.items.length ? <p className="p-3 text-sm text-muted-foreground">
-                  暂未从索引中识别到这部剧。请先扫描包含原视频的保存目录，或核对视频命名。
+                  暂无可关联文件。请点「选择已有视频文件夹」定位到《{existingItem?.title}》实际存放的目录，再扫描。
                 </p> : null}
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -556,6 +607,10 @@ export default function SubscriptionsPage() {
           ) : <p className="text-sm text-muted-foreground">{existingBusy ? '读取索引中…' : '没有可显示的候选文件'}</p>}
         </DialogContent>
       </Dialog>
+      <DirectoryPicker open={existingPicker && Boolean(existingItem)}
+        initialCid="0" initialProvider="aliyun"
+        onOpenChange={setExistingPicker}
+        onSelect={(folder) => { void scanSelectedFolder(folder); }} />
       <Dialog open={Boolean(startItem)} onOpenChange={(open) => { if (!open && !startBusy) setStartItem(null); }}>
         <DialogContent>
           <DialogHeader>
