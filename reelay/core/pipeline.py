@@ -596,11 +596,20 @@ class Pipeline:
                         ctx.log(f"已实时核验网盘原有文件，跳过 {len(confirmed)} 个重复季集，不记为 Reelay 已转存")
                 declared = {tuple(pair) for pair in ctx.episode_pairs()}
                 if declared and already.issuperset(declared):
-                    self.store.release_resource(ctx.task_id)
-                    ctx.state = TaskState.SKIPPED
-                    ctx.log("转存前去重：这条消息声明的全部季集已存在于当前网盘；不会覆盖或重复转存")
-                    self.store.save_task(ctx)
-                    return
+                    if ctx.source_rule.get("episodes_from", "share") == "message":
+                        # A message-scoped subscription explicitly requests only
+                        # these episodes, so the trusted drive ledger is enough
+                        # to skip before any share access.
+                        self.store.release_resource(ctx.task_id)
+                        ctx.state = TaskState.SKIPPED
+                        ctx.log("转存前去重：这条消息声明的全部季集已存在于当前网盘；不会覆盖或重复转存")
+                        self.store.save_task(ctx)
+                        return
+                    # In share-scoped mode the link can grow IN PLACE: a post
+                    # describing E105 may link a share now containing E106.
+                    # Enumerate its live contents and let storage.prepare
+                    # remove already-stored episodes instead of skipping early.
+                    ctx.log("消息标记的集数已存在，但分享可能新增剧集；继续读取分享清单，逐集安全去重")
             else:
                 ns["stored_episodes"] = []
             try:
