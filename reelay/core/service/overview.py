@@ -51,6 +51,13 @@ class OverviewMixin(ServiceBase):
             "alerts": self.store.active_alerts(),
             "recent": self._recent(),
             "deliveries": self.store.delivery_counts(),
+            # Historical failed deliveries remain failed after Bot reconnects.
+            # Show bounded per-recipient diagnostics instead of guessing the Bot is offline.
+            "failed_deliveries": [
+                {key: item[key] for key in ("id", "kind", "event", "target", "attempts",
+                                             "error", "updated_at")}
+                for item in self.store.list_deliveries(status="failed", limit=5)
+            ],
             "config_revision": self.pipeline.revision,
             "mode": "live" if live_running else ("not_running" if live_ready else "not_configured"),
             "version": __version__,
