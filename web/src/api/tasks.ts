@@ -6,6 +6,21 @@ import { get, patch, post, query } from './request';
 export type TaskEndpoint = 'approve' | 'reject' | 'retry' | 'reparse' | 'reorganize' | 'reconcile'
   | 'accept-partial' | 'abandon';
 
+export interface IShareFolderChoice {
+  folder_id: string;
+  path: string;
+  count: number;
+  episodes: number[][];
+  unrecognized: number;
+}
+
+export interface IShareFolderPreview {
+  folders: IShareFolderChoice[];
+  selected_folder_id: string | null;
+  saved_preference: boolean;
+  provider: string;
+}
+
 export interface ITaskFilters {
   /** 可传逗号分隔的多个状态。 */
   state?: string;
@@ -23,6 +38,10 @@ export interface IBatchResult {
 export const taskApi = {
   list: (filters: ITaskFilters = {}) => get<{ items: ITaskSummary[] }>(`tasks${query({ ...filters })}`),
   get: (taskId: string) => get<ITaskDetail>(`tasks/${taskId}`),
+  shareFolders: (taskId: string) =>
+    get<IShareFolderPreview>(`tasks/${taskId}/share-folders`),
+  chooseShareFolder: (taskId: string, folderId: string, remember = true) =>
+    post<IShareFolderPreview>(`tasks/${taskId}/share-folder`, { folder_id: folderId, remember }),
   act: (taskId: string, endpoint: TaskEndpoint, body?: unknown) =>
     post<{ ok: boolean }>(`tasks/${taskId}/${endpoint}`, body),
   /** 修正识别结果，返回更新后的详情。 */
