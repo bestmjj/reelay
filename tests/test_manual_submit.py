@@ -43,6 +43,35 @@ class PermalinkSubmissionTests(WebCase):
         self.assertTrue(ctx.raw.extra["manual_import"])
         self.assertEqual(ctx.source_rule["storage"], "aliyun")
 
+    def test_manual_single_episode_is_scoped_and_whole_season_requires_approval(self):
+        from unittest.mock import AsyncMock
+        from reelay.core.contracts import Decision, ParsedResource, TaskState
+        pipeline = self.app.state.pipeline
+        parser = pipeline.reg.get_provider("parser", "regex")
+        decider = pipeline.reg.get_provider("decision", "subscription")
+        for episodes, expected in (([100], TaskState.QUEUED),
+                                   (list(range(1, 101)), TaskState.PENDING_APPROVAL),
+                                   ([], TaskState.PENDING_APPROVAL)):
+            with self.subTest(episode_count=len(episodes)):
+                message = "测试剧 " + str(episodes) + " https://www.alipan.com/s/abc999"
+                if not episodes:
+                    message += " 合集"
+                response = self.client.post("/api/resources/submit", json={"text": message})
+                self.assertEqual(response.status_code, 200, response.text)
+                ctx = self.app.state.store.get_task(response.json()["task_id"])
+                parsed = ParsedResource(is_media=True, media_type="anime",
+                                        title="测试剧", year=2024, season=1,
+                                        episodes=episodes, share_code="abc999", confidence=0.98)
+                with patch.object(parser, "parse", new_callable=AsyncMock, return_value=parsed), \
+                        patch.object(pipeline, "run_hooks", new_callable=AsyncMock, return_value=True), \
+                        patch.object(decider, "decide", new_callable=AsyncMock, return_value=Decision.SAVE):
+                    asyncio.run(pipeline.process_received(ctx))
+                self.assertEqual(ctx.state, expected)
+                if len(episodes) == 1:
+                    self.assertEqual(ctx.source_rule.get("episodes_from"), "message")
+                else:
+                    self.assertTrue(any("禁止盲目转存整季" in line for line in ctx.trail))
+
     def test_unknown_and_private_channels_are_rejected_without_fetch(self):
         service = self.app.state.service
         with patch.object(service, "source_messages", new_callable=AsyncMock) as fetched:
