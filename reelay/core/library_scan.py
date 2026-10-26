@@ -109,6 +109,16 @@ def inventory(config: dict, get_provider: Callable[[str], object], *, now: Calla
                 truncated = True
                 break
             cid, parents, depth = pending.popleft()
+            if provider_name == "aliyun":
+                try:
+                    if str(provider.client.drive_id) != disk:
+                        errors.append(f"「{alias}」扫描期间阿里云盘资源库已切换，停止读取")
+                        truncated = True
+                        break
+                except Exception:
+                    errors.append(f"「{alias}」无法确认当前资源库，停止读取")
+                    truncated = True
+                    break
             folder_key = (provider_name, disk, cid)
             if folder_key in seen_folders:
                 # Nested aliases may overlap; physical files should be counted once.
