@@ -32,7 +32,7 @@ jobs:
       - name: Run end-to-end regression suite
         run: |
           mkdir -p test-results
-          python -m unittest -v tests.test_e2e_subscription_flows tests.test_manual_submit tests.test_subscription_discovery tests.test_subscription_simulation tests.test_existing_media tests.test_subscriptions tests.test_storage_files > test-results/api-e2e.log 2>&1 || { cat test-results/api-e2e.log; exit 1; }
+          python -m unittest -v tests.test_e2e_subscription_flows tests.test_manual_submit tests.test_subscription_discovery tests.test_subscription_simulation tests.test_subscription_progress tests.test_existing_media tests.test_subscriptions tests.test_storage_files > test-results/api-e2e.log 2>&1 || { cat test-results/api-e2e.log; exit 1; }
           cat test-results/api-e2e.log
       - uses: actions/upload-artifact@v4
         if: always()
