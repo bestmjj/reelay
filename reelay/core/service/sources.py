@@ -44,14 +44,40 @@ class SourceMixin(ServiceBase):
         This is NOT a direct cloud copy. The worker will run normal parser,
         provider routing, content dedup and duplicate-safe recovery first.
         """
-        import uuid
+        import hashlib
+        import re
+        from urllib.parse import urlsplit
         from ..contracts import RawMessage
         from ..parse_rules import parse_share_url
 
         text = ai.text_field(text, limit=12000, label="资源消息")
-        if not text or not parse_share_url(text, [])[0]:
-            raise ValueError("请粘贴包含阿里云盘或 115 分享链接的完整资源消息；只有 Telegram 消息地址还不能直接转存")
         configured = [rule["bot"] for rule in self.get_config().get("sources", [])]
+        urls: list[str] = []
+        # A Telegram permalink is not a cloud share. Retrieve exactly this
+        # post through the already authenticated listener, only if its channel
+        # is explicitly configured. Never fetch arbitrary t.me/c private IDs.
+        parsed_link = urlsplit(text.strip()) if text else None
+        telegram_id = None
+        if (parsed_link and parsed_link.scheme in ("https", "http")
+                and parsed_link.hostname in ("t.me", "www.t.me")):
+            match = re.fullmatch(r"/(?:s/)?([A-Za-z][A-Za-z0-9_]{4,31})/([0-9]{1,18})/?",
+                                 parsed_link.path)
+            if not match:
+                raise ValueError("仅支持已配置公开频道的 t.me/频道名/消息ID 链接；私有频道请粘贴完整资源消息")
+            source_name = "@" + match.group(1)
+            if source and source.casefold() != source_name.casefold():
+                raise ValueError("消息链接频道与所选来源不一致")
+            source = source_name
+            telegram_id = int(match.group(2))
+            if not any(name.casefold() == source.casefold() for name in configured):
+                raise ValueError("此 Telegram 频道尚未配置为监听来源，不能读取或提交其消息")
+            fetched = await self.source_messages(source, limit=1, message_id=telegram_id)
+            rows = fetched.get("messages") or []
+            if not rows:
+                raise ConflictError("该频道消息不存在或当前监听账号没有读取权限")
+            text, urls = rows[0]["text"], rows[0].get("urls") or []
+        if not text or not parse_share_url(text, urls)[0]:
+            raise ValueError("没有检测到支持的网盘分享链接；请粘贴频道完整资源消息或有效阿里云盘/115 分享链接")
         if not configured:
             raise ValueError("请先添加 Telegram 监听来源并配置目标网盘")
         selected = next((name for name in configured if source and name.casefold() == source.casefold()), None)
@@ -61,8 +87,12 @@ class SourceMixin(ServiceBase):
             if len(configured) != 1:
                 raise ValueError("有多个监听来源时请明确选择要使用的来源配置")
             selected = configured[0]
-        raw = RawMessage(source=selected, msg_id="manual-" + uuid.uuid4().hex,
-                         text=text, extra={"manual_import": True})
+        key = f"tg:{selected.casefold()}:{telegram_id}" if telegram_id else text
+        # Deterministic ID: double-clicks and repeated manual submissions must
+        # not generate endless duplicate tasks. Failed tasks can be retried.
+        msg_id = "manual-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+        raw = RawMessage(source=selected, msg_id=msg_id,
+                         text=text, urls=urls, extra={"manual_import": True})
         ctx = PipelineContext(raw=raw)
         accepted = await self.pipeline.accept(ctx)
         if not accepted:
@@ -197,12 +227,18 @@ class SourceMixin(ServiceBase):
     # ------------------------------------------------------------------ #
     # 来源的识别规则（core/parse_rules.py）：取样例消息、AI 起草、试跑
     # ------------------------------------------------------------------ #
-    async def source_messages(self, bot: str, limit: int = 10, *, search: str | None = None) -> dict[str, Any]:
+    async def source_messages(self, bot: str, limit: int = 10, *, search: str | None = None,
+                              message_id: int | None = None) -> dict[str, Any]:
         """来源最近的消息：主进程在线时请它用监听会话实时读取，读不到时用这个来源已经收到的消息。"""
         bot = ai.text_field(bot, limit=100, label="来源")
         if not bot:
             raise ValueError("请先填写来源（Bot 或频道的用户名）")
         limit = max(1, min(int(limit), 20))
+        if message_id is not None:
+            if type(message_id) is not int or not 1 <= message_id <= 2 ** 63 - 1:
+                raise ValueError("Telegram 消息 ID 无效")
+            if bot.casefold() not in {item["bot"].casefold() for item in self.get_config().get("sources", [])}:
+                raise ValueError("只能读取已配置监听来源的消息")
         if search is not None:
             search = ai.text_field(search, limit=100, label="订阅片名")
             if not search or bot.casefold() not in {
@@ -211,12 +247,14 @@ class SourceMixin(ServiceBase):
                 raise ValueError("订阅模拟只能检索已经配置的来源与非空片名")
         source = self.store.health_status().get("source", {})
         if source.get("status") == "connected" and not source.get("stale", True):
-            fetch_id = self.store.request_source_fetch(bot, limit, search=search)
+            fetch_id = self.store.request_source_fetch(bot, limit, search=search, message_id=message_id)
             deadline, problem = time.monotonic() + 25, "主进程没有及时响应"
             while time.monotonic() < deadline:
                 await asyncio.sleep(0.5)
                 row = self.store.source_fetch(fetch_id) or {}
                 if row.get("status") == "done":
+                    if message_id is not None and not row["messages"]:
+                        raise ConflictError("找不到指定 Telegram 消息；可能已删除或无权访问")
                     return {"messages": row["messages"],
                             "origin": "telegram_search" if search else "telegram",
                             "problem": None if row["messages"] else
@@ -226,6 +264,8 @@ class SourceMixin(ServiceBase):
                     break
         else:
             problem = "监听服务没有运行或还没连上 Telegram"
+        if message_id is not None:
+            raise ConflictError(f"无法通过监听账号读取指定消息：{problem}；不会用其他消息代替")
         messages = self.store.source_messages(bot, max(limit, 200) if search else limit)
         if search:
             from ..discovery import contains_title
