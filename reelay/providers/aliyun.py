@@ -24,6 +24,7 @@ from .storage import (ShareStorage, StorageBrowseError, _await_landing,
 
 API = "https://api.aliyundrive.com"
 TOKEN_API = "https://auth.aliyundrive.com/v2/account/token"
+USER_API = "https://user.aliyundrive.com/v2/user/get"
 _ID = re.compile(r"^(?:root|0|[A-Za-z0-9_-]{1,128})$")
 _SHARE_GONE = ("ShareLinkExpired", "ShareLinkNotFound", "ShareLinkInvalid",
                "ShareLinkCancelled", "ShareLinkCanceled", "ShareLinkDisabled",
@@ -118,6 +119,24 @@ class AliyunClient:
             raise AliyunAPIError(status, str(result.get("code") or "Unknown"))
         return result
 
+    @classmethod
+    def resource_drive(cls, token_data: dict) -> str:
+        """Resolve resource library explicitly, even if refresh only returns default.
+
+        Aliyun's consumer token response can omit resource_drive_id while the
+        authorized /v2/user/get response includes it. Never use an identified
+        backup_drive_id as a substitute for the resource library.
+        """
+        if token_data.get("resource_drive_id"):
+            return _resource_drive_id(token_data)
+        access = token_data.get("access_token")
+        if not access:
+            raise ValueError("阿里云盘登录没有返回 access_token")
+        extra = cls._send(USER_API, {}, {"Authorization": f"Bearer {access}"})
+        return _resource_drive_id({**token_data, **{
+            k: v for k, v in extra.items() if v not in (None, "")
+        }})
+
     def _refresh(self, *, force: bool = False) -> None:
         with self._lock:
             saved = secret_store.get("aliyun_refresh_token") or ""
@@ -130,15 +149,15 @@ class AliyunClient:
             token = result.get("access_token")
             if not token:
                 raise RuntimeError("阿里云盘令牌刷新缺少 access_token")
-            drive = _resource_drive_id(result)
-            # Save rotated refresh token before using access_token, so restarts
-            # and other processes do not continue using the obsolete credential.
+            # Persist token rotation before the resource-ID read request:
+            # a failed read must not cause the already-rotated credential to be lost.
             replacement = result.get("refresh_token") or saved
             if replacement != saved:
                 secrets = secret_store.current()
                 if secrets is None:
                     raise RuntimeError("无法持久化轮换后的阿里云盘 Refresh Token")
                 secrets.update({"aliyun_refresh_token": replacement})
+            drive = self.resource_drive(result)
             self._used_refresh = replacement
             self._access = token
             self._drive = str(drive)
