@@ -571,7 +571,7 @@ class Pipeline:
                     work, provider_name, drive))
                 ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
                 observed = existing_media.apply_associations(
-                    self.store.state_get("library_scan", "files", []) or [],
+                    existing_media.scan_observations(self.store),
                     self.store.state_get("media_associations", "confirmed", {}) or {})
                 if ctx.episode_pairs() and observed:
                     try:
