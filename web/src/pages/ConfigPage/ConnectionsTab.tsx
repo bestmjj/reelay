@@ -15,7 +15,7 @@ const ICONS: Record<string, LucideIcon> = { telegram: Send, control_bot: Bot, ll
 export function ConnectionsTab({ connections, config, setField }: {
   connections: Record<string, IConnection>; config: Obj; setField: (key: string, name: string, value: unknown) => void;
 }) {
-  const others = Object.entries(connections).filter(([key]) => key !== 'p115');
+  const others = Object.entries(connections).filter(([key]) => key !== 'p115' && key !== 'aliyun');
   return (
     <div className="space-y-5">
       <Auth115Card />
