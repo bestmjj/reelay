@@ -93,7 +93,8 @@ _VAR_PURE_PREFIX_RE = re.compile(r'(?:^|[.\s_\-])纯享(?=[.\s_\-]|$)')
 _VAR_DESCRIPTION_SEPARATORS = ' ：:·._-/'
 _VAR_QUALITY_SUFFIX_RE = re.compile(
     r'(?i)^[-_.\s]*(?:2160p|1080p|720p|4k|uhd|fhd)'
-    r'(?:[.\s_-]+(?:HDR|HEVC|H265|H264|WEB-DL))*$'
+    r'(?:[.\s_-]+(?:HDR10\+?|HDR|DV|HEVC|H26[45]|X26[45]|AV1|'
+    r'10bit|8bit|AAC|AC3|EAC3|DTS|FLAC|OPUS|WEB-DL|WEBDL|WEBRip|BluRay))*$'
 )
 
 
