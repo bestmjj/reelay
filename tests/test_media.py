@@ -52,6 +52,7 @@ class EpisodeOfTest(unittest.TestCase):
             "20261010.纯享 第01期上·慢速目击证人纯享.mp4": (1, "pure_upper"),
             "某节目 - S01E03 - 第 3 期（上） - 2160p.mkv": (3, "upper"),
             "某节目 - S01E03 - 第 3 期（下）.mp4": (3, "lower"),
+            "某节目 - S01E03 - 第 3 期（加更） - 2160p H265 10bit AAC.mp4": (3, "bonus"),
             "20261026.第3期.mp4": (3, "main"),
         }
         for name, expected in sample.items():
