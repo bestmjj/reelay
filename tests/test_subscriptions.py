@@ -26,6 +26,8 @@ class TestSubscriptionDecision(ServiceCase):
         self.assertEqual(await self.decide(ctx), Decision.SAVE)
         self.assertEqual(ctx.meta["subscription"]["tmdbid"], 100)
         self.assertTrue(any("新集自动放行" in line for line in ctx.trail))
+        self.assertEqual(ctx.source_rule["episodes_from"], "message")
+        self.assertEqual(ctx.parsed.episodes, [3])
 
     async def test_finished_subscription_no_longer_auto_releases_and_can_be_reopened(self):
         first = self.store.subscriptions()[0]
@@ -63,7 +65,17 @@ class TestSubscriptionDecision(ServiceCase):
         self.store.save_task(stored)
         self.store.finish_transfer(stored)
         self.assertEqual(await self.decide(tv_ctx(msg_id="2", episodes=(3,))), Decision.ASK)
-        self.assertEqual(await self.decide(tv_ctx(msg_id="3", episodes=(3, 4))), Decision.SAVE)
+        self.assertEqual(await self.decide(tv_ctx(msg_id="3", episodes=(3, 4))), Decision.ASK)
+        self.assertEqual(await self.decide(tv_ctx(msg_id="4", episodes=(4,))), Decision.SAVE)
+
+    async def test_season_pack_is_not_auto_released_to_avoid_historical_bulk_copy(self):
+        pack = tv_ctx(episodes=tuple(range(1, 101)))
+        self.assertEqual(await self.decide(pack), Decision.ASK)
+        self.assertNotIn("subscription", pack.meta)
+        self.assertTrue(any("合集" in line for line in pack.trail))
+
+        no_episode = tv_ctx(episodes=())
+        self.assertEqual(await self.decide(no_episode), Decision.ASK)
 
     async def test_episodes_of_a_same_title_remake_do_not_count_as_stored(self):
         remake = tv_ctx(episodes=(3,), tmdbid=999)  # 同名的另一部剧
