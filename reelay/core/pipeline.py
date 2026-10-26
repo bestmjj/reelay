@@ -424,9 +424,19 @@ class Pipeline:
             or self.cfg.get("defaults", {}).get("save_to", "默认")
         if alias not in self.save_dirs:
             raise ValueError(f"目标目录别名不存在：{alias}")
-        cid = str(self.save_dirs[alias])
-        if not (cid.isdecimal() or ((ctx.source_rule.get("storage") or self.cfg["defaults"]["storage"]) == "aliyun" and cid.isascii() and cid.replace("_", "").replace("-", "").isalnum())):
-            raise ValueError(f"目标目录 CID 无效：{alias}")
+        configured = str(self.save_dirs[alias])
+        provider = (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
+                    or self.cfg["defaults"]["storage"])
+        if configured.startswith("aliyun:"):
+            if provider != "aliyun":
+                raise ValueError(f"目录「{alias}」属于阿里云盘，当前任务使用 {provider}，请更换保存目录")
+            cid = configured.removeprefix("aliyun:")
+        else:
+            cid = configured
+        if provider == "p115" and not cid.isdecimal():
+            raise ValueError(f"目录「{alias}」不是有效的 115 目录，请在设置中重新选择")
+        if provider == "aliyun" and not (cid.isascii() and cid.replace("_", "").replace("-", "").isalnum()):
+            raise ValueError(f"目录「{alias}」不是有效的阿里云盘目录 ID")
         ctx.save_dir_alias, ctx.save_dir_cid = alias, cid
 
     async def execute_save(self, ctx: PipelineContext) -> None:
