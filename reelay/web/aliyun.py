@@ -19,9 +19,24 @@ class QRPayload(BaseModel):
     uid: str
 
 
-def router() -> APIRouter:
+def router(store) -> APIRouter:
     api = APIRouter()
     auth = AliyunAuth()
+
+    def publish(state: dict) -> None:
+        """Persist the last observed Aliyun auth result across web/worker processes.
+
+        A browser page's in-memory AliyunAuth status is not visible to the
+        dashboard service or a second web process. No token goes into runtime
+        health; a single event-based probe is treated as stale after two hours.
+        """
+        store.heartbeat(
+            "aliyun",
+            status=state["state"],
+            configured=state["configured"],
+            error=state.get("error") or "",
+            check_interval=3600,
+        )
 
     @api.get("/api/authaliyun/status")
     async def status():
@@ -29,7 +44,9 @@ def router() -> APIRouter:
 
     @api.post("/api/authaliyun/ping")
     async def ping():
-        return await asyncio.to_thread(auth.ping)
+        state = await asyncio.to_thread(auth.ping)
+        publish(state)
+        return state
 
     @api.put("/api/authaliyun/token")
     async def set_token(payload: TokenPayload):
@@ -41,11 +58,14 @@ def router() -> APIRouter:
             raise HTTPException(status_code=409, detail=f"令牌校验失败（旧凭证已保留）：{exc}") from None
         except Exception:
             raise HTTPException(status_code=502, detail="无法验证阿里云盘令牌，旧凭证未被覆盖") from None
+        publish(status)
         return {"ok": True, "status": status}
 
     @api.delete("/api/authaliyun/token")
     async def clear_token():
-        return {"ok": True, "status": await asyncio.to_thread(auth.clear)}
+        state = await asyncio.to_thread(auth.clear)
+        publish(state)
+        return {"ok": True, "status": state}
 
     @api.post("/api/authaliyun/qr")
     async def qr_start():
@@ -63,7 +83,10 @@ def router() -> APIRouter:
         if not 16 <= len(uid) <= 128:
             raise HTTPException(status_code=422, detail="扫码会话 ID 格式无效")
         try:
-            return await asyncio.to_thread(auth.qr_status, uid)
+            result = await asyncio.to_thread(auth.qr_status, uid)
+            if result.get("authenticated"):
+                publish(auth.status())
+            return result
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except ValueError as exc:
