@@ -54,8 +54,8 @@ export default function StoragePage() {
 
   const jump = () => {
     const cid = manualCid.trim();
-    if (!/^[0-9]+$/.test(cid)) {
-      toast.error('目录编号必须是纯数字');
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(cid)) {
+      toast.error('目录 ID 只能包含字母、数字、下划线或连字符');
       return;
     }
     dir.open(cid, cid === '0' ? [] : [{ id: cid, name: `目录 ${cid}` }]);
@@ -65,8 +65,8 @@ export default function StoragePage() {
 
   return (
     <Page
-      title="115 目录"
-      description="只读浏览你的 115 网盘，确认保存位置是否正确；不会创建、移动或删除任何文件。"
+      title="网盘目录"
+      description="只读浏览你的 当前默认网盘，确认保存位置是否正确；不会创建、移动或删除任何文件。"
       actions={(
         <Button variant="outline" className="bg-card" disabled={busy} onClick={dir.reload}>
           <RefreshCw className={cn(busy && 'animate-spin')} />刷新
@@ -136,7 +136,7 @@ export default function StoragePage() {
             <div className="mt-5 flex flex-wrap justify-center gap-2">
               <Button variant="outline" onClick={dir.reload}><RefreshCw />重新查询</Button>
               <Button asChild variant="ghost" className="text-primary">
-                <Link to="/config?tab=connections">检查 115 连接<ArrowRight /></Link>
+                <Link to="/config?tab=connections">检查网盘连接<ArrowRight /></Link>
               </Button>
             </div>
           </div>
