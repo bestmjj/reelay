@@ -374,7 +374,7 @@ class TestWorkIdentity(unittest.TestCase):
                 self.assertEqual(keys, ["1:幕府将军|1980|tv:1001|S01|E01", "dryrun:5:没有任务的剧|||S00|E02"])
                 claims = [r[0] for r in store._conn.execute("SELECT resource_key FROM resource_claims")]
                 self.assertEqual(claims, ["p115:1:episode:幕府将军|S01|E02"])
-                self.assertEqual(store._conn.execute("PRAGMA user_version").fetchone()[0], 2)
+                self.assertEqual(store._conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
                 self.assertEqual(store.stored_episode_pairs(works.identity("幕府将军", 2024, 126308), "1"), [])
                 self.assertEqual(store.stored_episode_pairs(works.identity("幕府将军", 1980), "1"), [[1, 1]])
                 self.assertEqual(store.stored_episode_pairs(works.identity("没有任务的剧", 2001), "5", "dryrun"),
