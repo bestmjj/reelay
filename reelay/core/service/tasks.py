@@ -9,7 +9,7 @@ from dataclasses import asdict
 from typing import Any
 
 
-from .. import messages, subscriptions
+from .. import messages, source_audit, subscriptions
 from ..contracts import ParsedResource, PipelineContext, TaskState
 from ..validation import MEDIA_SCHEMA, validate_resource
 from .base import ConflictError, NotFoundError, ServiceBase
@@ -70,11 +70,41 @@ class TaskOpsMixin(ServiceBase):
                 and ctx.parsed and ctx.parsed.share_code
                 and not storage.get("manifest") and not storage.get("landed")):
             out.append("choose_share_folder")
+        if state == TaskState.DONE and storage.get("manifest") and len(
+                storage["manifest"].get("files") or []) == 1 and len(ctx.episode_pairs()) == 1:
+            dispute = self.store.disputed_transfer(ctx.task_id)
+            if dispute and dispute.get("active"):
+                out.append("resolve_quarantine")
+            elif not dispute and (ctx.result or {}).get("storage_verified"):
+                out.append("quarantine_wrong_source")
         if state not in _BUSY and not storage.get("manifest") and not storage.get("landed"):
             out.append("reparse")
         if messages.correctable(ctx):
             out.append("correct")
         return out
+
+    def transfer_source_audit(self, task_id: str) -> dict[str, Any]:
+        ctx = self._require_context(task_id)
+        return {**source_audit.source_audit(ctx),
+                "quarantine": self.store.disputed_transfer(task_id)}
+
+    def quarantine_wrong_source(self, task_id: str, reason: str) -> dict[str, Any]:
+        ctx = self._require_context(task_id)
+        if "quarantine_wrong_source" not in self.task_actions(ctx):
+            raise ConflictError("只有已核验完成的单集任务可以标记错片")
+        try:
+            return self.store.quarantine_transfer(ctx, reason=reason)
+        except ValueError as exc:
+            raise ConflictError(str(exc)) from exc
+
+    def resolve_quarantine(self, task_id: str, confirmation: str) -> dict[str, Any]:
+        ctx = self._require_context(task_id)
+        if "resolve_quarantine" not in self.task_actions(ctx):
+            raise ConflictError("这条任务没有待处理的错片隔离记录")
+        try:
+            return self.store.resolve_disputed_transfer(task_id, confirmation=confirmation)
+        except ValueError as exc:
+            raise ConflictError(str(exc)) from exc
 
     def _selectable_share_task(self, task_id: str) -> tuple[PipelineContext, str]:
         ctx = self._require_context(task_id)
