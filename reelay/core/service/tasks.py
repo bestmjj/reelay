@@ -178,8 +178,11 @@ class TaskOpsMixin(ServiceBase):
             raise ConflictError("只有待人工整理任务可以重新整理")
         organize = ctx.ns("organize")
         if conflict is not None:
-            if conflict not in ("skip", "replace"):
-                raise ValueError("conflict 只能是 skip 或 replace")
+            if conflict not in ("skip", "replace", "suffix"):
+                raise ValueError("conflict 只能是 skip、replace 或 suffix")
+            organizer = self.get_config().get("plugins", {}).get("organizer", {})
+            if organizer.get("no_delete", True) and conflict in ("skip", "replace"):
+                raise ConflictError("安全模式禁止删除或覆盖文件；可选择保留两份并给新文件加后缀")
             if not organize.get("pending_conflict"):
                 raise ConflictError("任务没有待处理的文件冲突")
             if save_dir_alias and save_dir_alias != ctx.save_dir_alias:
@@ -199,7 +202,8 @@ class TaskOpsMixin(ServiceBase):
             organize["resolve"] = conflict
             existing = (pending.get("existing") or {}).get("name")
             ctx.log(f"管理端选择删除本次转存的文件，保留库里的「{existing}」" if conflict == "skip"
-                    else f"管理端选择覆盖保存，替换库里的「{existing}」")
+                    else f"管理端选择覆盖保存，替换库里的「{existing}」" if conflict == "replace"
+                    else f"管理端选择保留两份，新文件自动添加序号，不覆盖「{existing}」")
         else:
             organize.pop("resolve", None)
         ctx.state = TaskState.QUEUED
