@@ -218,6 +218,27 @@ class TelegramUserbotSource:
         return out
 
 
+    async def message_by_id(self, target: str, message_id: int) -> list[dict]:
+        """Read exactly one message already accessible to the configured listener.
+
+        Used for explicit user submissions of t.me/<configured-channel>/<id>.
+        Never join or search unknown channels and never write to Telegram.
+        """
+        if not (self._client and self._authorized and self._client.is_connected()):
+            raise RuntimeError("Telegram 监听会话未连接")
+        target = target.strip()
+        if target.casefold() not in {name.casefold() for name in self._targets}:
+            raise ValueError("只能读取已经配置的 Telegram 来源")
+        if type(message_id) is not int or not 1 <= message_id <= 2 ** 63 - 1:
+            raise ValueError("消息 ID 无效")
+        entity = await self._client.get_entity(
+            int(target) if target.lstrip("-").isdigit() else target)
+        msg = await self._client.get_messages(entity, ids=message_id)
+        if not msg or getattr(msg, "action", None) or not (msg.raw_text or "").strip():
+            return []
+        return [{"source": target, "msg_id": str(msg.id),
+                 "text": msg.raw_text, "urls": _extract_urls(msg)}]
+
     async def search_messages(self, target: str, title: str, limit: int = 5) -> list[dict]:
         """Read-only subscribed-show examples from an already authorized channel.
 
