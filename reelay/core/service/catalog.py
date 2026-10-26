@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .. import library, library_scan, release
+from .. import library, library_scan, library_view, release
 from .base import ServiceBase
 
 # 管理台媒体库页每部作品需要的字段
@@ -47,6 +47,30 @@ class CatalogMixin(ServiceBase):
         return {**snapshot, "groups": items,
                 "estimated_gb": round(sum(x["bytes"] for x in items) / 1024 ** 3, 2),
                 "total_done": 0}
+
+    def library_overview(self, *, query: str | None = None, media_type: str | None = None,
+                         save_dir_alias: str | None = None) -> dict[str, Any]:
+        """Single UI library: existing cloud media plus verified Reelay entries.
+
+        Keep both underlying ledgers independent. Only merge matching entries
+        when folder/title and independent file/year/episode evidence agree.
+        Scanning must never turn a file into a verified transfer or dedup claim.
+        """
+        verified = self.library(query=query, media_type=media_type, save_dir_alias=save_dir_alias)
+        observed = self.scanned_library(query=query, media_type=media_type, save_dir_alias=save_dir_alias)
+        groups = library_view.join_library(verified["groups"], observed["groups"])
+        return {
+            "groups": groups,
+            "total_done": verified["total_done"],
+            "estimated_gb": round(sum(group.get("bytes", 0) for group in groups) / 1024 ** 3, 2),
+            "scanned_at": observed.get("scanned_at"),
+            "file_count": observed.get("file_count", 0),
+            "folder_count": observed.get("folder_count", 0),
+            "scanned_roots": observed.get("scanned_roots", 0),
+            "complete": observed.get("complete", False),
+            "truncated": observed.get("truncated", False),
+            "errors": observed.get("errors", []),
+        }
 
     def scan_existing_library(self) -> dict[str, Any]:
         """Manually triggered, bounded read-only inventory of configured cloud folders."""
