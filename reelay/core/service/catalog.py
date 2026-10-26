@@ -78,7 +78,7 @@ class CatalogMixin(ServiceBase):
         # Resume the exact pending folder queue instead of dropping the first
         # 1,647 files when a 45s scan budget is exhausted.
         cursor = self.store.state_get("library_scan", "cursor") or None
-        snapshot, new_cursor = library_scan_progress.step(
+        snapshot, progress = library_scan_progress.step(
             self.pipeline.cfg,
             lambda provider: self.pipeline.reg.get_provider("storage", provider),
             cursor=cursor,
@@ -88,9 +88,10 @@ class CatalogMixin(ServiceBase):
             raise ValueError(f"未能读取任何影视目录；保留上次扫描结果。{details}")
         # Durable, read-only physical file IDs are independent of successful
         # transfers, and are never written to the verified dedup ledger.
-        self.store.state_set("library_scan", "cursor", new_cursor)
-        # Records will be maintained by the scan helper as a separate
-        # observation index; they must not change stored_series or dedup.
+        self.store.state_set("library_scan", "cursor", progress if snapshot["has_more"] else None)
+        self.store.state_set("library_scan", "files", progress["records"])
+        # This is an observational index. Never backfill verified transfer
+        # ledger from folder names or guessed TMDB matches.
         self.store.state_set("library_scan", "snapshot", snapshot)
         return snapshot
 
