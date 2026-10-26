@@ -131,6 +131,12 @@ class SubscriptionDecision(DefaultDecision):
             ctx.log(f"订阅《{item['title']}》：资源包含 {len(pairs)} 个季集或无法确认具体集号，"
                     "自动追更只处理明确的单集；合集进入人工审核以免误收整季")
             return decision
+        # An explicitly configured starting episode prevents a late repost
+        # of an old single episode from being mistaken for a new release.
+        floor = item.get("start_episode")
+        if floor is not None and any(ep < floor for ep in episodes):
+            ctx.log(f"订阅《{item['title']}》：仅从 E{floor} 起自动接收，旧集不自动放行")
+            return decision
         if episodes:
             have = works.episodes(runtime.services().stored_series(), works.of(p, ctx.meta.get("tmdb")), season)
             if episodes <= have:
