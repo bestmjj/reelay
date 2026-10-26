@@ -141,8 +141,13 @@ class AliyunClient:
         try:
             return self._send(API + path, data, headers)
         except AliyunAPIError as exc:
-            # A 401 on a read request is known not to have modified anything.
-            if not (auth and read and (exc.status == 401 or exc.code in ("AccessTokenInvalid", "AccessTokenExpired", "InvalidAccessToken"))):
+            expired = exc.status == 401 or exc.code in ("AccessTokenInvalid", "AccessTokenExpired", "InvalidAccessToken")
+            if auth and not read and expired:
+                # Do not resend this mutation; the *next* attempt must reauthenticate.
+                with self._lock:
+                    self._expires = 0
+            # Only read requests may be retried automatically after refreshing.
+            if not (auth and read and expired):
                 raise
             self._refresh(force=True)
             headers["Authorization"] = f"Bearer {self._access}"
