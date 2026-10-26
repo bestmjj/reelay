@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 
-from .. import ai, library
+from .. import ai, library, subscriptions
 from ..config import config_revision, merge_config, normalize_config
 from ..contracts import PipelineContext
 from .base import ConflictError, ServiceBase
@@ -62,10 +62,19 @@ class SourceMixin(ServiceBase):
             decision = await decider.decide(ctx)
         share_provider = (ctx.parsed.raw_fields.get("share_provider") if ctx.parsed else None)
         target_storage = ctx.source_rule.get("storage") or cfg["defaults"]["storage"]
+        matched = subscriptions.match(
+            self.store.subscriptions(), ctx.parsed, ctx.meta.get("tmdb", {}),
+            seasons=subscriptions.seasons_of(ctx), auto_only=False)
+        target = self.pipeline.target_preview(ctx) if ctx.parsed and ctx.parsed.is_media else None
         return {"parsed": ctx.parsed.__dict__ if ctx.parsed else None,
                 "decision": getattr(decision, "value", str(decision)),
                 "routing": {"share_provider": share_provider, "target_storage": target_storage,
                             "compatible": share_provider in (None, target_storage)},
+                "matched_subscription": {
+                    "id": matched["id"], "title": matched["title"], "season": matched["season"]
+                } if matched else None,
+                "released_by_subscription": bool(ctx.meta.get("subscription")),
+                "target_preview": target,
                 "confidence": ctx.meta.get("confidence"), "trail": ctx.trail}
 
     async def draft_source(self, bot: str, samples: list[str]) -> dict[str, Any]:
