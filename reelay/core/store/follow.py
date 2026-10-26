@@ -15,6 +15,7 @@ from .base import _locked
 def _subscription(row: sqlite3.Row) -> dict[str, Any]:
     return {"id": row["id"], "title": row["title"], "season": row["season"], "total": row["total"],
             "tmdbid": row["tmdbid"], "auto": bool(row["auto"]), "save_to": row["save_to"],
+            "created_at": row["created_at"],
             "finished": json.loads(row["finished"]) if row["finished"] else None}
 
 
