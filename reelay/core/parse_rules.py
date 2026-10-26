@@ -263,7 +263,7 @@ def regex_fields(text: str, rules: dict | None = None) -> dict:
 def prefilter_reason(ctx, share_code: str | None) -> str | None:
     """与 DefaultDecision 的硬过滤一致；命中则无论 LLM 怎么判都会被跳过。"""
     if not share_code:
-        return "无 115 链接"
+        return "未找到支持的网盘分享链接"
     filters = (ctx.source_rule or {}).get("filters", {}) or {}
     text = ctx.raw.text or ""
     must = filters.get("must_have") or []
