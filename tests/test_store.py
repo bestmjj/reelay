@@ -15,7 +15,7 @@ from reelay.core import works
 from reelay.core.contracts import ParsedResource, PipelineContext, RawMessage, TaskState
 from reelay.core.registry import discover
 from reelay.core.store.health import HEARTBEAT_INTERVAL
-from reelay.core.store import DEDUP_EPISODE, DEDUP_MESSAGE, DEDUP_SHARE, Store, _dump_ctx, _load_ctx
+from reelay.core.store import DEDUP_EPISODE, DEDUP_MESSAGE, DEDUP_SHARE, SCHEMA_VERSION, Store, _dump_ctx, _load_ctx
 from reelay.providers.storage import _select_video_items
 
 from tests.fakes import PipelineCase, message
