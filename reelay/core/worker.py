@@ -118,11 +118,18 @@ class Worker:
         revision, cfg = self.pipeline.revision, self.pipeline.cfg
         paths = {}
         try:
-            storage = self.pipeline.reg.get_provider("storage", cfg["defaults"].get("storage", "p115"))
-            for alias, cid in cfg["save_dirs"].items() if hasattr(storage, "dir_path") else ():
-                path = await asyncio.to_thread(storage.dir_path, str(cid))
+            for alias, reference in cfg["save_dirs"].items():
+                reference = str(reference)
+                if reference.startswith("aliyun:"):
+                    name, cid = "aliyun", reference.removeprefix("aliyun:")
+                else:
+                    name, cid = cfg["defaults"].get("storage", "p115"), reference
+                storage = self.pipeline.reg.get_provider("storage", name)
+                if not hasattr(storage, "dir_path"):
+                    continue
+                path = await asyncio.to_thread(storage.dir_path, cid)
                 if path:
-                    paths[alias] = {"cid": str(cid), "path": path}
+                    paths[alias] = {"cid": reference, "path": path}
         except Exception as exc:  # noqa: BLE001 - 只影响展示
             if self._next_dir_paths == 0.0:
                 log.warning("读取保存目录的网盘路径失败，页面暂时显示目录别名：%s", exc)
