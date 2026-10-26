@@ -175,7 +175,7 @@ def _overlapping_share_versions(video_items: list[dict], parsed) -> list[str]:
 def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: str = 'share',
                         hints: dict | None = None, stored_variety_parts=(),
                         share_folder_id: str | None = None, share_folder_path: str | None = None,
-                        required_latest: int | None = None) -> dict:
+                        required_latest: int | None = None, blocked_episodes=()) -> dict:
     """确定本次转存的文件。分享清单是集数的事实来源，消息/LLM 给出的集数只作提示。
 
     返回 ``{'files', 'episodes', 'season', 'pairs'}``：每个文件带自己的季与集，``pairs`` 为
@@ -292,6 +292,11 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         if scope == 'message' and parsed.episodes:
             raise NeedsManual(f'分享包含多季 {sorted(marked)}，消息只写了集数，需先指定季号')
         season, picked = None, detected
+    withheld = {(int(s), int(ep)) for s, ep in blocked_episodes}
+    affected = sorted(withheld & {(s, ep) for _, s, ep in picked})
+    if affected:
+        blocked_label = "、".join(f"S{s:02d}E{ep:03d}" for s, ep in affected[:5])
+        raise NeedsManual(f"目标 {blocked_label} 曾被标记为错片，需人工解除隔离后才允许重新转存")
     if scope == 'message' and parsed.episodes:
         # A subscription progress post can point at an entire historical
         # pack. Once the one requested episode has been positively located,
@@ -531,7 +536,8 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
                                    stored_variety_parts=ctx.ns('storage').get('stored_variety_parts') or [],
                                    share_folder_id=ctx.ns('share_selection').get('folder_id'),
                                    share_folder_path=ctx.ns('share_selection').get('path'),
-                                   required_latest=_announced_latest(ctx))
+                                   required_latest=_announced_latest(ctx),
+                                   blocked_episodes=ctx.ns('storage').get('blocked_episodes') or [])
 
     async def select(self, ctx: PipelineContext, listing: list[dict]) -> dict:
         """按规则确定转存文件；规则无法确定时先让 AI 给出方案，方案经同一套规则校验，不过再转人工。"""
