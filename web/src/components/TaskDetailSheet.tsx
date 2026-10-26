@@ -292,6 +292,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                     options={shareFolders.folders.map((folder) => ({
                       value: folder.folder_id,
                       label: `${folder.path} · ${folder.count} 个视频${folder.unrecognized ? `，${folder.unrecognized} 个未识别` : ''}`,
+                      disabled: folder.count === 0 || folder.selectable === false,
                     }))}
                     placeholder="请选择一个版本（不会自动混用）" />
                   {shareFolderId ? (
@@ -307,6 +308,19 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                       onChange={(e) => setRememberShareFolder(e.target.checked)} />
                     此分享链接以后沿用该版本（文件夹改变时仍会停止核对）
                   </label>
+                  {shareFolderId ? (
+                    <div className="max-h-36 space-y-1 overflow-y-auto rounded border bg-muted/30 p-2 text-xs">
+                      {(shareFolders.folders.find((folder) => folder.folder_id === shareFolderId)?.samples ?? []).map((file, i) => (
+                        <div key={`${file.path}-${i}`} className="break-all">
+                          {file.path}{typeof file.size === 'number' ? ` · ${(file.size / (1024 ** 3)).toFixed(2)} GiB` : ''}
+                        </div>
+                      ))}
+                      {(shareFolders.folders.find((folder) => folder.folder_id === shareFolderId)?.count ?? 0) > 6
+                        ? <p className="text-muted-foreground">仅预览前 6 个文件；完整视频数见上方。</p> : null}
+                      {shareFolders.folders.find((folder) => folder.folder_id === shareFolderId)?.unrecognized
+                        ? <p className="text-destructive">此文件夹含无法识别集号的视频，不会由 AI 强行匹配目标集数。</p> : null}
+                    </div>
+                  ) : null}
                   <Button size="sm" disabled={shareFolderBusy || busy || !shareFolderId}
                     onClick={() => void chooseShareFolder()}>确认这个版本</Button>
                 </div>
