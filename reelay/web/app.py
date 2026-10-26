@@ -102,7 +102,7 @@ def create_app(*, data_dir: str | Path | None = None, frontend_dir: str | Path |
                        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type"])
     _error_responses(app)
     for api in (auth.router(store, service), system.router(service, store, bus, log_file=data / paths.LOG.name),
-                tasks.router(service), config.router(service, registry), p115.router(service), aliyun.router(),
+                tasks.router(service), config.router(service, registry), p115.router(service), aliyun.router(store),
                 sources.router(service), follow.router(service), library.router(service), ai.router(service)):
         app.include_router(api)
     if mcp:
