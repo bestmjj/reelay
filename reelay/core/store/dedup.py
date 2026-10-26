@@ -123,7 +123,7 @@ class DedupRepository:
         return list(series.values())
 
 
-_TARGET_PREFIX = re.compile(r"^(?:[A-Za-z0-9_.-]+:)?\d+:")
+_TARGET_PREFIX = re.compile(r"^(?:[A-Za-z0-9_.-]+:)?[A-Za-z0-9_-]+:")
 
 
 def _target_prefix(cid: str | None, provider: str) -> str:
