@@ -1,4 +1,4 @@
-import type { IParsedResource, ITaskDetail, ITaskSummary } from '@/lib/types';
+import type { IParsedResource, ISourceAudit, ITaskDetail, ITaskSummary } from '@/lib/types';
 import { get, patch, post, query } from './request';
 
 /** 任务操作的接口（POST /api/tasks/<id>/<endpoint>）。accept-partial：转存只到一部分时按已到的文件继续；
@@ -41,6 +41,12 @@ export interface IBatchResult {
 export const taskApi = {
   list: (filters: ITaskFilters = {}) => get<{ items: ITaskSummary[] }>(`tasks${query({ ...filters })}`),
   get: (taskId: string) => get<ITaskDetail>(`tasks/${taskId}`),
+  sourceAudit: (taskId: string) =>
+    get<ISourceAudit>(`tasks/${taskId}/source-audit`),
+  quarantineWrongCopy: (taskId: string, reason: string) =>
+    post(`tasks/${taskId}/quarantine-wrong-copy`, { reason }),
+  resolveWrongCopy: (taskId: string) =>
+    post(`tasks/${taskId}/resolve-wrong-copy`, { confirmation: '我已核对并处理错片' }),
   shareFolders: (taskId: string) =>
     get<IShareFolderPreview>(`tasks/${taskId}/share-folders`),
   chooseShareFolder: (taskId: string, folderId: string, remember = true) =>
