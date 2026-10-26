@@ -68,7 +68,7 @@ export interface IAliyunQrStatus {
 }
 
 export const storageApi = {
-  dirs: (cid: string, offset = 0) => get<IDirListing>(`storage/dirs${query({ cid, offset })}`),
+  dirs: (cid: string, offset = 0, provider?: string) => get<IDirListing>(`storage/dirs${query({ cid, offset, provider })}`),
   auth115Status: () => get<IAuth115Status>('auth115/status'),
   auth115Ping: () => post<{ cookie: string; oauth: string; status: IAuth115Status }>('auth115/ping'),
   auth115SetCookie: (cookies: string) => put<{ ok: boolean; state: string }>('auth115/cookie', { cookies }),
