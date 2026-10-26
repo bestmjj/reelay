@@ -11,11 +11,20 @@ from .media import episode_of
 
 def source_audit(ctx) -> dict:
     storage = ctx.meta.get("storage") or {}
-    manifest = storage.get("manifest") or {}
+    manifest = storage.get("manifest")
+    # Older task snapshots and some third-party test clients may store an
+    # empty/legacy list rather than the new structured manifest. A read-only
+    # audit must NEVER turn such tasks into a broken management UI or MCP.
+    if not isinstance(manifest, dict):
+        manifest = {}
     files = manifest.get("files") or []
+    if not isinstance(files, list):
+        files = []
     suspect = False
     entries = []
     for file in files:
+        if not isinstance(file, dict):
+            continue
         name = str(file.get("name") or "")
         season, episode = episode_of(name)
         claimed = file.get("episode")
