@@ -511,6 +511,12 @@ class Organizer(_MediaLibrary):
         organize.setdefault("conflicts", [])  # 每处冲突怎么处理的（见 _record_conflict），媒体库据此排除被替换的文件
         # 人工在冲突时选的处理（删除转存文件 / 覆盖保存）优先于配置的策略，整理成功后清除
         strategy = organize.get("resolve") or runtime.get("plugins.organizer.conflict", "manual")
+        no_delete = runtime.get("plugins.organizer.no_delete", True)
+        if no_delete and strategy in ("skip", "upgrade", "replace"):
+            # Old configurations may still request destructive strategies.
+            # Force safe review instead of silently deleting either copy.
+            strategy = "manual"
+            ctx.log("安全模式：保留已有及新转存文件，禁止自动删除或覆盖")
         state = runtime.services().state(self.name)
         new_rank = resolution_rank(p.resolution)
         title, is_tv = _safe(p.title), p.media_type == "tv" or bool(p.episodes)
@@ -520,6 +526,8 @@ class Organizer(_MediaLibrary):
             source_id = _fid(item["src_id"])
             skipped = state.get(f"skipped:{source_id}")
             if skipped:
+                if no_delete:
+                    raise ValueError("已有整理检查点要求删除文件；安全模式已阻止，请人工核对")
                 # 冲突时已决定删除本次的新文件：上次删除结果不明就再删一次并读回
                 parent = skipped.get("parent")
                 if parent is not None and any(x["id"] == source_id for x in drive.iterdir(_fid(parent))):
