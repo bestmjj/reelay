@@ -334,18 +334,28 @@ class AliyunStorage(ShareStorage):
         token = self.client.share_token(p.share_code, p.receive_code)
         out = []
 
-        def walk(parent: str, depth: int):
+        def walk(parent: str, depth: int, path: tuple[str, ...], top: str):
             for item in self.client.shared_children(p.share_code, token, parent):
                 if item["is_dir"]:
                     if depth >= 3:
                         raise NeedsManual("阿里云盘分享目录过深，无法核验完整文件")
-                    walk(item["id"], depth + 1)
+                    walk(item["id"], depth + 1, (*path, item["name"]),
+                         item["id"] if depth == 0 else top)
                 elif is_video(item["name"]):
-                    out.append(item)
+                    # File IDs, branch ID and names all originate from the
+                    # same freshly enumerated share. They are not drive paths.
+                    out.append({**item, "share_folder_id": top,
+                                "share_path": "/".join(path)})
                 if len(out) > 10000:
                     raise NeedsManual("分享文件过多，需要人工选择")
-        walk("root", 0)
+        walk("root", 0, (), "root")
         return out
+
+    def share_folder_choices(self, parsed) -> list[dict]:
+        """Read-only groups from a shared link; never infer best quality."""
+        from types import SimpleNamespace
+        from .storage import share_folder_choices
+        return share_folder_choices(self._share_files(SimpleNamespace(parsed=parsed)))
 
     def inspect_share(self, parsed, *, describe: bool) -> dict:
         from types import SimpleNamespace
