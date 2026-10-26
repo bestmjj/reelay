@@ -25,7 +25,7 @@ from ..core.contracts import (AlreadyStored, NeedsManual, PipelineContext, Share
                               TransferRejected, TransferUncertain)
 from ..core.io import run_blocking
 from ..core.registry import register
-from ..core.media import episode_of, is_extra, is_video, resolution_label, resolution_rank, summarize_pairs
+from ..core.media import episode_of, is_extra, is_video, resolution_label, resolution_rank, summarize_pairs, variety_episode
 
 
 # 电影分享中小于最大文件该比例的视频视为花絮/样片。
@@ -69,7 +69,7 @@ def _movie_choice_problem(videos: list[dict], chosen: str, parsed) -> str | None
 
 
 def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: str = 'share',
-                        hints: dict | None = None) -> dict:
+                        hints: dict | None = None, stored_variety_parts=()) -> dict:
     """确定本次转存的文件。分享清单是集数的事实来源，消息/LLM 给出的集数只作提示。
 
     返回 ``{'files', 'episodes', 'season', 'pairs'}``：每个文件带自己的季与集，``pairs`` 为
@@ -153,6 +153,38 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         if missing:
             raise NeedsManual(f'分享内未找到消息声明的集数 {sorted(missing)}')
         picked = [(item, s, ep) for item, s, ep in picked if ep in requested]
+    # Variety episodes have *editions*: upper/lower/bonus/pure are not
+    # alternative resolutions of the same episode. They must be saved and
+    # deduplicated independently, never collapsed to a single E03.
+    variety_mode = any(variety_episode(x.get('name', '')) is not None for x in videos)
+    if variety_mode:
+        if any(variety_episode(x.get('name', '')) is None for x in videos):
+            raise NeedsManual('分享混有综艺期数与无法识别的普通视频，需确认每个文件的期数和版本')
+        editions: dict[tuple[int, int, str], dict] = {}
+        for item, s, ep in picked:
+            detail = variety_episode(item.get('name', ''))
+            if detail is None or detail[0] != ep:
+                raise NeedsManual(f"综艺期数与文件名不一致：{item.get('name', '')}")
+            key = (s, ep, detail[1])
+            if key in editions:
+                raise NeedsManual(
+                    f'第 {ep} 期的「{detail[1]}」包含多个文件或版本，'
+                    '不得自动丢弃或覆盖，请人工确认')
+            editions[key] = item
+        stored_parts = {(int(s), int(ep), str(part)) for s, ep, part in stored_variety_parts}
+        wanted = sorted(set(editions) - stored_parts)
+        if not wanted:
+            raise AlreadyStored('综艺分享中这些期数的上/下/加更/纯享版本均已单独核验入库')
+        files = [{**editions[key], 'season': key[0], 'episode': key[1], 'variant': key[2]}
+                 for key in wanted]
+        pairs = sorted({(season, ep) for season, ep, _ in wanted})
+        season, episodes = summarize_pairs(pairs)
+        return {
+            'files': files, 'episodes': episodes, 'season': season,
+            'pairs': [list(row) for row in pairs],
+            'variety_parts': [{'season': s, 'episode': ep, 'variant': part}
+                              for s, ep, part in wanted],
+        }
     groups: dict[tuple[int, int], list[dict]] = {}
     for item, s, ep in picked:
         groups.setdefault((s, ep), []).append(item)
@@ -327,7 +359,8 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
     def _select(ctx: PipelineContext, listing: list[dict], hints: dict | None = None) -> dict:
         return _select_video_items(listing, ctx.parsed,
                                    stored=ctx.ns('storage').get('stored_episodes') or [],
-                                   scope=ctx.source_rule.get('episodes_from', 'share'), hints=hints)
+                                   scope=ctx.source_rule.get('episodes_from', 'share'), hints=hints,
+                                   stored_variety_parts=ctx.ns('storage').get('stored_variety_parts') or [])
 
     async def select(self, ctx: PipelineContext, listing: list[dict]) -> dict:
         """按规则确定转存文件；规则无法确定时先让 AI 给出方案，方案经同一套规则校验，不过再转人工。"""
