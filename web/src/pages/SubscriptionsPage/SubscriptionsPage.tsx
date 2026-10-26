@@ -1,4 +1,4 @@
-import { Ban, BellPlus, BellRing, CircleAlert, Flag, FlaskConical, Lightbulb, Loader2, Search, Trash2, Undo2 } from 'lucide-react';
+import { Ban, BellPlus, BellRing, CircleAlert, Flag, FlaskConical, Lightbulb, Loader2, RefreshCw, Search, Trash2, Undo2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -88,6 +88,7 @@ function SubscriptionRow({ item, busy, onRemove, onReopen, onTest }: {
               ? `上次 ${relativeTime(item.discovery.checked_at)}`
               : '尚未完成'}
             {item.discovery.source ? ` · ${item.discovery.source}` : ''}
+            {item.discovery.checked_at ? ` · 候选 ${item.discovery.matches ?? 0} 条` : ''}
             {item.discovery.error ? ` · ${item.discovery.error}` : ''}
           </p>
         ) : null}
@@ -261,6 +262,9 @@ export default function SubscriptionsPage() {
           </Panel>
 
           <Panel icon={BellRing} title="已订阅"
+            actions={<Button size="sm" variant="outline" onClick={subs.reload} disabled={subs.loading}>
+              <RefreshCw className={subs.loading ? 'animate-spin' : ''} />刷新检索状态
+            </Button>}
             description={data ? `共 ${data.items.length} 部${data.items.some((i) => i.finished)
               ? `，其中 ${data.items.filter((i) => i.finished).length} 部已完结` : ''}` : undefined}>
             {!data ? (subs.error ? <p className="text-sm text-muted-foreground">读取失败，见页面上方。</p>
