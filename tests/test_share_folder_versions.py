@@ -120,6 +120,15 @@ class FolderChoiceTests(unittest.TestCase):
         self.assertEqual({x["share_path"] for x in files},
                          {"Season 1 (HDR.Vivid)", "Season 1 (DoVi)"})
 
+    def test_storage_adapter_uses_chosen_branch_instead_of_merging(self):
+        context = PipelineContext(RawMessage("@shareAliyun", "t", "小城良方 更新14集"))
+        context.parsed = self.parsed
+        context.ns("share_selection").update(folder_id="dovi-folder",
+                                              path="Season 1 (DoVi)")
+        selected = AliyunStorage._select(context, two_versions())
+        self.assertEqual([f["id"] for f in selected["files"]], ["dovi-folder-14"])
+        self.assertEqual(selected["pairs"], [[1, 14]])
+
     def test_p115_recursive_listing_also_preserves_folder_id(self):
         class Fake115:
             def iterdir(self, folder):
@@ -171,6 +180,16 @@ class FolderChoiceAPITests(WebCase):
         self.assertEqual(snapshot.state, TaskState.FAILED)
         self.assertFalse(snapshot.meta.get("storage", {}).get("manifest"))
         self.assertFalse(snapshot.meta.get("storage", {}).get("landed"))
+        # Different task using the SAME shared link sees the remembered folder.
+        later = PipelineContext(RawMessage("@shareAliyun", "later", "小城良方 更新14集"))
+        later.parsed = self.ctx.parsed
+        later.state = TaskState.FAILED
+        later.source_rule = dict(self.ctx.source_rule)
+        self.app.state.store.save_task(later)
+        preview = self.client.get(f"/api/tasks/{later.task_id}/share-folders")
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["selected_folder_id"], "dovi-folder")
+        self.assertTrue(preview.json()["saved_preference"])
 
     def test_invalid_or_stale_folder_and_transfer_checkpoint_are_rejected(self):
         url = f"/api/tasks/{self.ctx.task_id}/share-folder"
