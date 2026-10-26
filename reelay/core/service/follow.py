@@ -35,7 +35,9 @@ class FollowMixin(ServiceBase):
         subs = self.store.subscriptions()
         stored = self.store.stored_series()
         scan = self.store.state_get("library_scan", "snapshot") or {}
-        observed_files = self.store.state_get("library_scan", "files", []) or []
+        observed_files = existing_media.apply_associations(
+            self.store.state_get("library_scan", "files", []) or [],
+            self.store.state_get("media_associations", "confirmed", {}) or {})
         report = (self.pipeline.query("episode_report") or {}).get("series", {})
         items = []
         discovery_state = self.store.state_items(discovery.NAMESPACE)
@@ -149,6 +151,78 @@ class FollowMixin(ServiceBase):
             "task_created": False,
             "share_checked": False, "dedup_checked": False,
         }
+
+    def existing_subscription_candidates(self, subscription_id: int) -> dict[str, Any]:
+        """Only suggest strongly named historical files; never move or mark transfers."""
+        item = self.store.subscription(subscription_id)
+        if not item:
+            raise NotFoundError("该订阅不存在")
+        scanned = self.store.state_get("library_scan", "files", []) or []
+        found = existing_media.candidates_for_subscription(scanned, item, limit=50)
+        if len(found) > 50:
+            raise ConflictError("匹配文件超过 50 个；请先按目录整理，再分批关联")
+        bound = self.store.state_get("media_associations", "confirmed", {}) or {}
+        return {"items": [{
+            "file_key": existing_media.record_key(row), "provider": row["provider"],
+            "alias": row["alias"], "drive_id": row["drive_id"], "name": row["name"],
+            "path": "/".join([*row.get("parents", []), row["name"]]),
+            "episode": row["episode"], "season": row["season"],
+            "size": row.get("size"),
+            "associated": existing_media.same_observed_file(bound.get(existing_media.record_key(row), {}), row),
+        } for row in found], "scan_complete": bool(
+            (self.store.state_get("library_scan", "snapshot") or {}).get("complete")),
+            "subscription": {"id": item["id"], "title": item["title"], "season": item["season"],
+                             "tmdbid": item.get("tmdbid")}}
+
+    async def associate_existing_subscription(self, subscription_id: int,
+                                              file_keys: list[str]) -> dict[str, Any]:
+        """User-confirmed show identity for existing cloud IDs; all validation is read-only.
+
+        No file mutation and no verified transfer dedup mark. The authoritative
+        transfer gate rechecks the remote file each time before skipping.
+        """
+        item = self.store.subscription(subscription_id)
+        if not item:
+            raise NotFoundError("该订阅不存在")
+        if not item.get("tmdbid"):
+            raise ValueError("需要先为订阅匹配正确的 TMDB 作品，才能关联历史文件")
+        if not file_keys or len(file_keys) > 50 or len(set(file_keys)) != len(file_keys):
+            raise ValueError("请选择 1–50 个不重复的历史文件")
+        records = self.store.state_get("library_scan", "files", []) or []
+        candidates = {existing_media.record_key(row): row
+                      for row in existing_media.candidates_for_subscription(records, item, limit=50)}
+        if not set(file_keys).issubset(candidates):
+            raise ConflictError("所选文件与当前订阅不匹配，或扫描索引已变化，请重新预览")
+        from ..media import is_video
+        for key in file_keys:
+            record = candidates[key]
+            if not is_video(record["name"]):
+                raise ConflictError("不能把非视频文件关联为剧集")
+            provider = self.pipeline.reg.get_provider("storage", record["provider"])
+            if not provider.ready():
+                raise ConflictError("网盘未登录，禁止盲目关联")
+            if record["provider"] == "aliyun" and str(provider.client.drive_id) != record["drive_id"]:
+                raise ConflictError("阿里云盘资源库已变化，请重新扫描")
+            fs = provider.library()
+            try:
+                with self.pipeline.scope():
+                    valid = await asyncio.to_thread(existing_media.verify_record, fs, record)
+            except Exception:
+                valid = False
+            if not valid:
+                raise ConflictError("已有文件可能移动、改名或大小变化，请重新扫描后再关联")
+        confirmed = self.store.state_get("media_associations", "confirmed", {}) or {}
+        for key in file_keys:
+            row = candidates[key]
+            confirmed[key] = {
+                **{field: row.get(field) for field in
+                   ("provider", "drive_id", "id", "parent_id", "name", "size", "sha1")},
+                "tmdbid": item["tmdbid"], "title": item["title"],
+                "season": item["season"], "year": row.get("year"),
+            }
+        self.store.state_set("media_associations", "confirmed", confirmed)
+        return {"ok": True, "associated": len(file_keys), "file_keys": file_keys,
+                "note": "仅确认历史文件对应作品；没有移动或转存，后续去重仍会实时核验网盘文件"}
 
     def find_subscription(self, item: dict[str, Any]) -> dict[str, Any]:
         """按 id，或片名、季与 tmdbid 找到一条订阅；没有时抛 NotFoundError。"""
