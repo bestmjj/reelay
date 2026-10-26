@@ -84,6 +84,44 @@ class AliyunTests(unittest.TestCase):
             asyncio.run(provider.reconcile(ctx))
         self.assertEqual(len(provider.client.copies), 1)
 
+
+    def test_browse_allows_opaque_directory_id(self):
+        provider = AliyunStorage()
+        provider.client = FakeClient()
+        provider.client.entries = [
+            {"id": "abcdef0123456789abcdef", "name": "影视", "is_dir": True,
+             "size": 0, "sha1": None, "parent_id": "root"}
+        ]
+        result = provider.browse("0")
+        self.assertEqual(result["path"], [{"id": "0", "name": "根目录"}])
+        self.assertEqual(result["items"][0]["id"], "abcdef0123456789abcdef")
+
+    def test_expired_access_token_retries_only_reads(self):
+        from reelay.providers.aliyun import AliyunAPIError
+        client = AliyunClient()
+        with secret_store.override(aliyun_refresh_token="old-refresh-token-123456"):
+            results = [
+                {"access_token": "access1", "refresh_token": "rotated-refresh-token-123456",
+                 "default_drive_id": "drive123"},
+                AliyunAPIError(200, "AccessTokenInvalid"),
+                {"access_token": "access2", "refresh_token": "rotated2-refresh-token-123456",
+                 "default_drive_id": "drive123"},
+                {"items": []},
+            ]
+            with patch.object(client, "_send", side_effect=results) as sent:
+                self.assertEqual(client.post("/adrive/v3/file/list", {}, read=True), {"items": []})
+                self.assertEqual(sent.call_count, 4)
+        client = AliyunClient()
+        with secret_store.override(aliyun_refresh_token="old-refresh-token-123456"):
+            with patch.object(client, "_send", side_effect=[
+                {"access_token": "access1", "refresh_token": "rotated-refresh-token-123456",
+                 "default_drive_id": "drive123"},
+                AliyunAPIError(401, "AccessTokenInvalid"),
+            ]) as sent:
+                with self.assertRaises(AliyunAPIError):
+                    client.post("/v2/file/copy", {}, read=False)
+                self.assertEqual(sent.call_count, 2)
+
     def test_verified_landing(self):
         provider = AliyunStorage()
         provider.client = FakeClient()
