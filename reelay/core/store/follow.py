@@ -15,7 +15,7 @@ from .base import _locked
 def _subscription(row: sqlite3.Row) -> dict[str, Any]:
     return {"id": row["id"], "title": row["title"], "season": row["season"], "total": row["total"],
             "tmdbid": row["tmdbid"], "auto": bool(row["auto"]), "save_to": row["save_to"],
-            "created_at": row["created_at"],
+            "created_at": row["created_at"], "start_episode": row["start_episode"],
             "finished": json.loads(row["finished"]) if row["finished"] else None}
 
 
@@ -41,10 +41,10 @@ class FollowRepository:
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO subscriptions "
-                "(identity, title, season, total, tmdbid, auto, save_to, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?)", (identity, item["title"], item["season"], item.get("total"),
+                "(identity, title, season, total, tmdbid, auto, save_to, start_episode, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", (identity, item["title"], item["season"], item.get("total"),
                                              item.get("tmdbid"), 1 if item.get("auto", True) else 0,
-                                             item.get("save_to"), time.time()))
+                                             item.get("save_to"), item.get("start_episode"), time.time()))
             if not cur.rowcount:
                 return None
             return _subscription(self._conn.execute("SELECT * FROM subscriptions WHERE id=?",
@@ -55,6 +55,12 @@ class FollowRepository:
         with self._lock, self._conn:
             return bool(self._conn.execute(
                 "UPDATE subscriptions SET save_to=? WHERE id=?", (alias, subscription_id)).rowcount)
+
+    def set_subscription_start(self, subscription_id: int, episode: int | None) -> bool:
+        """Change only future auto-release decisions; queued tasks keep their snapshot."""
+        with self._lock, self._conn:
+            return bool(self._conn.execute(
+                "UPDATE subscriptions SET start_episode=? WHERE id=?", (episode, subscription_id)).rowcount)
 
     def remove_subscription(self, subscription_id: int) -> bool:
         with self._lock, self._conn:
