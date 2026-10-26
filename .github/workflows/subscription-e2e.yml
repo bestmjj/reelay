@@ -1,0 +1,106 @@
+name: Subscription E2E
+
+on:
+  pull_request:
+    paths:
+      - 'reelay/**'
+      - 'tests/**'
+      - 'web/**'
+      - '.github/workflows/subscription-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: subscription-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-e2e:
+    name: HTTP and pipeline E2E (mocked cloud)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: constraints.txt
+      - run: python -m pip install -c constraints.txt -e ".[all,dev]"
+      - name: Run end-to-end regression suite
+        run: |
+          mkdir -p test-results
+          python -m unittest -v tests.test_e2e_subscription_flows tests.test_manual_submit tests.test_subscription_discovery tests.test_subscription_simulation tests.test_existing_media tests.test_subscriptions tests.test_storage_files > test-results/api-e2e.log 2>&1 || { cat test-results/api-e2e.log; exit 1; }
+          cat test-results/api-e2e.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: subscription-api-e2e
+          path: test-results/
+          retention-days: 14
+
+  browser-e2e:
+    name: Browser E2E (Chromium)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: constraints.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: python -m pip install -c constraints.txt -e ".[all,dev]"
+      - name: Prepare isolated Reelay config (no cloud credentials)
+        run: |
+          mkdir -p data test-results
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          cfg = {
+              "save_dirs": {"阿里动漫": "aliyun:anime_folder", "115动漫": "123456"},
+              "defaults": {"storage": "aliyun", "save_to": "阿里动漫", "parser": "regex", "approval_mode": "manual"},
+              "sources": [
+                  {"bot": "@shareAliyun", "storage": "aliyun", "save_to": "阿里动漫"},
+                  {"bot": "@share115", "storage": "p115", "save_to": "115动漫"},
+              ],
+          }
+          Path("data/config.yaml").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+          PY
+      - name: Install UI and Chromium test runner
+        working-directory: web
+        run: |
+          npm ci
+          npm install --no-save --package-lock=false @playwright/test@1.56.1
+          npx playwright install --with-deps chromium
+          npm run build
+      - name: Start isolated Web API
+        run: |
+          REELAY_WEB_HOST=127.0.0.1 REELAY_WEB_PORT=28080 python -m reelay.web > test-results/server.log 2>&1 &
+          echo $! > test-results/server.pid
+          for i in $(seq 1 45); do
+            curl -fsS http://127.0.0.1:28080/api/health >/dev/null && exit 0
+            sleep 1
+          done
+          cat test-results/server.log
+          exit 1
+      - name: Exercise actual subscriptions page
+        working-directory: web
+        run: |
+          npx playwright test e2e/subscriptions.spec.ts --browser=chromium --reporter=line
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: subscription-browser-e2e
+          path: |
+            test-results/server.log
+            web/test-results/
+            web/playwright-report/
+          retention-days: 14
