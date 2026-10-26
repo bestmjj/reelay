@@ -36,8 +36,10 @@ class SubscriptionSimulationWebTests(WebCase):
         self.assertTrue(ctx.raw.extra["manual_import"])
         self.assertEqual(ctx.source_rule["approval_mode"], "auto")
         self.assertEqual(pipeline.rule_for("@shareAliyun")["approval_mode"], "manual")
+        # Historical Telegram permalinks are supported, but the test instance
+        # has no live listener. Fail safely without silently using another post.
         self.assertEqual(self.client.post("/api/resources/submit",
-            json={"text": "https://t.me/shareAliyun/12345"}).status_code, 422)
+            json={"text": "https://t.me/shareAliyun/12345"}).status_code, 409)
         self.assertEqual(self.client.post("/api/resources/submit", json={
             "text": "牧神记 https://www.alipan.com/s/abc123", "source": "@untrusted",
         }).status_code, 422)
@@ -121,6 +123,71 @@ class SubscriptionSimulationWebTests(WebCase):
             "id": sub["id"], "start_episode": 0})
         self.assertEqual(invalid.status_code, 422)
         self.assertEqual(self.app.state.store.subscription(sub["id"])["start_episode"], 100)
+
+    def test_existing_file_requires_explicit_confirmation_and_remote_readback(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from reelay.core import existing_media
+        sub = self.subscribe()
+        record = {
+            "alias": "默认", "provider": "aliyun", "drive_id": "resourceA",
+            "id": "f106", "parent_id": "show_folder", "name": "牧神记.S01E106.mkv",
+            "parents": ["牧神记"], "title": "牧神记", "season": 1, "episode": 106,
+            "media_type": "anime", "year": None, "tmdbid": None, "size": 1000, "sha1": "ABC",
+        }
+        store = self.app.state.store
+        store.state_set("library_scan", "files", [record])
+        store.state_set("library_scan", "snapshot", {"complete": False})
+        preview = self.client.get("/api/subscriptions/existing", params={"id": sub["id"]})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        item = preview.json()["items"][0]
+        self.assertFalse(item["associated"])
+        self.assertEqual(item["episode"], 106)
+        self.assertEqual(store.counts_by_state(), {})
+        provider = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        fs = SimpleNamespace(get_attr=Mock(return_value={
+            "id": "f106", "parent_id": "show_folder", "name": "牧神记.S01E106.mkv",
+            "is_dir": False, "size": 1000, "sha1": "ABC",
+        }))
+        with patch.object(provider, "ready", return_value=True), \
+                patch.object(provider, "client", SimpleNamespace(drive_id="resourceA")), \
+                patch.object(provider, "library", return_value=fs):
+            linked = self.client.post("/api/subscriptions/existing/associate",
+                                      json={"id": sub["id"], "file_keys": [item["file_key"]]})
+        self.assertEqual(linked.status_code, 200, linked.text)
+        self.assertEqual(linked.json()["associated"], 1)
+        self.assertTrue(self.client.get("/api/subscriptions/existing",
+            params={"id": sub["id"]}).json()["items"][0]["associated"])
+        self.assertEqual(store.counts_by_state(), {})  # no "done" or transfer created
+        overlay = existing_media.apply_associations(
+            store.state_get("library_scan", "files", []),
+            store.state_get("media_associations", "confirmed", {}))
+        self.assertEqual(overlay[0]["tmdbid"], 236534)
+        self.assertEqual(overlay[0]["title"], "牧神记")
+        self.assertEqual(overlay[0]["year"], None)
+        fs.get_attr.assert_called_once_with("f106")
+        changed = {**record, "name": "renamed.mkv"}
+        self.assertIsNone(existing_media.apply_associations([changed],
+            store.state_get("media_associations", "confirmed", {}))[0]["tmdbid"])
+        self.assertEqual(store.state_get("library_scan", "files")[0]["tmdbid"], None)
+
+    def test_stale_existing_file_is_never_associated(self):
+        from types import SimpleNamespace
+        sub = self.subscribe()
+        record = {"alias": "默认", "provider": "aliyun", "drive_id": "resourceA",
+                  "id": "f100", "parent_id": "show_folder", "name": "牧神记.S01E100.mkv",
+                  "parents": [], "title": "牧神记", "season": 1, "episode": 100,
+                  "media_type": "anime", "size": 10, "sha1": None}
+        self.app.state.store.state_set("library_scan", "files", [record])
+        provider = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        with patch.object(provider, "ready", return_value=True), \
+                patch.object(provider, "client", SimpleNamespace(drive_id="resourceA")), \
+                patch.object(provider, "library", return_value=SimpleNamespace(
+                    get_attr=lambda fid: {**record, "parent_id": "different", "is_dir": False})):
+            response = self.client.post("/api/subscriptions/existing/associate", json={
+                "id": sub["id"], "file_keys": ["aliyun:resourceA:f100"]})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.app.state.store.state_get("media_associations", "confirmed", {}), {})
 
     def test_discovery_health_is_visible_in_subscription_list(self):
         sub = self.subscribe()
