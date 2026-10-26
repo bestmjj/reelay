@@ -56,8 +56,8 @@ function CandidateCard({ candidate, wanted, onSubscribe, busy }: {
   );
 }
 
-function SubscriptionRow({ item, busy, onRemove, onReopen, onTest }: {
-  item: ISubscription; busy: boolean; onRemove: () => void; onReopen: () => void; onTest: () => void;
+function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart }: {
+  item: ISubscription; busy: boolean; onRemove: () => void; onReopen: () => void; onTest: () => void; onStart: () => void;
 }) {
   const finished = item.finished;
   return (
@@ -82,6 +82,9 @@ function SubscriptionRow({ item, busy, onRemove, onReopen, onTest }: {
             {item.aired ? ` · TMDB 已播 ${item.aired} 集` : ''}
           </>}
         </p>
+        {!finished && item.start_episode !== null ? (
+          <p className="mt-0.5 text-xs text-primary">仅从 E{item.start_episode} 起自动转存（含本集）</p>
+        ) : null}
         {!finished && item.discovery ? (
           <p className="mt-0.5 text-xs text-muted-foreground">
             自动检索：{item.discovery.checked_at
@@ -93,6 +96,9 @@ function SubscriptionRow({ item, busy, onRemove, onReopen, onTest }: {
           </p>
         ) : null}
       </div>
+      <Button size="sm" variant="outline" disabled={busy} onClick={onStart} title="设置本订阅最早自动转存的集号">
+        起始集
+      </Button>
       <Button size="sm" variant="outline" disabled={busy} onClick={onTest}
         title="用实际识别与订阅规则模拟，不会提交转存任务">
         <FlaskConical />模拟测试
@@ -125,6 +131,10 @@ export default function SubscriptionsPage() {
   const [testText, setTestText] = useState('');
   const [testResult, setTestResult] = useState<ISubscriptionSimulation | null>(null);
   const [testBusy, setTestBusy] = useState(false);
+  const [startOnAdd, setStartOnAdd] = useState('');
+  const [startItem, setStartItem] = useState<ISubscription | null>(null);
+  const [startInput, setStartInput] = useState('');
+  const [startBusy, setStartBusy] = useState(false);
   const [resourceText, setResourceText] = useState('');
   const [resourceBusy, setResourceBusy] = useState(false);
 
@@ -157,12 +167,18 @@ export default function SubscriptionsPage() {
   };
 
   const subscribe = async (item: { title: string; season: number; tmdbid?: number | null; total?: number | null }) => {
+    const threshold = startOnAdd.trim() ? Number(startOnAdd) : null;
+    if (threshold !== null && (!Number.isInteger(threshold) || threshold < 1 || threshold > 100000)) {
+      toast.error('起始集必须是 1–100000 的整数');
+      return;
+    }
     setBusy(true);
     try {
-      const r = await subscriptionApi.add(item);
+      const r = await subscriptionApi.add({ ...item, start_episode: threshold });
       announceSubscription(r.subscription, r.pending);
       setResolved(null);
       setQuery('');
+      setStartOnAdd('');
       load();
     } catch (e) {
       toast.error(errorMessage(e, '订阅失败'));
@@ -192,8 +208,31 @@ export default function SubscriptionsPage() {
         setTestItem(item);
         setTestText('');
         setTestResult(null);
+      }}
+      onStart={() => {
+        setStartItem(item);
+        setStartInput(item.start_episode?.toString() ?? '');
       }} />
   );
+  const saveStart = async () => {
+    if (!startItem || startBusy) return;
+    const floor = startInput.trim() ? Number(startInput) : null;
+    if (floor !== null && (!Number.isInteger(floor) || floor < 1 || floor > 100000)) {
+      toast.error('起始集必须是 1–100000 的整数');
+      return;
+    }
+    setStartBusy(true);
+    try {
+      await subscriptionApi.setStart(startItem.id, floor);
+      toast.success(floor ? `从 E${floor} 开始自动转存（含本集）` : '已清除集数下限');
+      setStartItem(null);
+      subs.reload();
+    } catch (e) {
+      toast.error(errorMessage(e, '保存起始集失败'));
+    } finally {
+      setStartBusy(false);
+    }
+  };
   const submitResource = async () => {
     if (!resourceText.trim() || resourceBusy) return;
     setResourceBusy(true);
@@ -264,7 +303,7 @@ export default function SubscriptionsPage() {
               </p>
             </div>
           </Panel>
-          <Panel icon={Search} title="添加订阅" description="用一句话说在追哪部剧，AI 帮你对应到 TMDB 条目和季。">
+          <Panel icon={Search} title="添加订阅" description="按 TMDB 选剧并可指定从哪一集开始，防止首次订阅转存旧集。">
             <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); void search(); }}>
               <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="如：我在追《一瓯春》第二季"
                 className="bg-card" aria-label="在追的剧" />
@@ -272,6 +311,13 @@ export default function SubscriptionsPage() {
                 {searching ? <Loader2 className="animate-spin" /> : <Search />}查找
               </Button>
             </form>
+            <div className="mt-3 flex flex-col gap-1.5">
+              <label htmlFor="new-sub-start" className="text-xs font-medium">最早自动接收集号（可选）</label>
+              <Input id="new-sub-start" type="number" inputMode="numeric" min={1} max={100000}
+                value={startOnAdd} onChange={(e) => setStartOnAdd(e.target.value)}
+                placeholder="如：当前最新 E100，则填写 100" className="bg-card" />
+              <p className="text-xs text-muted-foreground">填写 100：只自动接收 E100 及后续新集；填写 101：从下一集开始。留空沿用单集追更规则，不表示已经核实当前最新集。</p>
+            </div>
             {resolved ? (
               <div className="mt-4 space-y-3">
                 {resolved.candidates.length ? resolved.candidates.map((c) => (
@@ -375,6 +421,22 @@ export default function SubscriptionsPage() {
           </Panel>
         </div>
       </div>
+      <Dialog open={Boolean(startItem)} onOpenChange={(open) => { if (!open && !startBusy) setStartItem(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>设置起始集 · {startItem?.title}</DialogTitle>
+            <DialogDescription>只影响今后自动放行的单集，不补历史合集，也不改变正在排队的任务。</DialogDescription>
+          </DialogHeader>
+          <label className="text-sm font-medium" htmlFor="edit-sub-start">最早自动接收集号（含本集）</label>
+          <Input id="edit-sub-start" type="number" min={1} max={100000}
+            value={startInput} disabled={startBusy} onChange={(e) => setStartInput(e.target.value)}
+            placeholder="例如：100（留空则取消限制）" />
+          <p className="text-xs text-muted-foreground">当前 E100：填写 100 可以接收 E100；填写 101 则从 E101 开始。仍会检查季集、现有文件和去重，无法确认的交给人工。</p>
+          <Button onClick={() => void saveStart()} disabled={startBusy}>
+            {startBusy ? '保存中' : '保存起始集'}
+          </Button>
+        </DialogContent>
+      </Dialog>
       <Dialog open={Boolean(testItem)} onOpenChange={(open) => { if (!open && !testBusy) setTestItem(null); }}>
         <DialogContent>
           <DialogHeader>
