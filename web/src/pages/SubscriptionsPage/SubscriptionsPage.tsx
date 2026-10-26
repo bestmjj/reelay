@@ -1,8 +1,8 @@
-import { Ban, BellPlus, BellRing, CircleAlert, Flag, Lightbulb, Loader2, Search, Trash2, Undo2 } from 'lucide-react';
+import { Ban, BellPlus, BellRing, CircleAlert, Flag, FlaskConical, Lightbulb, Loader2, Search, Trash2, Undo2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
-import { subscriptionApi, type IIgnoredWork, type IResolveResp, type IShowCandidate, type ISubscription } from '@/api/subscriptions';
+import { subscriptionApi, type IIgnoredWork, type IResolveResp, type IShowCandidate, type ISubscription, type ISubscriptionSimulation } from '@/api/subscriptions';
 import { ErrorState } from '@/components/app/ErrorState';
 import { MediaCover } from '@/components/app/MediaCover';
 import { Page } from '@/components/app/Page';
@@ -12,9 +12,11 @@ import { Select } from '@/components/app/Select';
 import { ToneBadge } from '@/components/app/StatusBadge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAsync } from '@/hooks/useAsync';
-import { compactEpisodes } from '@/lib/format';
+import { compactEpisodes, relativeTime } from '@/lib/format';
 import { MEDIA_TYPE_LABELS } from '@/lib/status';
 import { announceSubscription } from '@/lib/subscriptions';
 import { cn, errorMessage } from '@/lib/utils';
@@ -54,8 +56,8 @@ function CandidateCard({ candidate, wanted, onSubscribe, busy }: {
   );
 }
 
-function SubscriptionRow({ item, busy, onRemove, onReopen }: {
-  item: ISubscription; busy: boolean; onRemove: () => void; onReopen: () => void;
+function SubscriptionRow({ item, busy, onRemove, onReopen, onTest }: {
+  item: ISubscription; busy: boolean; onRemove: () => void; onReopen: () => void; onTest: () => void;
 }) {
   const finished = item.finished;
   return (
@@ -80,7 +82,20 @@ function SubscriptionRow({ item, busy, onRemove, onReopen }: {
             {item.aired ? ` · TMDB 已播 ${item.aired} 集` : ''}
           </>}
         </p>
+        {!finished && item.discovery ? (
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            自动检索：{item.discovery.checked_at
+              ? `上次 ${relativeTime(item.discovery.checked_at)}`
+              : '尚未完成'}
+            {item.discovery.source ? ` · ${item.discovery.source}` : ''}
+            {item.discovery.error ? ` · ${item.discovery.error}` : ''}
+          </p>
+        ) : null}
       </div>
+      <Button size="sm" variant="outline" disabled={busy} onClick={onTest}
+        title="用实际识别与订阅规则模拟，不会提交转存任务">
+        <FlaskConical />模拟测试
+      </Button>
       {finished ? (
         <Button variant="outline" size="sm" disabled={busy} onClick={onReopen} title="恢复自动转存与缺集巡检（如出了特别篇）">
           <Undo2 />继续订阅
@@ -105,6 +120,10 @@ export default function SubscriptionsPage() {
   const [searching, setSearching] = useState(false);
   const [busy, setBusy] = useState(false);
   const [category, setCategory] = useState('');  // 空 = 全部类型
+  const [testItem, setTestItem] = useState<ISubscription | null>(null);
+  const [testText, setTestText] = useState('');
+  const [testResult, setTestResult] = useState<ISubscriptionSimulation | null>(null);
+  const [testBusy, setTestBusy] = useState(false);
 
   /** 操作后两份列表都重新读取。 */
   const load = () => { subs.reload(); ignoredWorks.reload(); };
@@ -165,8 +184,24 @@ export default function SubscriptionsPage() {
   const finished = shown.filter((i) => i.finished);
   const row = (item: ISubscription) => (
     <SubscriptionRow key={`${item.tmdbid ?? item.title}-${item.season}`} item={item} busy={busy}
-      onRemove={() => void remove(item)} onReopen={() => void reopen(item)} />
+      onRemove={() => void remove(item)} onReopen={() => void reopen(item)}
+      onTest={() => {
+        setTestItem(item);
+        setTestText('');
+        setTestResult(null);
+      }} />
   );
+  const runSimulation = async () => {
+    if (!testItem || testBusy) return;
+    setTestBusy(true);
+    try {
+      setTestResult(await subscriptionApi.simulate(testItem.id, testText.trim() || undefined));
+    } catch (e) {
+      toast.error(errorMessage(e, '模拟测试失败'));
+    } finally {
+      setTestBusy(false);
+    }
+  };
 
   return (
     <Page
@@ -187,6 +222,11 @@ export default function SubscriptionsPage() {
         </div>
       ) : null}
 
+      <div className="mb-4 rounded-lg border border-border bg-card px-4 py-3 text-xs leading-5 text-muted-foreground">
+        自动追剧已使用现有 Telegram 来源；后台定时搜索最近的订阅资源消息，
+        命中后仍经过 TMDB 匹配、过滤、去重及转存核验。无需每集人工操作。
+        <span className="ml-1">如需检查某部剧为什么没有自动放行，点击该行「模拟测试」。</span>
+      </div>
       <div className="grid gap-5 lg:grid-cols-5 lg:items-start">
         <div className="min-w-0 space-y-5 lg:col-span-3">
           <Panel icon={Search} title="添加订阅" description="用一句话说在追哪部剧，AI 帮你对应到 TMDB 条目和季。">
@@ -297,6 +337,63 @@ export default function SubscriptionsPage() {
           </Panel>
         </div>
       </div>
+      <Dialog open={Boolean(testItem)} onOpenChange={(open) => { if (!open && !testBusy) setTestItem(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>订阅模拟测试 · {testItem?.title} 第 {testItem?.season} 季</DialogTitle>
+            <DialogDescription>
+              优先读取最近已接收的对应频道消息；也可以粘贴一条真实资源消息。
+              仅运行识别和订阅决策，不产生任务、不访问或修改网盘文件。
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea value={testText} onChange={(event) => setTestText(event.target.value)}
+            rows={5} maxLength={12000} disabled={testBusy}
+            placeholder="可留空：自动选择已接收的匹配消息。或者粘贴频道中的完整资源消息（含分享链接）。" />
+          <Button disabled={testBusy} onClick={() => void runSimulation()}>
+            {testBusy ? <Loader2 className="animate-spin" /> : <FlaskConical />}
+            {testBusy ? '分析中' : '开始模拟测试'}
+          </Button>
+          {testResult ? (
+            <div role="status" className="max-h-72 space-y-2 overflow-auto rounded-lg border border-border bg-background/60 p-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <ToneBadge tone={testResult.status === 'automatic' ? 'success' :
+                  testResult.status === 'blocked' ? 'danger' : 'warning'}>
+                  {testResult.status === 'automatic' ? '预计自动放行' :
+                   testResult.status === 'no_sample' ? '尚无匹配样例' :
+                   testResult.status === 'manual' ? '需要人工处理' :
+                   testResult.status === 'not_matched' ? '未匹配该订阅' :
+                   testResult.status === 'no_source' ? '没有监听来源' : '被规则阻止'}
+                </ToneBadge>
+                {testResult.source ? <span className="text-xs text-muted-foreground">{testResult.source}</span> : null}
+              </div>
+              <p>{testResult.reason}</p>
+              {testResult.parsed ? (
+                <p className="text-muted-foreground">
+                  识别：{testResult.parsed.title || '未知'} · 第 {testResult.parsed.season ?? '?'} 季
+                  {testResult.parsed.episodes?.length
+                    ? ` · 第 ${compactEpisodes(testResult.parsed.episodes)} 集` : ''}
+                </p>
+              ) : null}
+              {testResult.routing ? <p className="text-muted-foreground">
+                目标网盘：{testResult.routing.target_storage === 'aliyun' ? '阿里云盘' : '115'}
+                {testResult.routing.compatible ? '' : '（与分享网盘不一致）'}
+              </p> : null}
+              {testResult.target_preview ? <p className="text-muted-foreground">预计目录：{testResult.target_preview}</p> : null}
+              {testResult.trail?.length ? (
+                <details className="rounded-md border border-border/70 px-2 py-1">
+                  <summary className="cursor-pointer text-xs">查看识别与决策轨迹</summary>
+                  <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                    {testResult.trail.map((step, i) => <p key={i}>{step}</p>)}
+                  </div>
+                </details>
+              ) : null}
+              <p className="text-xs text-muted-foreground">
+                本次测试没有创建任务，也未检查真实分享是否有效及目标是否已存在。
+              </p>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </Page>
   );
 }
