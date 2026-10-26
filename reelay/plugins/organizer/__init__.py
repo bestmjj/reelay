@@ -35,7 +35,8 @@ import re
 
 from ...core.contracts import ParsedResource, PipelineContext, StorageBusy
 from ...core.io import run_blocking
-from ...core.media import episode_of as _episode_of, is_video, resolution_rank, strip_ext
+from ...core.media import (VARIETY_LABELS, episode_of as _episode_of, is_video,
+                           resolution_rank, strip_ext, variety_episode)
 from ...core.registry import register
 from ...core.validation import validate_resource
 from ...core import release, runtime, tmdb
@@ -140,6 +141,22 @@ def build_plan(p, landed: list[dict], category_path: str = "",
             season, template = None, naming.get("movie", DEFAULT_NAMING["movie"])
         rel = render_path(template, _naming_values(p, f.get("name", ""), ext, season, episode),
                           label=f"{'剧集' if is_tv else '电影'}命名模板")
+        variety = variety_episode(f.get("name", "")) if is_tv else None
+        if variety:
+            # Preserve the configured season/folder template, but distinguish
+            # each edition in the rendered filename. No part may overwrite
+            # another file just because both belong to E03.
+            edition = variety[1]
+            target_dir, _, target_name = rel.rpartition("/")
+            basename = strip_ext(target_name)
+            label = VARIETY_LABELS[edition]
+            period = f"第 {episode} 期"
+            replacement = period + (f"（{label}）" if edition != "main" else "")
+            if re.search(rf"第\s*{episode}\s*集", basename):
+                basename = re.sub(rf"第\s*{episode}\s*集", replacement, basename, count=1)
+            else:
+                basename += " - " + replacement
+            rel = "/".join(filter(None, (target_dir, basename + f".{ext}")))
         if category_path:
             rel = category_path.strip("/") + "/" + rel
         parts = rel.split("/")
@@ -221,7 +238,16 @@ def _same_slot(existing: dict, target_name: str, title: str, is_tv: bool) -> boo
     if not is_tv:
         return True
     episode = _episode_of(name)
-    return episode[1] is not None and episode == _episode_of(target_name)
+    target_episode = _episode_of(target_name)
+    if episode[1] is None or episode != target_episode:
+        return False
+    # A stored E03 上 is not a conflict with E03 下 or E03 加更.
+    old_edition = variety_episode(name)
+    new_edition = variety_episode(target_name)
+    if old_edition or new_edition:
+        return (old_edition[1] if old_edition else "main") == (
+            new_edition[1] if new_edition else "main")
+    return True
 
 
 class _MediaLibrary:
