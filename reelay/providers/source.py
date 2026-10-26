@@ -277,6 +277,10 @@ class TelegramUserbotSource:
             try:
                 async for msg in self._client.iter_messages(
                         entity, search=sub["title"], limit=discovery.SEARCH_LIMIT):
+                    if source.casefold() not in self._targets and key.rsplit(":", 1)[0] not in self._targets:
+                        # Sources can be edited while a search is in flight.
+                        # Never accept a historical post from a just-removed source.
+                        break
                     date = getattr(msg, "date", None)
                     if date is None:
                         continue
