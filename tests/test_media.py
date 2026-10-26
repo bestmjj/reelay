@@ -21,13 +21,20 @@ class EpisodeOfTest(unittest.TestCase):
             "[字幕组] 某番 S2 - 11v2 (1080p).mkv": (2, 11),
             "[字幕组][某番][07][1080p].mp4": (None, 7),
             "05.mkv": (None, 5),
+            "41 4K.mp4": (None, 41),
+            "106 4K.mp4": (None, 106),
+            "106.2160p.mkv": (None, 106),
+            "106 - 4K HDR.mp4": (None, 106),
+            "106_1080p_HEVC.mp4": (None, 106),
         }
         for name, expected in cases.items():
             with self.subTest(name=name):
                 self.assertEqual(episode_of(name), expected)
 
     def test_years_and_resolutions_are_not_episodes(self):
-        for name in ("House.1080p.03.mkv", "Movie.2023.2160p.mkv", "2021.mkv", "1080.mkv", "Movie.mkv"):
+        for name in ("House.1080p.03.mkv", "Movie.2023.2160p.mkv", "2021.mkv", "1080.mkv",
+                     "Movie.mkv", "2024 4K.mp4", "1080p.mp4", "Season 4K.mp4",
+                     "41 travel 4K.mp4", "4K HDR.mp4", "42 4K movie.mp4"):
             with self.subTest(name=name):
                 self.assertIsNone(episode_of(name)[1])
 
