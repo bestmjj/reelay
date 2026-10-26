@@ -144,6 +144,29 @@ def parse_115_url(text: str, urls: list[str]) -> tuple[str | None, str | None, s
     return None, None, None
 
 
+_ALI_SHARE_RE = re.compile(r"https?://(?:www\.)?(?:alipan\.com|aliyundrive\.com)/s/([A-Za-z0-9_-]+)(?:\?[^\s]*)?", re.I)
+
+
+def parse_share_url(text: str, urls: list[str]) -> tuple[str | None, str | None, str | None]:
+    """Recognize both 115 and Aliyun Drive; never infer an ID from LLM output."""
+    for item in [*urls, text]:
+        match = _ALI_SHARE_RE.search(item or "")
+        if match:
+            password = _PWD_RE.search(text or "")
+            query = re.search(r"[?&](?:pwd|password)=([A-Za-z0-9]{4})", match.group(0), re.I)
+            return match.group(0), match.group(1), (password.group(1) if password else
+                                                      query.group(1) if query else None)
+    return parse_115_url(text, urls)
+
+
+def share_provider(share_url: str | None) -> str | None:
+    if share_url and _ALI_SHARE_RE.search(share_url):
+        return "aliyun"
+    if share_url and _SHARE_RE.search(share_url):
+        return "p115"
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # 规则解析（兜底 / 降级）
 # --------------------------------------------------------------------------- #
