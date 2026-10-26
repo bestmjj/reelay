@@ -32,6 +32,10 @@ export interface ICloudRename extends ICloudWrite {
   old_name: string;
   is_dir: boolean;
 }
+export interface ICloudMove extends ICloudWrite {
+  fid: string;
+  destination_cid: string;
+}
 
 export interface IAuth115Side {
   state: 'unknown' | 'active' | 'expired' | 'error';
@@ -94,6 +98,8 @@ export const storageApi = {
     post<{ ok: boolean; id: string; name: string }>('storage/folders', params),
   renameEntry: (params: ICloudRename) =>
     patch<{ ok: boolean; id: string; name: string; unchanged?: boolean }>('storage/names', params),
+  moveFile: (params: ICloudMove) =>
+    post<{ ok: boolean; id: string; name: string; destination_cid: string }>('storage/move', params),
   auth115Status: () => get<IAuth115Status>('auth115/status'),
   auth115Ping: () => post<{ cookie: string; oauth: string; status: IAuth115Status }>('auth115/ping'),
   auth115SetCookie: (cookies: string) => put<{ ok: boolean; state: string }>('auth115/cookie', { cookies }),
