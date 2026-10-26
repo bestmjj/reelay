@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { inboxApi, type ISaveDirs } from '@/api/inbox';
 import { subscriptionApi } from '@/api/subscriptions';
-import { taskApi } from '@/api/tasks';
+import { taskApi, type IShareFolderPreview } from '@/api/tasks';
 import { ErrorState } from '@/components/app/ErrorState';
 import { Field } from '@/components/app/Field';
 import { MediaCover } from '@/components/app/MediaCover';
@@ -55,6 +55,7 @@ interface TaskMeta {
   confidence?: { score?: number; caps?: string[] };
   organize?: { plan?: Array<{ target_dir: string; target_name: string }>; error?: string; pending_conflict?: IOrganizeConflict };
   storage?: { partial?: ITransferPartial };
+  share_selection?: { folder_id?: string; path?: string };
 }
 
 export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDetailSheetProps) {
@@ -66,6 +67,10 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const [targetDir, setTargetDir] = useState('');
   const [busy, setBusy] = useState(false);
   const [choosing, setChoosing] = useState(false);
+  const [shareFolders, setShareFolders] = useState<IShareFolderPreview | null>(null);
+  const [shareFolderId, setShareFolderId] = useState('');
+  const [rememberShareFolder, setRememberShareFolder] = useState(true);
+  const [shareFolderBusy, setShareFolderBusy] = useState(false);
   // 换了任务或保存了修改：表单回到这份详情（渲染时同步，而不是在 effect 里再设一次）
   if (detail !== shown) {
     setShown(detail);
@@ -73,6 +78,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     setEpisodesText((detail?.context.parsed?.episodes ?? []).join(', '));
     setTargetDir('');  // 空值 = 审批时按自动分类、重新整理时保持当前目录
     setChoosing(false);
+    if (detail?.task_id !== shown?.task_id) {
+      setShareFolders(null);
+      setShareFolderId('');
+      setRememberShareFolder(true);
+    }
   }
 
   const can = (action: TaskActionName) => allows(detail?.actions, action);
@@ -100,6 +110,39 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       toast.error(errorMessage(err, '操作失败'));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const browseShareFolders = async () => {
+    if (!detail) return;
+    setShareFolderBusy(true);
+    try {
+      const preview = await taskApi.shareFolders(detail.task_id);
+      setShareFolders(preview);
+      setShareFolderId(preview.selected_folder_id ?? '');
+    } catch (err) {
+      toast.error(errorMessage(err, '读取分享版本失败'));
+    } finally {
+      setShareFolderBusy(false);
+    }
+  };
+
+  const chooseShareFolder = async () => {
+    if (!detail || !shareFolderId) return;
+    setShareFolderBusy(true);
+    try {
+      const preview = await taskApi.chooseShareFolder(
+        detail.task_id, shareFolderId, rememberShareFolder,
+      );
+      setShareFolders(preview);
+      setShareFolderId(preview.selected_folder_id ?? '');
+      toast.success('已选定分享版本；失败任务可点击「重试」，待审批任务可点击「确认转存」');
+      loaded.reload();
+      onChanged?.();
+    } catch (err) {
+      toast.error(errorMessage(err, '确认分享版本失败'));
+    } finally {
+      setShareFolderBusy(false);
     }
   };
 
@@ -230,6 +273,49 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                 ) : null}
               </div>
             </div>
+          ) : null}
+
+          {can('choose_share_folder') ? (
+            <Section title="选择分享版本" icon={FolderTree}>
+              <p className="text-xs leading-5 text-muted-foreground">
+                分享内存在 HDR.Vivid / DoVi 等不同版本时，只选择一个文件夹。
+                两者是 HDR 格式，不代表分辨率不同；不会自动混用、覆盖或重新转存已有文件。
+              </p>
+              <Button variant="outline" size="sm" disabled={shareFolderBusy || busy}
+                onClick={() => void browseShareFolders()}>
+                <FolderTree />{shareFolders ? '刷新分享文件夹' : '读取分享文件夹'}
+              </Button>
+              {shareFolders ? (
+                <div className="space-y-2 rounded-lg border p-3">
+                  <Select value={shareFolderId} onValueChange={setShareFolderId}
+                    options={shareFolders.folders.map((folder) => ({
+                      value: folder.folder_id,
+                      label: `${folder.path} · ${folder.count} 个视频${folder.unrecognized ? `，${folder.unrecognized} 个未识别` : ''}`,
+                    }))}
+                    placeholder="请选择一个版本（不会自动混用）" />
+                  {shareFolderId ? (
+                    <p className="text-xs text-muted-foreground">
+                      当前版本：{shareFolders.folders.find((folder) => folder.folder_id === shareFolderId)?.path}
+                      {shareFolders.folders.find((folder) => folder.folder_id === shareFolderId)?.episodes.length
+                        ? ` · 已识别 ${shareFolders.folders.find((folder) => folder.folder_id === shareFolderId)?.episodes.length} 个季集`
+                        : ''}。所选版本缺集时会停止，不会改用另一个文件夹。
+                    </p>
+                  ) : null}
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input type="checkbox" checked={rememberShareFolder}
+                      onChange={(e) => setRememberShareFolder(e.target.checked)} />
+                    此分享链接以后沿用该版本（文件夹改变时仍会停止核对）
+                  </label>
+                  <Button size="sm" disabled={shareFolderBusy || busy || !shareFolderId}
+                    onClick={() => void chooseShareFolder()}>确认这个版本</Button>
+                </div>
+              ) : null}
+              {meta.share_selection?.path ? (
+                <p className="text-xs text-muted-foreground">
+                  已选择：{meta.share_selection.path}。不会修改已经开始转存的任务。
+                </p>
+              ) : null}
+            </Section>
           ) : null}
 
           {conflict ? (
