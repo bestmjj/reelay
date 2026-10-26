@@ -120,7 +120,11 @@ async def _serve_fetch(store: Store, source, request: dict) -> None:
     try:
         if not hasattr(source, "recent"):
             raise RuntimeError("当前消息源不支持读取历史消息")
-        if request.get("search_query"):
+        if request.get("message_id") is not None:
+            if not hasattr(source, "message_by_id"):
+                raise RuntimeError("当前消息源不支持读取历史消息链接")
+            operation = source.message_by_id(request["bot"], int(request["message_id"]))
+        elif request.get("search_query"):
             if not hasattr(source, "search_messages"):
                 raise RuntimeError("当前消息源不支持按订阅查询历史消息")
             operation = source.search_messages(request["bot"], request["search_query"], request["max_count"])
