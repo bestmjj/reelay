@@ -148,6 +148,9 @@ class OverviewMixin(ServiceBase):
             raise NotFoundError("任务不存在")
         ctx = self.store.get_task(task_id)
         record["actions"] = self.task_actions(ctx)
+        # Make the actual source provenance visible even for a completed task.
+        # A verified copy does not establish the correctness of its media.
+        record["source_audit"] = self.transfer_source_audit(task_id)
         record.update(self._auto_target(ctx if record["state"] == TaskState.PENDING_APPROVAL.value else None))
         if record["state"] in (TaskState.FAILED.value, TaskState.NEED_MANUAL.value):
             record["explanation"] = self.explanation(task_id, record["state"])
