@@ -327,7 +327,8 @@ export default function StoragePage() {
         <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
           此处修改只作用于当前选择的网盘。保存目录别名仍在
           <Link to="/config" className="mx-0.5 font-medium text-primary hover:underline">设置</Link>
-          中配置。重命名已被任务引用的文件或目录，可能影响进行中的整理和恢复任务。
+          中配置。重命名已被任务引用的文件或目录，可能影响进行中的整理和恢复任务；
+          「网盘已有文件」媒体库索引需在改名后重新手动扫描。
         </p>
       </div>
 
