@@ -1,6 +1,9 @@
 """追剧订阅与「不再接收」的作品（用户数据，存在数据库里）。"""
 from __future__ import annotations
 
+import asyncio
+from typing import Literal
+
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
@@ -23,6 +26,12 @@ class SubscriptionDestinationPayload(BaseModel):
 class SubscriptionStartPayload(BaseModel):
     id: int = Field(gt=0)
     start_episode: int | None = Field(default=None, ge=1, le=100000)
+
+
+class ExistingFolderScanPayload(BaseModel):
+    id: int = Field(gt=0)
+    provider: Literal["p115", "aliyun"]
+    cid: str = Field(min_length=1, max_length=128)
 
 
 class ExistingAssociatePayload(BaseModel):
@@ -89,6 +98,19 @@ def router(service) -> APIRouter:
     async def preview_existing(id: int = Query(gt=0), offset: int = Query(default=0, ge=0)):
         """Safe read-only preview; actual cloud files are checked upon confirmation."""
         return service.existing_subscription_candidates(id, offset=offset)
+
+    scan_lock = asyncio.Lock()
+
+    @api.post("/api/subscriptions/existing/scan-folder")
+    async def scan_existing_folder(payload: ExistingFolderScanPayload):
+        """Read only the folder chosen in the UI, no save-dir configuration edits."""
+        if scan_lock.locked():
+            from fastapi import HTTPException
+            raise HTTPException(status_code=409, detail="已有文件夹扫描正在进行")
+        async with scan_lock:
+            return await asyncio.to_thread(
+                service.scan_existing_subscription_folder,
+                payload.id, payload.provider, payload.cid)
 
     @api.post("/api/subscriptions/existing/associate")
     async def associate_existing(payload: ExistingAssociatePayload):
