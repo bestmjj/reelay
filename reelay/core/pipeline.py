@@ -380,6 +380,12 @@ class Pipeline:
                 ctx.decision = await decider.decide(ctx)
         if ctx.decision == Decision.SAVE and ctx.meta.get("parse", {}).get("fallback"):
             ctx.decision = Decision.ASK
+        if ctx.raw.extra.get("manual_import") and ctx.parsed and not ctx.parsed.title:
+            # A bare share URL has no trustworthy work identity. Always ask
+            # before saving or organizing it, even with an auto source.
+            if ctx.decision != Decision.SKIP:
+                ctx.decision = Decision.ASK
+                ctx.log("手动分享缺少可信作品名称，需人工补齐片名与类型")
         if ctx.raw.extra.get("manual_import") and ctx.parsed and (
                 ctx.parsed.media_type in ("tv", "anime") or ctx.parsed.episodes):
             # One-click historical saves must never copy an entire hidden
