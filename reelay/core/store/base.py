@@ -34,6 +34,7 @@ from ..contracts import Decision, ParsedResource, PipelineContext, RawMessage, T
 DEDUP_MESSAGE = "message"   # 消息级：这条 TG 消息处理过没（防重放/重启重复）
 DEDUP_SHARE = "share"       # 资源级：这个分享链接转存过没（防重复转存）
 DEDUP_EPISODE = "episode"   # 内容级：这一集入库过没（追更关键）
+DEDUP_VARIETY = "variety_part"  # 综艺同一期的上/下/加更/纯享分开确认
 
 
 _SCHEMA = """
