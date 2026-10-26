@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .. import library, library_scan, library_view, release
+from .. import library, library_scan_progress, library_view, release
 from .base import ServiceBase
 
 # 管理台媒体库页每部作品需要的字段
@@ -75,15 +75,22 @@ class CatalogMixin(ServiceBase):
     def scan_existing_library(self) -> dict[str, Any]:
         """Manually triggered, bounded read-only inventory of configured cloud folders."""
         self.pipeline.reload_config()
-        snapshot = library_scan.inventory(
+        # Resume the exact pending folder queue instead of dropping the first
+        # 1,647 files when a 45s scan budget is exhausted.
+        cursor = self.store.state_get("library_scan", "cursor") or None
+        snapshot, new_cursor = library_scan_progress.step(
             self.pipeline.cfg,
             lambda provider: self.pipeline.reg.get_provider("storage", provider),
+            cursor=cursor,
         )
-        # On a total failure keep the last known inventory; never replace
-        # healthy results with an empty collection caused by login/API errors.
-        if not snapshot["scanned_roots"]:
+        if not snapshot["scanned_roots"] and not snapshot["has_more"]:
             details = "；".join(snapshot["errors"][:3]) or "没有可扫描的目录"
             raise ValueError(f"未能读取任何影视目录；保留上次扫描结果。{details}")
+        # Durable, read-only physical file IDs are independent of successful
+        # transfers, and are never written to the verified dedup ledger.
+        self.store.state_set("library_scan", "cursor", new_cursor)
+        # Records will be maintained by the scan helper as a separate
+        # observation index; they must not change stored_series or dedup.
         self.store.state_set("library_scan", "snapshot", snapshot)
         return snapshot
 
