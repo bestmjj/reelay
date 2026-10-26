@@ -27,6 +27,17 @@ class ExistingMediaTests(unittest.TestCase):
         self.assertFalse(existing_media.check(self.cloud,[{**self.record,"drive_id":"backup"}],self.parsed,{},provider="aliyun")["covered"])
         self.assertFalse(existing_media.check(self.cloud,[{**self.record,"tmdbid":999}],self.parsed,{},provider="aliyun")["covered"])
 
+    def test_same_tmdb_id_and_episode_is_reused_even_after_filename_renamed(self):
+        different = {**self.record, "title": "Ancient Tale"}
+        self.assertEqual(existing_media.check(
+            self.cloud, [different], self.parsed, {}, provider="aliyun")["covered"], [[1,106]])
+
+    def test_conflicting_year_with_matching_tmdb_id_requires_review(self):
+        different = {**self.record, "title": "Another Title", "year": 2025}
+        result = existing_media.check(self.cloud, [different], self.parsed, {}, provider="aliyun")
+        self.assertFalse(result["covered"])
+        self.assertTrue(result["uncertain"])
+
     def test_stale_file_causes_manual_review(self):
         self.fs.get_attr.return_value["parent_id"]="moved"
         result=existing_media.check(self.cloud,[self.record],self.parsed,{},provider="aliyun")
