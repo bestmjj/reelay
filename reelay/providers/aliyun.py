@@ -329,33 +329,51 @@ class AliyunStorage(ShareStorage):
                 return "/" + "/".join(reversed(parts))
         raise ValueError("阿里云盘目录路径过深")
 
-    def _share_files(self, ctx: PipelineContext) -> list[dict]:
+    def _share_files(self, ctx: PipelineContext, *, include_dirs: bool = False) -> list[dict]:
+        """Complete paginated share inventory; keep *every* directory ancestor.
+
+        Regular transfer only sees video files. The read-only folder picker
+        additionally sees empty folders, and must not silently omit them.
+        """
         p = ctx.parsed
         token = self.client.share_token(p.share_code, p.receive_code)
-        out = []
+        out: list[dict] = []
+        visited: set[str] = set()
+        total = 0
 
-        def walk(parent: str, depth: int, path: tuple[str, ...], top: str):
+        def walk(parent: str, depth: int, path: tuple[str, ...], ancestors: tuple[str, ...]):
+            nonlocal total
+            if parent in visited:
+                raise NeedsManual("分享出现重复目录 ID，无法验证目录树完整性")
+            visited.add(parent)
             for item in self.client.shared_children(p.share_code, token, parent):
+                total += 1
+                if total > 10000:
+                    raise NeedsManual("分享项目超过 10000 个，不能确定全部目录和文件，请人工处理")
                 if item["is_dir"]:
-                    if depth >= 3:
-                        raise NeedsManual("阿里云盘分享目录过深，无法核验完整文件")
-                    walk(item["id"], depth + 1, (*path, item["name"]),
-                         item["id"] if depth == 0 else top)
+                    next_path = (*path, item["name"])
+                    next_ids = (*ancestors, str(item["id"]))
+                    if include_dirs:
+                        out.append({**item, "share_path": "/".join(next_path),
+                                    "share_ancestor_ids": list(next_ids),
+                                    "share_folder_id": str(item["id"])})
+                    if depth >= 8:
+                        raise NeedsManual("阿里云盘分享目录超过 8 层，无法完整核验；禁止按不完整列表转存")
+                    walk(str(item["id"]), depth + 1, next_path, next_ids)
                 elif is_video(item["name"]):
-                    # File IDs, branch ID and names all originate from the
-                    # same freshly enumerated share. They are not drive paths.
-                    out.append({**item, "share_folder_id": top,
+                    out.append({**item,
+                                "share_folder_id": ancestors[-1] if ancestors else "root",
+                                "share_ancestor_ids": list(ancestors),
                                 "share_path": "/".join(path)})
-                if len(out) > 10000:
-                    raise NeedsManual("分享文件过多，需要人工选择")
-        walk("root", 0, (), "root")
+        walk("root", 0, (), ())
         return out
 
     def share_folder_choices(self, parsed) -> list[dict]:
-        """Read-only groups from a shared link; never infer best quality."""
+        """Show the complete share directory tree, including empty branches."""
         from types import SimpleNamespace
         from .storage import share_folder_choices
-        return share_folder_choices(self._share_files(SimpleNamespace(parsed=parsed)))
+        return share_folder_choices(
+            self._share_files(SimpleNamespace(parsed=parsed), include_dirs=True))
 
     def inspect_share(self, parsed, *, describe: bool) -> dict:
         from types import SimpleNamespace
