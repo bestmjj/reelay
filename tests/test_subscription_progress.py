@@ -71,6 +71,10 @@ class ProgressEpisodeTests(ServiceCase):
         selected = _select_video_items(listing, ctx.parsed, scope=ctx.source_rule["episodes_from"])
         self.assertEqual([entry["name"] for entry in selected["files"]], ["牧神记.S01E106.mkv"])
         self.assertEqual(selected["episodes"], [106])
+        # Two E01 releases are irrelevant to the requested E106.
+        unrelated = {**listing[0], "id": "old-duplicate", "name": "牧神记.S01E001.second.mkv"}
+        selected = _select_video_items(listing + [unrelated], ctx.parsed, scope="message")
+        self.assertEqual([entry["name"] for entry in selected["files"]], ["牧神记.S01E106.mkv"])
         with self.assertRaisesRegex(NeedsManual, "106"):
             _select_video_items(listing[:-1], ctx.parsed, scope="message")
         # Even a valid E106 cannot be chosen if two releases claim the same episode.
