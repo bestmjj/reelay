@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .. import library, release
+from .. import library, library_scan, release
 from .base import ServiceBase
 
 # 管理台媒体库页每部作品需要的字段
@@ -25,6 +25,36 @@ class CatalogMixin(ServiceBase):
         groups = [{key: group[key] for key in _WEB_FIELDS} for group in self._groups(query, media_type)]
         return {"groups": groups, "total_done": sum(group["tasks"] for group in groups),
                 "estimated_gb": round(sum(group["bytes"] for group in groups) / 1024 ** 3, 2)}
+
+    def scanned_library(self, *, query: str | None = None, media_type: str | None = None) -> dict[str, Any]:
+        """Separate read-only cloud inventory; never counted as verified Reelay transfers."""
+        snapshot = self.store.state_get("library_scan", "snapshot") or {
+            "groups": [], "scanned_at": None, "file_count": 0, "folder_count": 0,
+            "scanned_roots": 0, "errors": [], "complete": False, "truncated": False,
+        }
+        items = snapshot["groups"]
+        if query:
+            items = [x for x in items if query.casefold() in x["title"].casefold()]
+        if media_type:
+            items = [x for x in items if x["media_type"] == media_type]
+        return {**snapshot, "groups": items,
+                "estimated_gb": round(sum(x["bytes"] for x in items) / 1024 ** 3, 2),
+                "total_done": 0}
+
+    def scan_existing_library(self) -> dict[str, Any]:
+        """Manually triggered, bounded read-only inventory of configured cloud folders."""
+        self.pipeline.reload_config()
+        snapshot = library_scan.inventory(
+            self.pipeline.cfg,
+            lambda provider: self.pipeline.reg.get_provider("storage", provider),
+        )
+        # On a total failure keep the last known inventory; never replace
+        # healthy results with an empty collection caused by login/API errors.
+        if not snapshot["scanned_roots"]:
+            details = "；".join(snapshot["errors"][:3]) or "没有可扫描的目录"
+            raise ValueError(f"未能读取任何影视目录；保留上次扫描结果。{details}")
+        self.store.state_set("library_scan", "snapshot", snapshot)
+        return snapshot
 
     def library_query(self, *, query: str | None = None, media_type: str | None = None,
                       min_resolution: str | None = None, origin_country: str | None = None,
