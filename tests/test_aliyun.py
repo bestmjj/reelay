@@ -6,9 +6,9 @@ import unittest
 from unittest.mock import patch
 
 from reelay.core import secret_store
-from reelay.core.contracts import ParsedResource, PipelineContext, RawMessage, TransferUncertain
+from reelay.core.contracts import NeedsManual, ParsedResource, PipelineContext, RawMessage, TransferUncertain
 from reelay.core.parse_rules import parse_share_url, share_provider
-from reelay.providers.aliyun import AliyunClient, AliyunStorage
+from reelay.providers.aliyun import AliyunClient, AliyunStorage, _resource_drive_id
 
 
 def context():
@@ -18,6 +18,7 @@ def context():
     ctx.parsed = parsed
     ctx.ns("storage")["manifest"] = {
         "to_cid": "folderAAA0000000001", "staging_cid": "stageAAA0000000001",
+        "drive_id": "resource-drive-id-123",
         "files": [{"id": "share-file-1", "name": "Example.mp4", "size": 123, "sha1": None}],
         "episodes": [],
     }
@@ -25,6 +26,8 @@ def context():
 
 
 class FakeClient:
+    drive_id = "resource-drive-id-123"
+
     def __init__(self):
         self.entries = []
         self.copies = []
@@ -47,6 +50,47 @@ class FakeClient:
 
 
 class AliyunTests(unittest.TestCase):
+    def test_resource_drive_selected_over_default_backup(self):
+        response = {"resource_drive_id": "resource-drive-id-123",
+                    "default_drive_id": "backup-drive-id-456",
+                    "backup_drive_id": "backup-drive-id-456"}
+        self.assertEqual(_resource_drive_id(response), "resource-drive-id-123")
+        client = AliyunClient()
+        with secret_store.override(aliyun_refresh_token="original-token-123456"):
+            with patch.object(client, "_send", side_effect=[
+                {"access_token": "access", "refresh_token": "rotated-token-123456", **response},
+                {"items": []},
+                {"file_id": "new-id"},
+            ]) as send:
+                self.assertEqual(client.children("0"), [])
+                self.assertEqual(client.copy("share", "share_token", "file-123", "root"), {"file_id": "new-id"})
+            calls = send.call_args_list
+            self.assertEqual(calls[1].args[1]["drive_id"], "resource-drive-id-123")
+            self.assertEqual(calls[2].args[1]["to_drive_id"], "resource-drive-id-123")
+            self.assertNotIn("backup-drive-id-456", str(calls[1].args[1]))
+            self.assertNotIn("backup-drive-id-456", str(calls[2].args[1]))
+
+    def test_does_not_silently_fall_back_to_known_backup_disk(self):
+        with self.assertRaisesRegex(ValueError, "拒绝自动使用备份盘"):
+            _resource_drive_id({"default_drive_id": "backup1", "backup_drive_id": "backup1"})
+        with self.assertRaisesRegex(ValueError, "资源库"):
+            _resource_drive_id({"backup_drive_id": "backup1"})
+
+    def test_old_backup_manifest_is_not_copied_or_deleted_on_resource_disk(self):
+        provider = AliyunStorage()
+        provider.client = FakeClient()
+        ctx = context()
+        manifest = ctx.ns("storage")["manifest"]
+        manifest["drive_id"] = "old-backup-drive-id"
+        with self.assertRaises(NeedsManual):
+            asyncio.run(provider.save(ctx))
+        self.assertEqual(provider.client.copies, [])
+        with self.assertRaises(NeedsManual):
+            provider._remove_stage(manifest, must_be_empty=False)
+        del manifest["drive_id"]
+        with self.assertRaises(NeedsManual):
+            asyncio.run(provider.reconcile(ctx))
+
     def test_links_and_provider(self):
         url, code, pwd = parse_share_url("提取码 abcd https://www.alipan.com/s/abcDEF",
                                          ["https://www.alipan.com/s/abcDEF"])
