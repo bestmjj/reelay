@@ -1,4 +1,4 @@
-import { get, query } from './request';
+import { get, post, query } from './request';
 
 /** 媒体库里的一部作品：同一片名的已入库任务汇总。 */
 export interface ITitleGroup {
@@ -21,6 +21,10 @@ export interface ITitleGroup {
   save_dir_alias: string | null;
   files: string[];
   updated_at: number;
+  /** 只读扫描的文件不代表 Reelay 已完成转存。 */
+  origin?: 'scanned';
+  provider?: 'p115' | 'aliyun';
+  file_count?: number;
 }
 
 export interface ILibraryResp {
@@ -29,7 +33,21 @@ export interface ILibraryResp {
   estimated_gb: number;
 }
 
+export interface ILibraryScanResp extends ILibraryResp {
+  scanned_at: number | null;
+  file_count: number;
+  folder_count: number;
+  scanned_roots: number;
+  errors: string[];
+  complete: boolean;
+  truncated: boolean;
+  limits?: { folders: number; videos: number; depth: number; seconds: number };
+}
+
 export const libraryApi = {
   /** 按全部已入库任务汇总，不限条数；排序在前端做。 */
   list: (q?: string, mediaType?: string) => get<ILibraryResp>(`library${query({ q, media_type: mediaType })}`),
+  scanned: (q?: string, mediaType?: string) =>
+    get<ILibraryScanResp>(`library/scan${query({ q, media_type: mediaType })}`),
+  scan: () => post<ILibraryScanResp>('library/scan'),
 };
