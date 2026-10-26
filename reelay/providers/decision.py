@@ -143,7 +143,7 @@ class SubscriptionDecision(DefaultDecision):
         # existing cloud files immediately before any copy; duplicates are
         # skipped there, without flooding the manual approval inbox.
         record = ctx.ns("subscription")
-        record.update(title=item["title"], season=season, tmdbid=item["tmdbid"])
+        record.update(id=item["id"], title=item["title"], season=season, tmdbid=item["tmdbid"])
         # The share itself may contain an entire old season. Restrict
         # the storage selector to the one explicitly matched episode.
         p.episodes = sorted(episodes)
