@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     tmdbid INTEGER,
     auto INTEGER NOT NULL DEFAULT 1,     -- 1：新集自动转存；0：只巡检缺集
     save_to TEXT,                        -- NULL: 跟随来源与自动分类；否则目录别名
+    start_episode INTEGER,               -- NULL: 保留既有逐集规则；非空时只自动放行此集或之后
     finished TEXT,                       -- 一季播完且全部入库后自动结束：{"date", "episodes"}；在追为 NULL
     created_at REAL NOT NULL
 );
@@ -219,7 +220,15 @@ def _source_fetch_search(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE source_fetches ADD COLUMN search_query TEXT")
 
 
-MIGRATIONS = (lambda conn: None, _episode_work_keys, _subscription_destinations, _source_fetch_search)
+def _subscription_episode_floor(conn: sqlite3.Connection) -> None:
+    """v5: optional per-season auto-transfer lower bound, no changes to old rows."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscriptions)")}
+    if "start_episode" not in columns:
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN start_episode INTEGER")
+
+
+MIGRATIONS = (lambda conn: None, _episode_work_keys, _subscription_destinations,
+              _source_fetch_search, _subscription_episode_floor)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
