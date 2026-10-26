@@ -93,7 +93,7 @@ def match(subscriptions: list[dict], parsed, tmdb_ns: dict, *, seasons: set[int]
 # “更新至第 106 集” describes the newest release, not permission to
 # automatically copy all 106 historical episodes from a series-pack share.
 # Never infer this from a bare “全106集”, “S01E01-E106” or a TMDB episode count.
-_PROGRESS_LATEST = re.compile(r"(?:更新至|更新到|更至|更到)\\s*(?:第\\s*)?(\\d{1,4})(?!\\d)")
+_PROGRESS_LATEST = re.compile(r"(?:更新至|更新到|更至|更到)\s*(?:第\s*)?(\d{1,4})(?!\d)")
 
 
 def scope_latest_progress(ctx, active: list[dict]) -> str | None:
