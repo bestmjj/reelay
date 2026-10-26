@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS source_fetches (
     bot TEXT NOT NULL,
     max_count INTEGER NOT NULL,
     search_query TEXT,                     -- optional read-only Telegram title query
+    message_id INTEGER,                     -- optional exact authorized message ID
     status TEXT NOT NULL DEFAULT 'pending', -- pending | running | done | failed
     result TEXT,                         -- 消息列表（JSON）
     error TEXT,
@@ -227,8 +228,15 @@ def _subscription_episode_floor(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE subscriptions ADD COLUMN start_episode INTEGER")
 
 
+def _source_fetch_exact_id(conn: sqlite3.Connection) -> None:
+    """v6: request one exact historical Telegram message on the authorized listener."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(source_fetches)")}
+    if "message_id" not in columns:
+        conn.execute("ALTER TABLE source_fetches ADD COLUMN message_id INTEGER")
+
+
 MIGRATIONS = (lambda conn: None, _episode_work_keys, _subscription_destinations,
-              _source_fetch_search, _subscription_episode_floor)
+              _source_fetch_search, _subscription_episode_floor, _source_fetch_exact_id)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
