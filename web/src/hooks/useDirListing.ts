@@ -10,9 +10,9 @@ export type Crumb = { id: string; name: string };
  * 逐级浏览 网盘目录（网盘目录页与目录选择弹窗共用）：进入目录、面包屑路径、分页加载更多。
  * 路径优先用 网盘返回的真实路径（按编号定位时也能显示正确的目录名）；根目录由界面单独显示，这里不含。
  */
-export function useDirListing(initial: { cid: string; path: Crumb[] } = { cid: '0', path: [] }) {
+export function useDirListing(initial: { cid: string; path: Crumb[] } = { cid: '0', path: [] }, provider?: string) {
   const [target, setTarget] = useState(initial);
-  const first = useAsync(() => storageApi.dirs(target.cid), [target.cid], '目录查询失败');
+  const first = useAsync(() => storageApi.dirs(target.cid, 0, provider), [target.cid, provider], '目录查询失败');
   const [more, setMore] = useState<{ cid: string; items: IDirItem[]; next: number | null } | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -32,7 +32,7 @@ export function useDirListing(initial: { cid: string; path: Crumb[] } = { cid: '
     const cid = target.cid;
     setLoadingMore(true);
     try {
-      const r = await storageApi.dirs(cid, next);
+      const r = await storageApi.dirs(cid, next, provider);
       setMore((prev) => ({ cid, items: [...(prev?.cid === cid ? prev.items : []), ...r.items], next: r.next_offset }));
     } catch (e) {
       toast.error(errorMessage(e, '目录查询失败'));
@@ -49,7 +49,7 @@ export function useDirListing(initial: { cid: string; path: Crumb[] } = { cid: '
     ready: page !== undefined,
     error: first.error,
     /** 进入新目录、结果还没到时，仍是上一个目录的列表（由界面决定变淡还是显示骨架）。 */
-    items: page ? [...page.items, ...(extra?.items ?? [])] : first.data?.items ?? [],
+    items: page ? [...page.items, ...(extra?.items ?? [])] : first.stale ? [] : first.data?.items ?? [],
     next: extra ? extra.next : page?.next_offset ?? null,
     loadingMore,
     open,
