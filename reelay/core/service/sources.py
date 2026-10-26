@@ -165,27 +165,45 @@ class SourceMixin(ServiceBase):
     # ------------------------------------------------------------------ #
     # 来源的识别规则（core/parse_rules.py）：取样例消息、AI 起草、试跑
     # ------------------------------------------------------------------ #
-    async def source_messages(self, bot: str, limit: int = 10) -> dict[str, Any]:
+    async def source_messages(self, bot: str, limit: int = 10, *, search: str | None = None) -> dict[str, Any]:
         """来源最近的消息：主进程在线时请它用监听会话实时读取，读不到时用这个来源已经收到的消息。"""
         bot = ai.text_field(bot, limit=100, label="来源")
         if not bot:
             raise ValueError("请先填写来源（Bot 或频道的用户名）")
         limit = max(1, min(int(limit), 20))
+        if search is not None:
+            search = ai.text_field(search, limit=100, label="订阅片名")
+            if not search or bot.casefold() not in {
+                item["bot"].casefold() for item in self.get_config().get("sources", [])
+            }:
+                raise ValueError("订阅模拟只能检索已经配置的来源与非空片名")
         source = self.store.health_status().get("source", {})
         if source.get("status") == "connected" and not source.get("stale", True):
-            fetch_id = self.store.request_source_fetch(bot, limit)
+            fetch_id = self.store.request_source_fetch(bot, limit, search=search)
             deadline, problem = time.monotonic() + 25, "主进程没有及时响应"
             while time.monotonic() < deadline:
                 await asyncio.sleep(0.5)
                 row = self.store.source_fetch(fetch_id) or {}
                 if row.get("status") == "done":
-                    return {"messages": row["messages"], "origin": "telegram", "problem": None}
+                    return {"messages": row["messages"],
+                            "origin": "telegram_search" if search else "telegram",
+                            "problem": None if row["messages"] else
+                            "频道搜索未找到该作品的网盘分享消息（不代表频道从未发布）"}
                 if row.get("status") == "failed":
                     problem = row["error"]
                     break
         else:
             problem = "监听服务没有运行或还没连上 Telegram"
-        messages = self.store.source_messages(bot, limit)
+        messages = self.store.source_messages(bot, max(limit, 200) if search else limit)
+        if search:
+            from ..discovery import contains_title
+            from ..parse_rules import parse_share_url
+            messages = [m for m in messages
+                        if contains_title(m["text"], search)
+                        and parse_share_url(m["text"], m["urls"])[0]][:limit]
+            if not messages:
+                return {"messages": [], "origin": "history",
+                        "problem": f"频道历史查询不可用（{problem}），本地也没有匹配的分享消息"}
         if not messages:
             raise ConflictError(f"读取不到 {bot} 的消息（{problem}），这个来源也还没有收到过消息，请手动粘贴几条")
         return {"messages": messages, "origin": "history", "problem": problem}
