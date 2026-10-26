@@ -53,6 +53,8 @@ export interface ISubscriptionsResp {
   suggestions: ISubscriptionSuggestion[];
   /** 转存方式不支持订阅放行的规则（「默认规则」或来源名）。 */
   inactive: string[];
+  /** Configured sources, used to route one-off shares to the correct cloud. */
+  sources: string[];
 }
 
 export interface IShowCandidate {
