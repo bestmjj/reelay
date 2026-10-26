@@ -98,6 +98,21 @@ class SubscriptionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("checked_at", state)
         self.assertEqual(self.accepted, [])
 
+    async def test_many_subscriptions_are_scheduled_fairly_across_cycles(self):
+        self.source._client = FakeSearchClient([])
+        active = [
+            {"id": i, "title": "剧" + str(i), "auto": True, "finished": None}
+            for i in range(1, 8)
+        ]
+        with patch.object(discovery, "QUERY_DELAY_SEC", 0), \
+                patch.object(discovery, "MAX_QUERIES_PER_CYCLE", 3):
+            first = await self.source.discover_subscriptions(self.emit, active, self.load, self.save)
+            second = await self.source.discover_subscriptions(self.emit, active, self.load, self.save)
+            third = await self.source.discover_subscriptions(self.emit, active, self.load, self.save)
+        self.assertEqual([first["queries"], second["queries"], third["queries"]], [3, 3, 1])
+        self.assertEqual([call[0] for call in self.source._client.calls],
+                         [sub["title"] for sub in active])
+
     def test_normalized_title_and_safe_time_window(self):
         self.assertTrue(discovery.contains_title("《牧 神 记》 第 106 集", "牧神记"))
         self.assertFalse(discovery.contains_title("《仙逆》 第 1 集", "牧神记"))
