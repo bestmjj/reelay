@@ -242,6 +242,16 @@ class TelegramUserbotSource:
             except Exception as exc:  # noqa: BLE001 - one inaccessible channel doesn't block others
                 failed += 1
                 log.warning("主动追剧：无法访问来源 %s (%s)", target, type(exc).__name__)
+                # Show actionable errors beside each affected subscription.
+                for sub in active:
+                    if not sub.get("auto") or sub.get("finished"):
+                        continue
+                    key = discovery.state_key(target, sub)
+                    old = load(discovery.NAMESPACE, key, {}) or {}
+                    save(discovery.NAMESPACE, key, {
+                        **old, "source": target, "next_at": now + 1800,
+                        "error": f"无法访问 {target}（{type(exc).__name__}），请确认监听账号有读取权限",
+                    })
                 continue
             source = _entity_name(entity)
             for sub in active:
