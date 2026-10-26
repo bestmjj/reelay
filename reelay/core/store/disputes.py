@@ -12,7 +12,6 @@ import time
 
 from .. import works
 from ..contracts import TaskState
-from ..media import episode_of
 from .base import DEDUP_EPISODE, DEDUP_SHARE, DEDUP_VARIETY, _locked
 
 
