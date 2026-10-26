@@ -111,6 +111,9 @@ class AliyunTests(unittest.TestCase):
             _resource_drive_id({"default_drive_id": "backup1", "backup_drive_id": "backup1"})
         with self.assertRaisesRegex(ValueError, "资源库"):
             _resource_drive_id({"backup_drive_id": "backup1"})
+        with self.assertRaisesRegex(ValueError, "拒绝自动使用备份盘"):
+            _resource_drive_id({"default_drive_id": "possibly-backup"})
+
 
     def test_old_backup_manifest_is_not_copied_or_deleted_on_resource_disk(self):
         provider = AliyunStorage()
@@ -138,7 +141,7 @@ class AliyunTests(unittest.TestCase):
         with secret_store.override(aliyun_refresh_token="old") as secrets:
             with patch.object(client, "_send", return_value={
                 "access_token": "access", "refresh_token": "new",
-                "default_drive_id": "drive1", "expires_in": 7200}):
+                "resource_drive_id": "drive1", "default_drive_id": "backup1", "expires_in": 7200}):
                 self.assertEqual(client.drive_id, "drive1")
             self.assertEqual(secrets.get("aliyun_refresh_token"), "new")
 
