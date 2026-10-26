@@ -34,6 +34,15 @@ class ExistingFolderScanPayload(BaseModel):
     cid: str = Field(min_length=1, max_length=128)
 
 
+class ExistingDestinationPayload(BaseModel):
+    id: int = Field(gt=0)
+    naming_mode: Literal["simple", "default"] = "simple"
+
+
+class ExistingDestinationClearPayload(BaseModel):
+    id: int = Field(gt=0)
+
+
 class ExistingAssociatePayload(BaseModel):
     id: int = Field(gt=0)
     file_keys: list[str] = Field(min_length=1, max_length=50)
@@ -111,6 +120,17 @@ def router(service) -> APIRouter:
             return await asyncio.to_thread(
                 service.scan_existing_subscription_folder,
                 payload.id, payload.provider, payload.cid)
+
+    @api.post("/api/subscriptions/existing/use-folder")
+    async def use_existing_folder(payload: ExistingDestinationPayload):
+        """Explicit opt-in; only affects future subscriptions."""
+        return await asyncio.to_thread(
+            service.set_existing_subscription_destination,
+            payload.id, naming_mode=payload.naming_mode)
+
+    @api.post("/api/subscriptions/existing/clear-folder")
+    async def clear_existing_folder(payload: ExistingDestinationClearPayload):
+        return await asyncio.to_thread(service.clear_existing_subscription_destination, payload.id)
 
     @api.post("/api/subscriptions/existing/associate")
     async def associate_existing(payload: ExistingAssociatePayload):
