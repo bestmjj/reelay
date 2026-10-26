@@ -17,6 +17,12 @@ export interface ITestParseResp {
   parsed: IParsedResource | null;
   decision: string;
   confidence: IConfidence | null;
+  /** Link vs configured storage compatibility; a parse preview does not call the storage API. */
+  routing?: {
+    share_provider: string | null;
+    target_storage: string;
+    compatible: boolean;
+  };
   trail: string[];
 }
 
