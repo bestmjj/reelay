@@ -451,6 +451,8 @@ class P115Storage(ShareStorage):
             raise RuntimeError('115 客户端不可用：分享枚举/转存需要配置 cookie（写操作可走 OAuth）')
 
     async def prepare(self, ctx: PipelineContext) -> dict[str, Any]:
+        if ctx.parsed and ctx.parsed.raw_fields.get("share_provider") == "aliyun":
+            raise NeedsManual("这是阿里云盘分享链接，请将监听来源的转存网盘设为阿里云盘")
         self._require_client()
         listing = await run_blocking(self._list_share_sync, ctx)
         selection = await self.select(ctx, listing)
