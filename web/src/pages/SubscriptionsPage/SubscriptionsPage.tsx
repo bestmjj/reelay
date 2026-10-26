@@ -125,6 +125,8 @@ export default function SubscriptionsPage() {
   const [testText, setTestText] = useState('');
   const [testResult, setTestResult] = useState<ISubscriptionSimulation | null>(null);
   const [testBusy, setTestBusy] = useState(false);
+  const [resourceText, setResourceText] = useState('');
+  const [resourceBusy, setResourceBusy] = useState(false);
 
   /** 操作后两份列表都重新读取。 */
   const load = () => { subs.reload(); ignoredWorks.reload(); };
@@ -192,6 +194,19 @@ export default function SubscriptionsPage() {
         setTestResult(null);
       }} />
   );
+  const submitResource = async () => {
+    if (!resourceText.trim() || resourceBusy) return;
+    setResourceBusy(true);
+    try {
+      const result = await subscriptionApi.submitManual(resourceText.trim());
+      setResourceText('');
+      toast.success(`已创建任务 ${result.task_id}，后台将自动识别并核验资源`);
+    } catch (e) {
+      toast.error(errorMessage(e, '提交资源失败'));
+    } finally {
+      setResourceBusy(false);
+    }
+  };
   const runSimulation = async () => {
     if (!testItem || testBusy) return;
     setTestBusy(true);
@@ -230,6 +245,25 @@ export default function SubscriptionsPage() {
       </div>
       <div className="grid gap-5 lg:grid-cols-5 lg:items-start">
         <div className="min-w-0 space-y-5 lg:col-span-3">
+          <Panel icon={Search} title="立即转存已有分享"
+            description="粘贴 Telegram 频道中的完整资源正文（包含阿里云盘或 115 分享链接），不必等待该资源再次发布。仅本次直接提交，仍执行原有识别、过滤、去重和网盘验证。">
+            <div className="space-y-3">
+              <Textarea rows={3} maxLength={12000} value={resourceText}
+                onChange={(e) => setResourceText(e.target.value)} disabled={resourceBusy}
+                placeholder="例如：牧神记 (2024) 第106集 4K；链接：https://www.alipan.com/s/..." />
+              <div className="flex items-center gap-3">
+                <Button disabled={resourceBusy || !resourceText.trim()} onClick={() => void submitResource()}>
+                  {resourceBusy ? <Loader2 className="animate-spin" /> : <BellPlus />}
+                  {resourceBusy ? '正在提交' : '立即加入转存队列'}
+                </Button>
+                <Link to="/tasks" className="text-xs text-primary hover:underline">查看任务</Link>
+              </div>
+              <p className="text-xs leading-5 text-muted-foreground">
+                这里只接受完整资源消息和网盘分享，不接受单独的 t.me 消息地址；识别不确定时仍会进入待审批。
+                不会改变现有监听来源的「人工确认」设置。
+              </p>
+            </div>
+          </Panel>
           <Panel icon={Search} title="添加订阅" description="用一句话说在追哪部剧，AI 帮你对应到 TMDB 条目和季。">
             <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); void search(); }}>
               <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="如：我在追《一瓯春》第二季"
