@@ -48,6 +48,35 @@ def candidates(records: list[dict], parsed, tmdb_meta: dict | None,
     return strong, ambiguous
 
 
+def observed_for_subscription(records: list[dict], subscription: dict) -> list[int]:
+    """Possible episodes visible in cloud inventory, not verified transfers.
+
+    Used ONLY for an informative UI counter. A missing or stale cloud file
+    may still exist in this snapshot, so the transfer pipeline always does
+    the authoritative remote-ID readback before skipping a copy.
+    """
+    title = tmdb.normalize(subscription.get("title") or "")
+    tmdb_id = subscription.get("tmdbid")
+    season = subscription.get("season")
+    episodes = set()
+    for record in records:
+        if record.get("media_type") not in ("tv", "anime") or record.get("season") != season:
+            continue
+        episode = record.get("episode")
+        if type(episode) is not int or episode <= 0:
+            continue
+        observed_id = record.get("tmdbid")
+        if observed_id and tmdb_id:
+            same = int(observed_id) == int(tmdb_id)
+        elif observed_id and tmdb_id and int(observed_id) != int(tmdb_id):
+            same = False
+        else:
+            same = bool(title) and tmdb.normalize(record.get("title") or "") == title
+        if same:
+            episodes.add(episode)
+    return sorted(episodes)
+
+
 def verify_record(fs, record: dict) -> bool:
     """Check the EXACT cloud ID and parent before avoiding a transfer."""
     current = fs.get_attr(record["id"])
