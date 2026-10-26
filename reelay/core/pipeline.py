@@ -605,6 +605,21 @@ class Pipeline:
             else:
                 ns["stored_episodes"] = []
             try:
+                # A selected version is scoped to one share/provider; if the
+                # share URL was corrected it must be chosen again.
+                selection = ctx.ns("share_selection")
+                if selection.get("folder_id"):
+                    if (selection.get("share_code") not in (None, ctx.parsed.share_code)
+                            or selection.get("provider") not in (None, provider_name)):
+                        raise NeedsManual("分享链接或网盘已变化，请重新选择版本文件夹")
+                else:
+                    key = f"{provider_name}:{ctx.parsed.share_code}"
+                    preference = (self.store.state_get("share_folder_preferences", "items", {}) or {}).get(key)
+                    if preference:
+                        selection.update(folder_id=preference["folder_id"],
+                                         path=preference.get("path"),
+                                         share_code=ctx.parsed.share_code, provider=provider_name)
+                        ctx.log(f"此分享沿用上次选择的版本「{preference.get('path') or '已选择文件夹'}」")
                 with self.scope(ctx):
                     manifest = await storage.prepare(ctx)
             except AlreadyStored as exc:
