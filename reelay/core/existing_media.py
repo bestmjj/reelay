@@ -22,6 +22,25 @@ def same_observed_file(before: dict, current: dict) -> bool:
     return all(before.get(k) == current.get(k) for k in keys)
 
 
+def scan_observations(store) -> list[dict]:
+    """Read global + explicitly picked subscription folders without inventing transfers.
+
+    A file's physical identity is (provider, drive_id, id); an explicit folder
+    selection may provide better contextual title/episode information than a
+    global scan. Only a separately verified user association grants a TMDB ID.
+    """
+    records = list(store.state_get("library_scan", "files", []) or [])
+    scopes = store.state_get("subscription_folder_scan", "scopes", {}) or {}
+    by_file = {record_key(row): row for row in records if isinstance(row, dict)}
+    for scope in scopes.values():
+        if not isinstance(scope, dict):
+            continue
+        for row in scope.get("records") or []:
+            if isinstance(row, dict):
+                by_file[record_key(row)] = row
+    return list(by_file.values())
+
+
 def apply_associations(records: list[dict], confirmed: dict) -> list[dict]:
     """Overlay user-confirmed work identity without modifying scan or transfer ledgers.
 
