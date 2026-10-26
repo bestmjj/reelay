@@ -125,6 +125,12 @@ class FolderChoiceTests(unittest.TestCase):
         context.parsed = self.parsed
         context.ns("share_selection").update(folder_id="dovi-folder",
                                               path="Season 1 (DoVi)")
+        # A share-scoped first import may take both E13 and E14 from DoVi.
+        selected = AliyunStorage._select(context, two_versions())
+        self.assertEqual([f["id"] for f in selected["files"]],
+                         ["dovi-folder-13", "dovi-folder-14"])
+        # A message-scoped latest-episode subscription must take E14 alone.
+        context.source_rule["episodes_from"] = "message"
         selected = AliyunStorage._select(context, two_versions())
         self.assertEqual([f["id"] for f in selected["files"]], ["dovi-folder-14"])
         self.assertEqual(selected["pairs"], [[1, 14]])
