@@ -91,7 +91,7 @@ def _report(state: dict, *, has_more: bool) -> dict:
 
 
 def step(config: dict, get_provider: Callable[[str], object],
-         cursor: dict | None = None, *, now: Callable[[], float] = time.monotonic) -> tuple[dict, dict | None]:
+         cursor: dict | None = None, *, now: Callable[[], float] = time.monotonic) -> tuple[dict, dict]:
     """Read the next bounded step. Return (UI snapshot, durable resume cursor).
 
     Errors preserve existing partial observations and never claim completeness.
@@ -202,4 +202,4 @@ def step(config: dict, get_provider: Callable[[str], object],
             per_run_videos += 1
     state["scanned_at"] = time.time()
     more = bool(state["queue"])
-    return _report(state, has_more=more), state if more else None
+    return _report(state, has_more=more), state
