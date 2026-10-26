@@ -53,6 +53,8 @@ def _validate_name(value: str) -> str:
             or value.endswith(".") or _INVALID_NAME.search(value)
             or _WINDOWS_NAMES.fullmatch(value) or len(value.encode("utf-8")) > 255):
         raise HTTPException(status_code=422, detail="名称不能留空、包含路径或特殊符号，也不能以空格/句点结尾")
+    if value.casefold().startswith(".reelay-"):
+        raise HTTPException(status_code=409, detail="不能创建或重命名为 Reelay 内部暂存目录")
     return value
 
 
@@ -91,6 +93,7 @@ def router(service) -> APIRouter:
         fs, items = before_write(storage, body)
         if any(str(item["name"]).casefold() == name.casefold() for item in items):
             raise HTTPException(status_code=409, detail="同名文件或文件夹已存在，请刷新目录")
+        require_scope(storage, body.provider, body.drive_id)
         parent = int(body.cid) if body.provider == "p115" else body.cid
         # Exactly one mutation call; an uncertain outcome must never be
         # retried automatically by the server.
@@ -101,6 +104,8 @@ def router(service) -> APIRouter:
         name = _validate_name(body.name)
         _validate_id(body.provider, body.fid, allow_root=False)
         fs, items = before_write(storage, body)
+        if body.old_name.casefold().startswith(".reelay-"):
+            raise HTTPException(status_code=409, detail="Reelay 内部暂存目录禁止手动重命名")
         fid = int(body.fid) if body.provider == "p115" else body.fid
         actual = fs.get_attr(fid)
         expected_parent = str(int(body.cid)) if body.provider == "p115" else (
@@ -113,6 +118,7 @@ def router(service) -> APIRouter:
         if any(item["id"] != body.fid and str(item["name"]).casefold() == name.casefold()
                for item in items):
             raise HTTPException(status_code=409, detail="同名文件或文件夹已存在，请更换名称")
+        require_scope(storage, body.provider, body.drive_id)
         fs.rename(fid, name)
         return {"ok": True, "id": body.fid, "name": name}
 
