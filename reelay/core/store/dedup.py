@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 
@@ -100,6 +101,34 @@ class DedupRepository:
             found = split_episode_key(row["key"][len(prefix):])
             if found and works.same(found[0], work):
                 pairs.add(found[1:])
+        return [list(pair) for pair in sorted(pairs)]
+
+    @_locked
+    def stored_episode_pairs_in_drive(self, work: dict, provider: str,
+                                      drive_id: str | None = None) -> list[list[int]]:
+        """Verified episodes anywhere in the SAME physical cloud account.
+
+        Cross-folder matching prevents copying another release of the same
+        episode into a different save alias. Never match a different Aliyun
+        drive (resource/backup), or a different provider. This reads only
+        verified transfer ledger entries, not guessed scanner observations.
+        """
+        if provider == "p115":
+            allowed = re.compile(r"^[0-9]+:")
+        elif provider == "aliyun" and drive_id:
+            scope = hashlib.sha256(str(drive_id).encode("utf-8")).hexdigest()
+            allowed = re.compile(r"^aliyun:resource_" + scope + r"_[A-Za-z0-9_-]+:")
+        else:
+            return []
+        pairs = set()
+        for row in self._conn.execute("SELECT key FROM dedup WHERE kind=?", (DEDUP_EPISODE,)):
+            key = row["key"]
+            match = allowed.match(key)
+            if not match:
+                continue
+            found = split_episode_key(key[match.end():])
+            if found and works.same(found[0], work):
+                pairs.add((found[1], found[2]))
         return [list(pair) for pair in sorted(pairs)]
 
     @_locked
