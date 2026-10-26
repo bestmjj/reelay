@@ -255,11 +255,16 @@ class TelegramUserbotSource:
                     continue
                 queries += 1
                 count = 0
+                earliest = discovery.cutoff(state, now)
                 try:
                     async for msg in self._client.iter_messages(
                             entity, search=sub["title"], limit=discovery.SEARCH_LIMIT):
                         date = getattr(msg, "date", None)
-                        if date is not None and now - date.timestamp() > discovery.MAX_AGE_DAYS * 86400:
+                        if date is None:
+                            continue
+                        if date.timestamp() < earliest:
+                            break
+                        if count >= discovery.MAX_CANDIDATES_PER_SHOW:
                             break
                         if getattr(msg, "action", None):
                             continue
