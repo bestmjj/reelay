@@ -30,7 +30,7 @@ export function OrganizeConflict({ conflict }: { conflict: IOrganizeConflict }) 
   );
 }
 
-/** 卡片上的两个处理按钮；执行前用确认弹窗核对文件。 */
+/** 卡片上非破坏性的处理按钮；执行前用确认弹窗核对文件。 */
 export function ConflictButtons({ conflict, busy, onChoose, size = 'sm' }: {
   conflict: IOrganizeConflict; busy: boolean; onChoose: (choice: ConflictChoice) => void; size?: 'sm' | 'default';
 }) {
@@ -42,11 +42,12 @@ export function ConflictButtons({ conflict, busy, onChoose, size = 'sm' }: {
         <Copy />保留两份（不删除）
       </Button>
     </div>
+  );
 }
 
 /**
  * 有整理冲突时的「重新整理」：直接重新整理只会再撞上同一个冲突，所以先选怎么处理——
- * 删除本次转存的文件、覆盖保存，或者（改过命名、目录设置后）按当前设置重新规划位置。
+ * 保留两份（为新文件添加序号），或者改过命名规则后重新规划位置。
  * 弹窗里已列出两份文件，选择即执行，不再二次确认。
  */
 export function ConflictDialog({ conflict, open, onOpenChange, onChoose, canReplan }: {
