@@ -173,6 +173,8 @@ class AliyunAuth:
     def qr_code(self, uid: str) -> str:
         with self._lock:
             session = self._session(uid)
+            if session["authenticated"]:
+                raise KeyError("扫码会话已完成")
             return session["code"]
 
     def _session(self, uid: str) -> dict:
