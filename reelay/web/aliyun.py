@@ -15,6 +15,10 @@ class TokenPayload(BaseModel):
     refresh_token: str
 
 
+class QRPayload(BaseModel):
+    uid: str
+
+
 def router() -> APIRouter:
     api = APIRouter()
     auth = AliyunAuth()
@@ -52,8 +56,12 @@ def router() -> APIRouter:
         except Exception:
             raise HTTPException(status_code=502, detail="阿里云盘扫码接口暂时不可用，请重试或手动填写令牌") from None
 
-    @api.get("/api/authaliyun/qr")
-    async def qr_status(uid: str = Query(min_length=16, max_length=128)):
+    # QR confirmation changes stored credentials: POST enforces the CSRF/same-origin guard.
+    @api.post("/api/authaliyun/qr/status")
+    async def qr_status(payload: QRPayload):
+        uid = payload.uid
+        if not 16 <= len(uid) <= 128:
+            raise HTTPException(status_code=422, detail="扫码会话 ID 格式无效")
         try:
             return await asyncio.to_thread(auth.qr_status, uid)
         except KeyError as exc:
