@@ -288,6 +288,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               {shareFolders ? (
                 <div className="space-y-2 rounded-lg border p-3">
                   <Select value={shareFolderId} onValueChange={setShareFolderId}
+                    aria-label="分享版本"
                     options={shareFolders.folders.map((folder) => ({
                       value: folder.folder_id,
                       label: `${folder.path} · ${folder.count} 个视频${folder.unrecognized ? `，${folder.unrecognized} 个未识别` : ''}`,
