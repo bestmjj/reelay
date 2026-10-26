@@ -124,6 +124,13 @@ class SubscriptionDecision(DefaultDecision):
             return decision
         season = seasons.pop()
         episodes = {ep for s, ep in pairs if s == season}
+        # Never automatically copy a whole historical season when a subscriber
+        # first sees a share that contains E01-E100. One explicitly verified
+        # episode may proceed; a pack or unknown episode list needs review.
+        if len(episodes) != 1 or len(pairs) != 1:
+            ctx.log(f"订阅《{item['title']}》：资源包含 {len(pairs)} 个季集或无法确认具体集号，"
+                    "自动追更只处理明确的单集；合集进入人工审核以免误收整季")
+            return decision
         if episodes:
             have = works.episodes(runtime.services().stored_series(), works.of(p, ctx.meta.get("tmdb")), season)
             if episodes <= have:
@@ -131,6 +138,10 @@ class SubscriptionDecision(DefaultDecision):
                 return decision
         record = ctx.ns("subscription")
         record.update(title=item["title"], season=season, tmdbid=item["tmdbid"])
+        # The share itself may contain an entire old season. Restrict
+        # the storage selector to the one explicitly matched episode.
+        p.episodes = sorted(episodes)
+        ctx.source_rule["episodes_from"] = "message"
         if p.season is None:
             p.season, record["pinned"] = season, True
             ctx.log(f"订阅《{item['title']}》：消息没写季号，记为第 {season} 季，转存时只取这一季")
