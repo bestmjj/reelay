@@ -5,8 +5,10 @@ import unittest
 from unittest.mock import patch
 
 from reelay.core.contracts import NeedsManual, ParsedResource, PipelineContext, RawMessage, TaskState
+from reelay.core.media import episode_of
 from reelay.providers.aliyun import AliyunStorage
-from reelay.providers.storage import P115Storage, _announced_latest, _select_video_items, share_folder_choices
+from reelay.providers.storage import (P115Storage, SHARE_ROOT_DIRECT, _announced_latest,
+                                      _select_video_items, share_folder_choices)
 from tests.fakes import WebCase
 
 
@@ -146,6 +148,137 @@ class FolderChoiceTests(unittest.TestCase):
         listing = P115Storage._collect_share_videos(Fake115())
         self.assertEqual({x["share_folder_id"] for x in listing}, {"10", "20"})
 
+
+
+class WrongEpisodeAndNestedDirectoryTests(unittest.TestCase):
+    """Real E247: root 247 4K (1.62GB), unrelated nested 4K (4.04GB)."""
+
+    def setUp(self):
+        self.parsed = ParsedResource(is_media=True, media_type="tv",
+                                     title="吞噬星空", year=2020,
+                                     season=1, episodes=[247])
+
+    @staticmethod
+    def listing():
+        return [
+            {"id": "correct-247", "name": "247 4K.mp4", "size": 1620000000,
+             "is_dir": False, "share_path": "",
+             "share_folder_id": "root", "share_ancestor_ids": []},
+            {"id": "unrelated-4k", "name": "4K.mp4", "size": 4040000000,
+             "is_dir": False, "share_path": "洛DA",
+             "share_folder_id": "unrelated-folder",
+             "share_ancestor_ids": ["unrelated-folder"]},
+        ]
+
+    def test_never_selects_wrong_unlabeled_four_gigabyte_file(self):
+        listing = self.listing()
+        self.assertEqual(episode_of(listing[0]["name"]), (None, 247))
+        self.assertEqual(episode_of(listing[1]["name"]), (None, None))
+        with self.assertRaisesRegex(NeedsManual, "分享不同目录混有"):
+            _select_video_items(listing, self.parsed, scope="message")
+        with self.assertRaisesRegex(NeedsManual, "分享不同目录混有"):
+            _select_video_items(
+                listing, self.parsed, scope="message",
+                hints={"episodes": {"4K.mp4": (1, 247)}, "drop": ["247 4K.mp4"]})
+        choices = share_folder_choices(listing)
+        root = next(x for x in choices if x["folder_id"] == SHARE_ROOT_DIRECT)
+        self.assertEqual(root["count"], 1)
+        self.assertEqual(root["samples"][0]["name"], "247 4K.mp4")
+        chosen = _select_video_items(listing, self.parsed, scope="message",
+                                     share_folder_id=SHARE_ROOT_DIRECT)
+        self.assertEqual([x["id"] for x in chosen["files"]], ["correct-247"])
+        self.assertEqual(chosen["pairs"], [[1, 247]])
+        with self.assertRaisesRegex(NeedsManual, "无法从文件名识别集号"):
+            _select_video_items(listing, self.parsed, scope="message",
+                                share_folder_id="unrelated-folder")
+        with self.assertRaisesRegex(NeedsManual, "AI 不能"):
+            _select_video_items(listing, self.parsed, scope="message",
+                                share_folder_id="unrelated-folder",
+                                hints={"episodes": {"4K.mp4": (1, 247)}})
+
+    def test_nested_wrapper_lists_both_hdr_versions_and_empty_directories(self):
+        listing = [
+            {"id": "wrapper", "name": "X)小城良方", "is_dir": True,
+             "share_path": "X)小城良方", "share_ancestor_ids": ["wrapper"]},
+            {"id": "hdr", "name": "Season 1 (HDR.Vivid)", "is_dir": True,
+             "share_path": "X)小城良方/Season 1 (HDR.Vivid)",
+             "share_ancestor_ids": ["wrapper", "hdr"]},
+            {"id": "dovi", "name": "Season 1 (DoVi)", "is_dir": True,
+             "share_path": "X)小城良方/Season 1 (DoVi)",
+             "share_ancestor_ids": ["wrapper", "dovi"]},
+            {"id": "empty", "name": "Extra", "is_dir": True,
+             "share_path": "X)小城良方/Extra",
+             "share_ancestor_ids": ["wrapper", "empty"]},
+        ]
+        for leaf, dirname in (("hdr", "HDR.Vivid"), ("dovi", "DoVi")):
+            for ep in (13, 14):
+                listing.append({
+                    "id": f"{leaf}-{ep}", "name": f"小城良方.S01E{ep:02d}.2160p.mkv",
+                    "size": 1000000000, "is_dir": False,
+                    "share_folder_id": leaf, "share_ancestor_ids": ["wrapper", leaf],
+                    "share_path": f"X)小城良方/Season 1 ({dirname})",
+                })
+        choices = share_folder_choices(listing)
+        self.assertEqual(len(choices), 4)
+        self.assertEqual({x["path"] for x in choices},
+                         {"X)小城良方", "X)小城良方/Season 1 (HDR.Vivid)",
+                          "X)小城良方/Season 1 (DoVi)", "X)小城良方/Extra"})
+        self.assertEqual(next(x["count"] for x in choices if x["folder_id"] == "wrapper"), 4)
+        self.assertEqual(next(x["count"] for x in choices if x["folder_id"] == "dovi"), 2)
+        self.assertFalse(next(x["selectable"] for x in choices if x["folder_id"] == "empty"))
+        parsed = ParsedResource(is_media=True, media_type="tv",
+                                title="小城良方", season=1, episodes=[14])
+        with self.assertRaisesRegex(NeedsManual, "更具体"):
+            _select_video_items(listing, parsed, scope="message",
+                                share_folder_id="wrapper")
+        selected = _select_video_items(
+            listing, parsed, scope="message", share_folder_id="dovi",
+            share_folder_path="X)小城良方/Season 1 (DoVi)")
+        self.assertEqual([f["id"] for f in selected["files"]], ["dovi-14"])
+        with self.assertRaisesRegex(NeedsManual, "名称已改变"):
+            _select_video_items(
+                listing, parsed, scope="message", share_folder_id="dovi",
+                share_folder_path="X)小城良方/Season 1 (HDR.Vivid)")
+
+    def test_aliyun_listing_returns_all_nested_directory_rows_and_files(self):
+        class Fake:
+            def share_token(self, share, code):
+                return "token"
+
+            def shared_children(self, share, token, parent):
+                dirs = {
+                    "root": [
+                        {"id": "wrapper", "name": "X)小城良方", "is_dir": True},
+                        {"id": "root247", "name": "247 4K.mp4", "is_dir": False,
+                         "size": 1620000000},
+                    ],
+                    "wrapper": [
+                        {"id": "hdr", "name": "Season 1 (HDR.Vivid)", "is_dir": True},
+                        {"id": "dovi", "name": "Season 1 (DoVi)", "is_dir": True},
+                        {"id": "empty", "name": "Some empty folder", "is_dir": True},
+                    ],
+                    "hdr": [{"id": "hdr14", "name": "小城良方.S01E14.mkv",
+                             "is_dir": False, "size": 111}],
+                    "dovi": [{"id": "dv14", "name": "小城良方.S01E14.mkv",
+                              "is_dir": False, "size": 222}],
+                    "empty": [],
+                }
+                return dirs[parent]
+        cloud = AliyunStorage()
+        cloud.client = Fake()
+        ctx = PipelineContext(RawMessage("@share", "123", "小城良方"))
+        ctx.parsed = self.parsed
+        videos = cloud._share_files(ctx)
+        self.assertEqual(len(videos), 3)
+        self.assertEqual(next(x for x in videos if x["id"] == "dv14")["share_ancestor_ids"],
+                         ["wrapper", "dovi"])
+        all_rows = cloud._share_files(ctx, include_dirs=True)
+        self.assertEqual(len(all_rows), 7)
+        choices = share_folder_choices(all_rows)
+        self.assertEqual({x["folder_id"] for x in choices},
+                         {"wrapper", "hdr", "dovi", "empty", SHARE_ROOT_DIRECT})
+        self.assertEqual(next(x["count"] for x in choices if x["folder_id"] == "hdr"), 1)
+        self.assertEqual(next(x["count"] for x in choices if x["folder_id"] == "empty"), 0)
 
 class FolderChoiceAPITests(WebCase):
     CONFIG = {"save_dirs": {"默认": "aliyun:library"},
