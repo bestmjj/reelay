@@ -32,6 +32,20 @@ class TestManagementApi(WebCase):
         self.assertIn("save_dirs", response.json()["config"])
         self.assertNotIn("REELAY_115_COOKIES", response.text)
 
+    def test_directory_picker_selects_aliyun_without_115_login(self):
+        provider = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        with patch.object(provider, "browse", return_value={
+            "items": [{"id": "folder_123", "name": "动漫"}],
+            "cid": "0", "path": [{"id": "0", "name": "根目录"}],
+            "next_offset": None, "via": "aliyun",
+        }) as browse:
+            result = self.client.get("/api/storage/dirs", params={"provider": "aliyun", "cid": "0"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["items"][0]["id"], "folder_123")
+        browse.assert_called_once_with("0", 0, 100)
+        self.assertEqual(self.client.get("/api/storage/dirs", params={
+            "provider": "unknown", "cid": "0"}).status_code, 422)
+
     def test_logs_can_be_cleared(self):
         root = self.root
         (root / "reelay.log").write_text("2026-10-23 10:00:00 INFO reelay | 一行\n", encoding="utf-8")
