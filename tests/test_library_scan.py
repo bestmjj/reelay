@@ -61,6 +61,16 @@ class InventoryTests(unittest.TestCase):
         "sources": [{"bot": "@shareAliyun", "storage": "aliyun", "save_to": "剧集"}],
     }
 
+    def test_new_anime_movie_folder_is_scanned_as_movie_not_new_media_type(self):
+        cfg = {"save_dirs": {"动漫电影": "aliyun:animeMovieFolder"},
+               "defaults": {"storage": "aliyun", "save_to": "动漫电影"}}
+        cloud = FakeCloud({"animeMovieFolder": [item("clip_a", "My.Movie.2026.mkv", size=4096)]})
+        snapshot = library_scan.inventory(cfg, lambda _: cloud)
+        self.assertEqual(snapshot["file_count"], 1)
+        self.assertEqual(snapshot["groups"][0]["save_dir_alias"], "动漫电影")
+        self.assertEqual(snapshot["groups"][0]["media_type"], "movie")
+        self.assertTrue(snapshot["complete"], snapshot["errors"])
+
     def test_scans_named_roots_and_deduplicates_overlapping_aliases(self):
         cloud = FakeCloud({
             "movie_root": [item("movie1", "春天 (2025).mkv", size=2000)],
