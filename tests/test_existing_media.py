@@ -38,6 +38,19 @@ class ExistingMediaTests(unittest.TestCase):
         self.assertFalse(result["covered"])
         self.assertTrue(result["uncertain"])
 
+    def test_observed_for_subscription_is_only_a_hint_not_verified_transfer(self):
+        sub = {"title": "牧神记", "season": 1, "tmdbid": 236534}
+        observed = [
+            {**self.record, "episode": 105},
+            self.record,
+            {**self.record, "episode": 107, "tmdbid": 77777},
+            {**self.record, "episode": 108, "season": 2},
+            {**self.record, "episode": 110, "provider": "aliyun", "title": "Other"},
+        ]
+        self.assertEqual(existing_media.observed_for_subscription(observed, sub), [105, 106, 110])
+        self.assertEqual(existing_media.observed_for_subscription(observed,
+            {**sub, "tmdbid": 77777}), [107])
+
     def test_stale_file_causes_manual_review(self):
         self.fs.get_attr.return_value["parent_id"]="moved"
         result=existing_media.check(self.cloud,[self.record],self.parsed,{},provider="aliyun")
