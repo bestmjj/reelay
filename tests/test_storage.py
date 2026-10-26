@@ -593,9 +593,14 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         season = self.cloud.add(Cloud.directory(0, show['id'], 'Season 01'), show['id'])
         return self.cloud.add({'name': name, 'size': size, 'is_dir': False}, season['id']), season['id']
 
-    def use_conflict(self, strategy):
-        self.cfg = {**self.cfg, 'plugins': {'organizer': {'conflict': strategy}}}
+    def use_conflict(self, strategy, *, allow_delete=False):
+        # Destructive legacy tests must opt in explicitly. Production's
+        # no_delete=True default must remain safe, even after this CI fix.
+        self.cfg = {**self.cfg, 'plugins': {'organizer': {
+            'conflict': strategy, 'no_delete': not allow_delete,
+        }}}
         self.pipeline = Pipeline(self.reg, self.store, self.cfg)
+        self.service.pipeline = self.pipeline
 
     async def test_conflict_manual_keeps_both_files_for_review(self):
         self.cloud.add_share('share', 'Show.S01E01.2160p.mkv')
@@ -635,7 +640,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.ns('organize')['conflicts'], [])
 
     async def test_conflict_skip_discards_new_copy_and_finishes(self):
-        self.use_conflict('skip')
+        self.use_conflict('skip', allow_delete=True)
         self.cloud.add_share('share', 'Show.S01E01.2160p.mkv')
         existing, season = self.existing_library_file()
         done = await self.execute(self.task())
@@ -644,7 +649,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertIn(('delete', [int(done.ns('storage')['landed'][0]['id'])]), self.cloud.calls)
 
     async def test_conflict_upgrade_replaces_lower_quality_file(self):
-        self.use_conflict('upgrade')
+        self.use_conflict('upgrade', allow_delete=True)
         self.cloud.add_share('share', 'Show.S01E01.2160p.mkv')
         existing, season = self.existing_library_file(size=500)
         self.store.state_set('organizer', f"file:{existing['id']}", {'rank': 3, 'size': 500})  # 曾入库 1080p
@@ -656,7 +661,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.ns('organize')['conflicts'][0]['action'], 'upgrade')
 
     async def test_conflict_upgrade_keeps_better_existing_file(self):
-        self.use_conflict('upgrade')
+        self.use_conflict('upgrade', allow_delete=True)
         self.cloud.add_share('share', 'Show.S01E01.720p.mkv')
         existing, season = self.existing_library_file(name='剧集 - S01E01.mkv', size=10**9)
         self.store.state_set('organizer', f"file:{existing['id']}", {'rank': 4})
@@ -1048,6 +1053,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         return ctx, existing, season, landed
 
     async def test_conflict_choice_delete_new_copy(self):
+        self.use_conflict('manual', allow_delete=True)
         ctx, existing, season, landed = await self.conflict_task()
         await self.service.requeue_organize(ctx.task_id, conflict='skip')
         done = await self.execute(ctx)
@@ -1059,6 +1065,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.cloud.receives()), 1)
 
     async def test_conflict_choice_overwrite_library_file(self):
+        self.use_conflict('manual', allow_delete=True)
         ctx, existing, season, landed = await self.conflict_task()
         await self.service.requeue_organize(ctx.task_id, conflict='replace')
         done = await self.execute(ctx)
@@ -1085,6 +1092,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
             await self.service.requeue_organize(ctx.task_id, conflict='skip', save_dir_alias='新目录')
 
     async def test_overwrite_with_lost_delete_response_resumes_without_deleting_again(self):
+        self.use_conflict('manual', allow_delete=True)
         ctx, existing, season, landed = await self.conflict_task()
         await self.service.requeue_organize(ctx.task_id, conflict='replace')
         self.cloud.fail_delete = 'after'
@@ -1098,6 +1106,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cloud.calls.count(('delete', [existing['id']])), 1)
 
     async def test_delete_new_copy_is_verified_and_retried_when_unclear(self):
+        self.use_conflict('manual', allow_delete=True)
         ctx, existing, season, landed = await self.conflict_task()
         await self.service.requeue_organize(ctx.task_id, conflict='skip')
         self.cloud.fail_delete = 'ignore'  # 返回成功却没删：读回发现
