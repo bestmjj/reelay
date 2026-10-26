@@ -1,0 +1,80 @@
+"""Aliyun Drive credentials: QR sign-in, manual refresh token, ping and logout."""
+from __future__ import annotations
+
+import asyncio
+
+from fastapi import APIRouter, HTTPException, Query, Response
+from pydantic import BaseModel
+
+from ..core.authaliyun import AliyunAuth
+from ..providers.aliyun import AliyunAPIError
+from .p115 import _qr_svg
+
+
+class TokenPayload(BaseModel):
+    refresh_token: str
+
+
+def router() -> APIRouter:
+    api = APIRouter()
+    auth = AliyunAuth()
+
+    @api.get("/api/authaliyun/status")
+    async def status():
+        return auth.status()
+
+    @api.post("/api/authaliyun/ping")
+    async def ping():
+        return await asyncio.to_thread(auth.ping)
+
+    @api.put("/api/authaliyun/token")
+    async def set_token(payload: TokenPayload):
+        try:
+            status = await asyncio.to_thread(auth.set_token, payload.refresh_token)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except AliyunAPIError as exc:
+            raise HTTPException(status_code=409, detail=f"令牌校验失败（旧凭证已保留）：{exc}") from None
+        except Exception:
+            raise HTTPException(status_code=502, detail="无法验证阿里云盘令牌，旧凭证未被覆盖") from None
+        return {"ok": True, "status": status}
+
+    @api.delete("/api/authaliyun/token")
+    async def clear_token():
+        return {"ok": True, "status": await asyncio.to_thread(auth.clear)}
+
+    @api.post("/api/authaliyun/qr")
+    async def qr_start():
+        try:
+            return await asyncio.to_thread(auth.qr_start)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except Exception:
+            raise HTTPException(status_code=502, detail="阿里云盘扫码接口暂时不可用，请重试或手动填写令牌") from None
+
+    @api.get("/api/authaliyun/qr")
+    async def qr_status(uid: str = Query(min_length=16, max_length=128)):
+        try:
+            return await asyncio.to_thread(auth.qr_status, uid)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except Exception:
+            raise HTTPException(status_code=502, detail="查询阿里云盘扫码状态失败，请重新扫码") from None
+
+    @api.get("/api/authaliyun/qr/image")
+    async def qr_image(uid: str = Query(min_length=16, max_length=128)):
+        try:
+            code = auth.qr_code(uid)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return Response(content=_qr_svg(code), media_type="image/svg+xml",
+                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    @api.delete("/api/authaliyun/qr")
+    async def qr_cancel(uid: str = Query(min_length=16, max_length=128)):
+        auth.qr_cancel(uid)
+        return {"ok": True}
+
+    return api
