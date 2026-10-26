@@ -142,6 +142,17 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         if scope == 'message' and parsed.episodes:
             raise NeedsManual(f'分享包含多季 {sorted(marked)}，消息只写了集数，需先指定季号')
         season, picked = None, detected
+    if scope == 'message' and parsed.episodes:
+        # A subscription progress post can point at an entire historical
+        # pack. Once the one requested episode has been positively located,
+        # unrelated old episodes (including duplicate releases) must not
+        # veto its selection. Still fail closed on unnumbered files above,
+        # or ambiguous/multiple versions of the REQUESTED episode below.
+        requested = set(parsed.episodes)
+        missing = requested - {ep for _, _, ep in picked}
+        if missing:
+            raise NeedsManual(f'分享内未找到消息声明的集数 {sorted(missing)}')
+        picked = [(item, s, ep) for item, s, ep in picked if ep in requested]
     groups: dict[tuple[int, int], list[dict]] = {}
     for item, s, ep in picked:
         groups.setdefault((s, ep), []).append(item)
@@ -161,9 +172,6 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
     if not by_pair:
         raise NeedsManual(f'分享内没有第 {season} 季的视频')
     if scope == 'message' and parsed.episodes:
-        missing = set(parsed.episodes) - {ep for _, ep in by_pair}
-        if missing:
-            raise NeedsManual(f'分享内未找到消息声明的集数 {sorted(missing)}')
         by_pair = {(season, ep): by_pair[(season, ep)] for ep in parsed.episodes}
     wanted = sorted(set(by_pair) - {(s, ep) for s, ep in stored})
     if not wanted:
