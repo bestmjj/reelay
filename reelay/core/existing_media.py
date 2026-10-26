@@ -6,8 +6,6 @@ match AND the actual remote file still exists at the indexed location.
 """
 from __future__ import annotations
 
-import re
-
 from . import tmdb, works
 
 MAX_CHECKS = 12
@@ -68,8 +66,6 @@ def observed_for_subscription(records: list[dict], subscription: dict) -> list[i
         observed_id = record.get("tmdbid")
         if observed_id and tmdb_id:
             same = int(observed_id) == int(tmdb_id)
-        elif observed_id and tmdb_id and int(observed_id) != int(tmdb_id):
-            same = False
         else:
             same = bool(title) and tmdb.normalize(record.get("title") or "") == title
         if same:
