@@ -119,7 +119,7 @@ export default function DashboardPage() {
       for (const item of items) {
         try { await dashboardApi.retryDelivery(item.id); accepted += 1; } catch { /* 已被其他管理端重试 */ }
       }
-      toast.success(`已重新发送 ${accepted} 条通知`);
+      toast.success(`已将 ${accepted} 条失败通知重新加入发送队列`);
       void refreshDashboard();
     } catch (err) {
       toast.error(errorMessage(err, '重试失败'));
@@ -274,7 +274,24 @@ export default function DashboardPage() {
                 ))}
               </div>
             )}
-            {failedDeliveries > 0 ? <ToneBadge tone="danger" className="mt-3">有通知发送失败，可能是控制 Bot 不可用</ToneBadge> : null}
+            {failedDeliveries > 0 ? (
+              <div className="mt-3 space-y-2 text-xs" role="status">
+                <p className="text-destructive">存在历史发送失败记录；这不等于当前控制 Bot 已断开。</p>
+                {(d?.failed_deliveries ?? []).map((item) => (
+                  <div key={item.id} className="rounded-md border border-border/80 bg-background/60 px-2.5 py-2">
+                    <div className="flex flex-wrap justify-between gap-1">
+                      <span className="font-medium">#{item.id} · {item.target} · {item.event}</span>
+                      <span className="text-muted-foreground" title={fullTime(item.updated_at)}>
+                        {relativeTime(item.updated_at)} · 已尝试 {item.attempts} 次
+                      </span>
+                    </div>
+                    <p className="mt-1 text-muted-foreground">
+                      错误类型：{item.error || '未知'}；可在「工具 → 运行日志」按类型查找详细记录。
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </Panel>
         </div>
       </div>
