@@ -422,11 +422,15 @@ class Pipeline:
     def _resolve_directory(self, ctx: PipelineContext) -> None:
         alias = ctx.save_dir_alias or ctx.source_rule.get("save_to") \
             or self.cfg.get("defaults", {}).get("save_to", "默认")
-        if alias not in self.save_dirs:
-            raise ValueError(f"目标目录别名不存在：{alias}")
-        configured = str(self.save_dirs[alias])
+        # Use the immutable configuration captured when this task was received.
+        # A later alias edit must not silently redirect an already-queued transfer.
+        cfg = self.task_config(ctx)
+        save_dirs = cfg["save_dirs"]
+        if alias not in save_dirs:
+            raise ValueError(f"任务接收时的目标目录别名不存在：{alias}")
+        configured = str(save_dirs[alias])
         provider = (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
-                    or self.cfg["defaults"]["storage"])
+                    or cfg["defaults"]["storage"])
         if configured.startswith("aliyun:"):
             if provider != "aliyun":
                 raise ValueError(f"目录「{alias}」属于阿里云盘，当前任务使用 {provider}，请更换保存目录")
