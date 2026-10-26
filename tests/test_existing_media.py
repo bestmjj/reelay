@@ -33,5 +33,22 @@ class ExistingMediaTests(unittest.TestCase):
         self.assertEqual(result["covered"],[])
         self.assertTrue(result["uncertain"])
 
+class CrossFolderTest(unittest.TestCase):
+    def test_verified_entries_same_drive_different_folders_share_coverage(self):
+        import hashlib
+        from reelay.core import works
+        from reelay.core.store import Store
+        from reelay.core.store.base import DEDUP_EPISODE
+        store=Store(":memory:")
+        self.addCleanup(store.close)
+        work=works.identity("牧神记",2024,236534,"tv")
+        digest=hashlib.sha256(b"resource-1").hexdigest()
+        other=hashlib.sha256(b"backup").hexdigest()
+        store.mark(DEDUP_EPISODE,f"aliyun:resource_{digest}_first:{store.episode_key(work,1,106)}")
+        store.mark(DEDUP_EPISODE,f"aliyun:resource_{other}_second:{store.episode_key(work,1,107)}")
+        self.assertEqual(store.stored_episode_pairs_in_drive(work,"aliyun","resource-1"),[[1,106]])
+        self.assertEqual(store.stored_episode_pairs_in_drive(work,"aliyun","nope"),[])
+        self.assertEqual(store.stored_episode_pairs_in_drive(work,"p115"),[])
+
 if __name__=="__main__":
     unittest.main()
