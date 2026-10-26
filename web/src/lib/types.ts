@@ -52,6 +52,7 @@ export interface IDashboard {
   connections: Record<string, IConnection>;
   runtime: Record<string, IRuntimeHealth>;
   deliveries: Record<string, number>;
+  failed_deliveries?: Array<Pick<IDelivery, 'id' | 'kind' | 'event' | 'target' | 'attempts' | 'error'> & { updated_at: number }>;
   /** 进行中的系统告警（如 115 凭证失效暂停转存、消息源断开）。 */
   alerts?: IAlert[];
   /** 最近 24 小时：新收消息数与入库数。 */
