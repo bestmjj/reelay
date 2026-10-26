@@ -104,6 +104,22 @@ class TestSubscriptionDecision(ServiceCase):
         self.assertEqual(await self.decide(tv_ctx(msg_id="2", episodes=(3,))), Decision.SAVE)
         self.assertEqual([item["have"] for item in self.service.list_subscriptions()["items"]][0], [])
 
+    def test_different_titles_of_one_tmdb_episode_share_transfer_claim(self):
+        from reelay.core.pipeline import Pipeline
+        left = tv_ctx(title="牧神记", tmdbid=236534, episodes=(106,))
+        right = tv_ctx(title="Tales of Herding Gods", tmdbid=236534, episodes=(106,))
+        left.ns("storage")["dedup_cid"] = "resource_" + "a" * 64 + "_dir1"
+        right.ns("storage")["dedup_cid"] = "resource_" + "a" * 64 + "_dir2"
+        first = set(Pipeline._content_keys("aliyun", left))
+        second = set(Pipeline._content_keys("aliyun", right))
+        self.assertTrue(first.intersection(second), (first, second))
+        different = tv_ctx(title="Another Show", tmdbid=222222, episodes=(106,))
+        different.ns("storage")["dedup_cid"] = "resource_" + "a" * 64 + "_dir2"
+        self.assertFalse(first.intersection(Pipeline._content_keys("aliyun", different)))
+        cross_drive = tv_ctx(title="Tales of Herding Gods", tmdbid=236534, episodes=(106,))
+        cross_drive.ns("storage")["dedup_cid"] = "resource_" + "b" * 64 + "_dir2"
+        self.assertFalse(first.intersection(Pipeline._content_keys("aliyun", cross_drive)))
+
     async def test_preferences_can_still_veto_a_subscription(self):
         provider = LLMDecision()
         provider._client = FakeAI({"decision": "skip", "save_to": None, "reason": "不要 1080p"})
