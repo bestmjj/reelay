@@ -14,6 +14,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { CONFIDENCE_CAP_LABELS, CONFIDENCE_CHECK_LABELS, DECISION_META, TONE_CLASS, type Tone } from '@/lib/status';
 import { cn, errorMessage } from '@/lib/utils';
 import type { Obj } from '@/lib/values';
+import { shareLinkStatus, shareProviderName } from '@/lib/share';
 
 const SAMPLE = '📺 示例剧名 (2026) S01E01 ✨4K WEB-DL\n💾 大小：1.2 GB\n🔗 链接：https://115cdn.com/s/swabc123?password=x1y2';
 
@@ -39,7 +40,7 @@ function ConfidenceBlock({ confidence }: { confidence: IConfidence }) {
   const checks = Object.entries(confidence.checks ?? {});
   const caps = confidence.caps ?? [];
   return (
-    <Section title="置信度">
+    <Section title="规则置信评分">
       <div className="flex items-center gap-3">
         <span className={cn('text-2xl font-semibold leading-none', TONE_CLASS[tone].text)}>
           {pct}<span className="ml-0.5 text-sm font-medium">%</span>
@@ -48,6 +49,7 @@ function ConfidenceBlock({ confidence }: { confidence: IConfidence }) {
           <div className={cn('h-full rounded-full', TONE_CLASS[tone].dot)} style={{ width: `${Math.max(pct, 2)}%` }} />
         </div>
       </div>
+      <p className="mt-2 text-xs text-muted-foreground">按片名、类型、年份及 TMDB 匹配信号计算；不是实际转存成功率，也不代表分享一定可访问。</p>
       {checks.length ? (
         <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
           {checks.map(([key, ok]) => (
@@ -94,6 +96,8 @@ function ResultView({ result }: { result: ITestParseResp }) {
   const p = result.parsed;
   const posterPath = typeof p?.raw_fields?.poster_path === 'string' ? p.raw_fields.poster_path : null;
   const hasLink = Boolean(p?.share_code);
+  const linkProvider = p?.raw_fields?.share_provider;
+  const route = result.routing;
 
   return (
     <div className="space-y-4">
@@ -115,8 +119,8 @@ function ResultView({ result }: { result: ITestParseResp }) {
             />
             <div className="mt-3 flex flex-wrap gap-1.5">
               {hasLink
-                ? <ToneBadge tone="success">已提取 115 链接</ToneBadge>
-                : <ToneBadge tone="warning">没有找到 115 链接</ToneBadge>}
+                ? <ToneBadge tone="success">{shareLinkStatus(true, linkProvider)}</ToneBadge>
+                : <ToneBadge tone="warning">{shareLinkStatus(false, linkProvider)}</ToneBadge>}
               {p.is_ad ? <ToneBadge tone="danger">疑似广告</ToneBadge> : null}
               {!p.is_ad && p.genres?.length ? <ToneBadge tone="neutral">{p.genres.slice(0, 3).join(' / ')}</ToneBadge> : null}
             </div>
@@ -131,6 +135,15 @@ function ResultView({ result }: { result: ITestParseResp }) {
           </div>
         </div>
       )}
+
+      {route?.compatible === false ? (
+        <div role="alert" className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-5">
+          分享链接来自{shareProviderName(route.share_provider)}，但当前来源配置的转存网盘是{shareProviderName(route.target_storage)}。
+          识别虽通过，实际转存会因为网盘不匹配而失败；请到监听来源的高级设置中修改「网盘」。
+        </div>
+      ) : route?.share_provider && route?.target_storage ? (
+        <p className="text-xs text-muted-foreground">分享网盘：{shareProviderName(route.share_provider)} · 转存目标：{shareProviderName(route.target_storage)}。此处不检查分享可访问性或目标文件夹。</p>
+      ) : null}
 
       {p?.is_media && result.confidence ? <ConfidenceBlock confidence={result.confidence} /> : null}
 
@@ -210,7 +223,7 @@ export function ParseTestDialog({ open, onOpenChange, source }: ParseTestDialogP
             <Field label="跳转链接（可选）" hint="消息按钮背后的真实链接；多个用空格或逗号分隔。">
               <Input
                 className="bg-card"
-                placeholder="https://115cdn.com/s/…"
+                placeholder="https://www.alipan.com/s/… 或 https://115.com/s/…"
                 value={urls}
                 onChange={(e) => setUrls(e.target.value)}
               />
