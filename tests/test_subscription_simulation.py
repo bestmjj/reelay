@@ -21,6 +21,28 @@ class SubscriptionSimulationWebTests(WebCase):
         entry = subscriptions.normalize({"title": "牧神记", "season": 1, "tmdbid": 236534})
         return self.app.state.store.add_subscription(subscriptions.key(entry), entry)
 
+    def test_historical_share_can_be_queued_directly_without_changing_source_mode(self):
+        store = self.app.state.store
+        pipeline = self.app.state.pipeline
+        original = pipeline.rule_for("@shareAliyun")["approval_mode"]
+        self.assertEqual(original, "manual")
+        response = self.client.post("/api/resources/submit", json={
+            "text": "牧神记 (2024) 第106集 https://www.alipan.com/s/abc123",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["state"], "received")
+        ctx = store.get_task(body["task_id"])
+        self.assertTrue(ctx.raw.extra["manual_import"])
+        self.assertEqual(ctx.source_rule["approval_mode"], "auto")
+        self.assertEqual(pipeline.rule_for("@shareAliyun")["approval_mode"], "manual")
+        self.assertEqual(self.client.post("/api/resources/submit",
+            json={"text": "https://t.me/shareAliyun/12345"}).status_code, 422)
+        self.assertEqual(self.client.post("/api/resources/submit", json={
+            "text": "牧神记 https://www.alipan.com/s/abc123", "source": "@untrusted",
+        }).status_code, 422)
+        self.assertEqual(store.counts_by_state().get("received"), 1)
+
     def test_default_simulation_without_seen_messages_is_safe(self):
         sub = self.subscribe()
         before = self.app.state.store.counts_by_state()
