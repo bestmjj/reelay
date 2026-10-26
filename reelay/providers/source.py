@@ -258,7 +258,7 @@ class TelegramUserbotSource:
                 break
             queries += 1
             count = 0
-            earliest = discovery.cutoff(state, now)
+            earliest = discovery.cutoff(state, now, sub.get("created_at"))
             try:
                 async for msg in self._client.iter_messages(
                         entity, search=sub["title"], limit=discovery.SEARCH_LIMIT):
