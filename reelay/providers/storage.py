@@ -657,7 +657,8 @@ class P115Storage(ShareStorage):
     def share_folder_choices(self, parsed) -> list[dict]:
         """List source-version folders read-only; never write to the cloud."""
         from types import SimpleNamespace
-        return share_folder_choices(self._list_share_sync(SimpleNamespace(parsed=parsed)))
+        return share_folder_choices(
+            self._list_share_sync(SimpleNamespace(parsed=parsed), include_dirs=True))
 
     def browse(self, cid: str, offset: int = 0, limit: int = 100, *, include_files: bool = False) -> dict[str, Any]:
         """目录选择器仅列目录；文件管理页也列出普通文件。"""
@@ -739,14 +740,16 @@ class P115Storage(ShareStorage):
                 raise TransferRejected(problem, permanent=True)
         return self._reconcile_sync(manifest)
 
-    def _list_share_sync(self, ctx: PipelineContext) -> list[dict]:
+    def _list_share_sync(self, ctx: PipelineContext, *, include_dirs: bool = False) -> list[dict]:
         from p115client import P115ShareFileSystem
         p = ctx.parsed
         client = self._cookie_client()
         problem = share_problem(client, p.share_code, p.receive_code)
         if problem:
             raise ShareUnavailable(problem)
-        return self._collect_share_videos(P115ShareFileSystem(client, p.share_code, p.receive_code))
+        return self._collect_share_videos(
+            P115ShareFileSystem(client, p.share_code, p.receive_code),
+            include_dirs=include_dirs)
 
     def _stage_sync(self, ctx: PipelineContext, selection: dict) -> dict[str, Any]:
         from p115client import P115FileSystem
@@ -809,21 +812,39 @@ class P115Storage(ShareStorage):
         return self._receipt(manifest, landed)
 
     @staticmethod
-    def _collect_share_videos(share_fs, root: int = 0, max_depth: int = 3) -> list[dict]:
-        out = []
-        def walk(cid, depth, path: tuple[str, ...], top: str):
+    def _collect_share_videos(share_fs, root: int = 0, max_depth: int = 8,
+                              *, include_dirs: bool = False) -> list[dict]:
+        out: list[dict] = []
+        visited: set[str] = set()
+        count = 0
+
+        def walk(cid, depth, path: tuple[str, ...], ancestors: tuple[str, ...]):
+            nonlocal count
+            if str(cid) in visited:
+                raise NeedsManual('115 分享目录存在重复 ID，无法完整核验')
+            visited.add(str(cid))
             for item in share_fs.iterdir(cid):
+                count += 1
+                if count > 10000:
+                    raise NeedsManual('分享文件与目录超过 10000 项，无法完整核验')
                 if item.get('is_directory') or item.get('is_dir'):
+                    next_path = (*path, item['name'])
+                    next_ids = (*ancestors, str(item['id']))
+                    if include_dirs:
+                        out.append({**_file_record(item), 'is_dir': True,
+                                    'share_path': '/'.join(next_path),
+                                    'share_folder_id': str(item['id']),
+                                    'share_ancestor_ids': list(next_ids)})
                     if depth >= max_depth:
-                        raise NeedsManual('分享目录过深，不能完整核验视频清单')
-                    walk(item['id'], depth + 1, (*path, item['name']),
-                         str(item['id']) if depth == 0 else top)
+                        raise NeedsManual('分享目录过深，不能按不完整清单转存')
+                    walk(item['id'], depth + 1, next_path, next_ids)
                 elif is_video(item.get('name', '')):
                     out.append({**_file_record(item),
-                                'share_folder_id': top, 'share_path': '/'.join(path)})
-        walk(root, 0, (), 'root')
+                                'share_folder_id': ancestors[-1] if ancestors else 'root',
+                                'share_ancestor_ids': list(ancestors),
+                                'share_path': '/'.join(path)})
+        walk(root, 0, (), ())
         return out
-
 
 def browse_dirs(credentials, cid: str, offset: int = 0, limit: int = 100, *, include_files: bool = False) -> dict:
     """只读按原分页列出目录；管理工具可要求同时显示普通文件。"""
