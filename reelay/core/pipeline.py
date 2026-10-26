@@ -18,6 +18,7 @@ import inspect
 import json
 import logging
 import math
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,7 @@ from .registry import Registry
 from .store import Store, _load_ctx
 from .config import config_revision, load_config, merge_config, normalize_config
 from .media import pairs_label, summarize_pairs
-from . import confidence, ignored, messages, runtime, works
+from . import confidence, existing_media, ignored, messages, runtime, works
 
 log = logging.getLogger("reelay.pipeline")
 
@@ -521,8 +522,47 @@ class Pipeline:
                 "title": ctx.parsed.title, "season": ctx.parsed.season,
                 "episodes": list(ctx.parsed.episodes), "work": works.of(ctx.parsed, ctx.meta.get("tmdb")),
             }
-            ns["stored_episodes"] = (self.store.stored_episode_pairs(ns["identity"]["work"], dedup_cid,
-                                                                     provider_name) if ctx.parsed.title else [])
+            if ctx.parsed.title:
+                work = ns["identity"]["work"]
+                already = {tuple(pair) for pair in self.store.stored_episode_pairs(
+                    work, dedup_cid, provider_name)}
+                # Verified copies in another folder on the SAME physical drive
+                # also count: different links/hashes must not copy E106 again.
+                drive = str(storage.client.drive_id) if provider_name == "aliyun" else None
+                already.update(tuple(pair) for pair in self.store.stored_episode_pairs_in_drive(
+                    work, provider_name, drive))
+                ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
+                observed = self.store.state_get("library_scan", "files", []) or []
+                if ctx.episode_pairs() and observed:
+                    try:
+                        with self.scope(ctx):
+                            guard = await asyncio.to_thread(
+                                existing_media.check, storage, observed,
+                                ctx.parsed, ctx.meta.get("tmdb", {}), provider=provider_name)
+                    except Exception as exc:
+                        self.store.release_resource(ctx.task_id)
+                        await self._fail(ctx, f"已有文件去重预检失败（{type(exc).__name__}），请稍后重试或人工核对",
+                                         retry_from=TaskState.QUEUED, auto_retry=False)
+                        return
+                    if guard["uncertain"]:
+                        self.store.release_resource(ctx.task_id)
+                        await self._fail(ctx, guard["uncertain"],
+                                         retry_from=TaskState.QUEUED, auto_retry=False)
+                        return
+                    confirmed = {tuple(pair) for pair in guard["covered"]}
+                    if confirmed:
+                        already.update(confirmed)
+                        ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
+                        ctx.log(f"已实时核验网盘原有文件，跳过 {len(confirmed)} 个重复季集，不记为 Reelay 已转存")
+                declared = {tuple(pair) for pair in ctx.episode_pairs()}
+                if declared and already.issuperset(declared):
+                    self.store.release_resource(ctx.task_id)
+                    ctx.state = TaskState.SKIPPED
+                    ctx.log("转存前去重：这条消息声明的全部季集已存在于当前网盘；不会覆盖或重复转存")
+                    self.store.save_task(ctx)
+                    return
+            else:
+                ns["stored_episodes"] = []
             try:
                 with self.scope(ctx):
                     manifest = await storage.prepare(ctx)
@@ -754,7 +794,13 @@ class Pipeline:
     @staticmethod
     def _content_keys(storage_name: str, ctx: PipelineContext) -> list[str]:
         title = ctx.parsed.title
-        return [f"{storage_name}:{ctx.ns('storage').get('dedup_cid') or ctx.save_dir_cid}:episode:{works.claim_key(title, season, ep)}"
+        cid = str(ctx.ns("storage").get("dedup_cid") or ctx.save_dir_cid)
+        if storage_name == "aliyun":
+            match = re.match(r"resource_([a-f0-9]{64})_", cid)
+            scope = "resource_" + match.group(1) if match else cid
+        else:
+            scope = "account"  # all directories of the same 115 account
+        return [f"{storage_name}:{scope}:episode:{works.claim_key(title, season, ep)}"
                 for season, ep in ctx.episode_pairs() if title]
 
     @staticmethod
@@ -791,6 +837,9 @@ class Pipeline:
         elif manifest.get("episodes") and ctx.parsed.title:
             work = ns.get("identity", {}).get("work") or works.of(ctx.parsed, ctx.meta.get("tmdb"))
             stored = {tuple(pair) for pair in self.store.stored_episode_pairs(work, dedup_cid, provider_name)}
+            drive = str(storage.client.drive_id) if provider_name == "aliyun" else None
+            stored.update(tuple(pair) for pair in self.store.stored_episode_pairs_in_drive(
+                work, provider_name, drive))
             remaining = [f for f in manifest["files"] if (f.get("season"), f.get("episode")) not in stored]
             if not remaining:
                 reason = "分享内的集数均已由其他任务入库"
