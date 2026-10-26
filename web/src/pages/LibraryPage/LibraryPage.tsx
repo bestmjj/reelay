@@ -28,7 +28,7 @@ const TYPES = [
   ...['tv', 'movie', 'anime'].map((value) => ({ value, label: MEDIA_TYPE_LABELS[value] })),
 ];
 const SORTS: Array<{ value: Sort; label: string }> = [
-  { value: 'recent', label: '最近入库' },
+  { value: 'recent', label: '最近更新' },
   { value: 'title', label: '按片名' },
   { value: 'size', label: '按体积' },
 ];
@@ -96,7 +96,7 @@ function GroupSheet({ group, onClose }: { group: ITitleGroup | null; onClose: ()
           ) : null}
           {group.media_type !== 'movie' && group.episodes.length ? (
             <section className="space-y-2">
-              <h3 className="text-[13px] font-semibold">已收录 {episodeCount(group)} 集</h3>
+              <h3 className="text-[13px] font-semibold">{group.origin === 'scanned' ? '扫描发现' : '已收录'} {episodeCount(group)} 集</h3>
               {seasonGroups(group).map(([season, eps]) => (
                 <div key={season ?? 'all'} className="flex items-start gap-2">
                   {season !== null ? (
@@ -127,7 +127,7 @@ function GroupSheet({ group, onClose }: { group: ITitleGroup | null; onClose: ()
                   );
                 })}
               </ul>
-            ) : <p className="text-xs text-muted-foreground">没有整理记录。</p>}
+            ) : <p className="text-xs text-muted-foreground">{group.origin === 'scanned' ? '尚无扫描路径记录。' : '没有整理记录。'}</p>}
           </section>
         </div>
       ) : null}
