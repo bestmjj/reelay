@@ -77,7 +77,6 @@ class SubscriptionFlowE2E(WebCase):
 
     def test_global_115_episode_does_not_prevent_aliyun_subscription_decision(self):
         from reelay.core import subscriptions
-        from reelay.core import runtime
         from reelay.providers.decision import SubscriptionDecision
         store = self.app.state.store
         sub = subscriptions.normalize({"title": "牧神记", "season": 1,
