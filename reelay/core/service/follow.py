@@ -319,6 +319,16 @@ class FollowMixin(ServiceBase):
             raise NotFoundError("这条订阅已经不存在")
         return self.store.subscription(found["id"])
 
+    def set_subscription_start(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Set an explicit episode floor for future automatic releases."""
+        found = self.find_subscription(item)
+        floor = item.get("start_episode")
+        if floor is not None and (type(floor) is not int or not 1 <= floor <= 100000):
+            raise ValueError("最早自动接收集号只能是 1–100000，或留空")
+        if not self.store.set_subscription_start(found["id"], floor):
+            raise NotFoundError("该订阅已不存在")
+        return self.store.subscription(found["id"])
+
     def reopen_subscription(self, item: dict[str, Any]) -> None:
         """已完结的订阅继续订阅：恢复自动放行与缺集巡检（如出了特别篇、补了集）。"""
         found = self.find_subscription(item)
