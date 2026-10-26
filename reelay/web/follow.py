@@ -14,6 +14,11 @@ class SubscriptionPayload(BaseModel):
     auto: bool = True
 
 
+class SubscriptionDestinationPayload(BaseModel):
+    id: int
+    save_to: str | None = None
+
+
 class TextPayload(BaseModel):
     text: str
 
@@ -47,6 +52,10 @@ def router(service) -> APIRouter:
     @api.post("/api/subscriptions/from-task/{task_id}")
     async def subscribe_from_task(task_id: str):
         return await service.subscribe_from_task(task_id)
+
+    @api.post("/api/subscriptions/destination")
+    async def set_subscription_destination(payload: SubscriptionDestinationPayload):
+        return service.set_subscription_destination(payload.model_dump())
 
     @api.post("/api/subscriptions/reopen")
     async def reopen(payload: SubscriptionPayload):
