@@ -1,7 +1,7 @@
 """追剧订阅与「不再接收」的作品（用户数据，存在数据库里）。"""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 
@@ -23,6 +23,11 @@ class SubscriptionDestinationPayload(BaseModel):
 class SubscriptionStartPayload(BaseModel):
     id: int = Field(gt=0)
     start_episode: int | None = Field(default=None, ge=1, le=100000)
+
+
+class ExistingAssociatePayload(BaseModel):
+    id: int = Field(gt=0)
+    file_keys: list[str] = Field(min_length=1, max_length=50)
 
 
 class TextPayload(BaseModel):
@@ -79,6 +84,16 @@ def router(service) -> APIRouter:
     async def set_start(payload: SubscriptionStartPayload):
         """Per-subscription automatic episode floor; does not alter prior jobs."""
         return service.set_subscription_start(payload.model_dump())
+
+    @api.get("/api/subscriptions/existing")
+    async def preview_existing(id: int = Query(gt=0), offset: int = Query(default=0, ge=0)):
+        """Safe read-only preview; actual cloud files are checked upon confirmation."""
+        return service.existing_subscription_candidates(id, offset=offset)
+
+    @api.post("/api/subscriptions/existing/associate")
+    async def associate_existing(payload: ExistingAssociatePayload):
+        """Explicitly bind 1-50 observed file identities to a TMDB subscription."""
+        return await service.associate_existing_subscription(payload.id, payload.file_keys)
 
     @api.post("/api/subscriptions/reopen")
     async def reopen(payload: SubscriptionPayload):
