@@ -398,7 +398,7 @@ class AliyunStorage(ShareStorage):
         if not self.ready():
             raise RuntimeError("阿里云盘未登录：请在设置中填写 Refresh Token")
         if ctx.parsed.raw_fields.get("share_provider") != "aliyun":
-            raise NeedsManual("分享链接属于 115，不可用阿里云盘转存")
+            raise NeedsManual("当前分享链接不是阿里云盘链接，请检查监听来源的网盘配置")
         listing = await run_blocking(self._share_files, ctx)
         selection = await self.select(ctx, listing)
         return await run_blocking(self._stage, ctx, selection)
