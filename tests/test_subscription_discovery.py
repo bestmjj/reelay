@@ -107,6 +107,7 @@ class SubscriptionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         now = 1000000
         self.assertEqual(discovery.cutoff({}, now), now - discovery.INITIAL_LOOKBACK_HOURS * 3600)
         self.assertGreaterEqual(discovery.cutoff({"checked_at": now - 3600}, now), now - 7200)
+        self.assertEqual(discovery.cutoff({}, now, subscribed_at=now - 60), now - 60)
 
 
 if __name__ == "__main__":
