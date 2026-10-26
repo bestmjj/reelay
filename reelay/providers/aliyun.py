@@ -142,7 +142,7 @@ class AliyunClient:
             return self._send(API + path, data, headers)
         except AliyunAPIError as exc:
             # A 401 on a read request is known not to have modified anything.
-            if not (auth and read and exc.status == 401):
+            if not (auth and read and (exc.status == 401 or exc.code in ("AccessTokenInvalid", "AccessTokenExpired", "InvalidAccessToken"))):
                 raise
             self._refresh(force=True)
             headers["Authorization"] = f"Bearer {self._access}"
