@@ -537,7 +537,9 @@ class Pipeline:
                 already.update(tuple(pair) for pair in self.store.stored_episode_pairs_in_drive(
                     work, provider_name, drive))
                 ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
-                observed = self.store.state_get("library_scan", "files", []) or []
+                observed = existing_media.apply_associations(
+                    self.store.state_get("library_scan", "files", []) or [],
+                    self.store.state_get("media_associations", "confirmed", {}) or {})
                 if ctx.episode_pairs() and observed:
                     try:
                         with self.scope(ctx):
