@@ -69,6 +69,8 @@ class SourceMixin(ServiceBase):
                 raise ValueError("消息链接频道与所选来源不一致")
             source = source_name
             telegram_id = int(match.group(2))
+            if telegram_id < 1:
+                raise ValueError("Telegram 消息 ID 必须是正整数")
             if not any(name.casefold() == source.casefold() for name in configured):
                 raise ValueError("此 Telegram 频道尚未配置为监听来源，不能读取或提交其消息")
             fetched = await self.source_messages(source, limit=1, message_id=telegram_id)
@@ -93,7 +95,7 @@ class SourceMixin(ServiceBase):
         msg_id = "manual-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
         # A share link by itself carries no verified title/season/episode.
         # Parsers may mistakenly interpret its URL as a movie title.
-        bare_share = bool(re.fullmatch(r"https?://\\S+", text.strip(), re.I))
+        bare_share = bool(re.fullmatch(r"https?://\S+", text.strip(), re.I))
         raw = RawMessage(source=selected, msg_id=msg_id,
                          text=text, urls=urls,
                          extra={"manual_import": True, "manual_unlabeled": bare_share})
