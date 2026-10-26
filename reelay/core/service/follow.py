@@ -77,6 +77,8 @@ class FollowMixin(ServiceBase):
                     "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
                     "task_created": False}
         sample = None
+        example_origin = "pasted" if text and text.strip() else "local"
+        search_problem = ""
         if text and text.strip():
             if len(text) > 12000:
                 raise ValueError("模拟消息不能超过 12000 个字符")
@@ -92,8 +94,25 @@ class FollowMixin(ServiceBase):
                 if sample:
                     break
         if not sample:
+            # A locally empty task history does not mean a configured channel
+            # has never published this show. Search its authorized Telegram
+            # history as a READ-ONLY request to the listener process.
+            for bot in sources:
+                try:
+                    response = await self.source_messages(bot, limit=5, search=entry["title"])
+                except (ValueError, ConflictError) as exc:
+                    search_problem = str(exc)
+                    continue
+                rows = response.get("messages") or []
+                if rows:
+                    msg = rows[0]
+                    sample = {"source": bot, "text": msg["text"], "urls": msg.get("urls") or []}
+                    example_origin = response.get("origin", "telegram_search")
+                    break
+                search_problem = response.get("problem") or "已查询频道历史，没有找到符合条件的分享消息"
+        if not sample:
             return {"status": "no_sample",
-                    "reason": "尚未收到这部剧的资源消息；后台会定时检索已配置的频道。也可手动粘贴一条消息测试。",
+                    "reason": search_problem or "目前没有可用于模拟的分享消息；可以粘贴频道消息测试。",
                     "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
                     "source": sources[0], "task_created": False}
 
@@ -116,7 +135,7 @@ class FollowMixin(ServiceBase):
         return {
             "status": status, "reason": reason,
             "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
-            "source": sample["source"], "parsed": preview["parsed"],
+            "source": sample["source"], "example_origin": example_origin, "parsed": preview["parsed"],
             "matched_subscription": matched,
             "decision": decision, "routing": route,
             "target_preview": preview.get("target_preview"),
