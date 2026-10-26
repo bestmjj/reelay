@@ -117,8 +117,7 @@ class AliyunClient:
             raise AliyunAPIError(status, str(result.get("code") or "Unknown"))
         return result
 
-    @classmethod
-    def resource_drive(cls, token_data: dict) -> str:
+    def resource_drive(self, token_data: dict) -> str:
         """Resolve resource library explicitly, even if refresh only returns default.
 
         Aliyun's consumer token response can omit resource_drive_id while the
@@ -130,7 +129,7 @@ class AliyunClient:
         access = token_data.get("access_token")
         if not access:
             raise ValueError("阿里云盘登录没有返回 access_token")
-        extra = cls._send(USER_API, {}, {"Authorization": f"Bearer {access}"})
+        extra = self._send(USER_API, {}, {"Authorization": f"Bearer {access}"})
         return _resource_drive_id({**token_data, **{
             k: v for k, v in extra.items() if v not in (None, "")
         }})
