@@ -1,6 +1,7 @@
 """任务：列表、详情、收件箱与人工操作（批准、忽略、重试、重新识别、重新整理、核验转存、修正识别）。"""
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query
@@ -10,6 +11,11 @@ from pydantic import BaseModel, Field
 class ActionPayload(BaseModel):
     save_dir_alias: str | None = None
     conflict: Literal["skip", "replace"] | None = None  # 重新整理时处理文件冲突
+
+
+class ShareFolderPayload(BaseModel):
+    folder_id: str = Field(min_length=1, max_length=128)
+    remember: bool = True
 
 
 class ParsePatchPayload(BaseModel):
@@ -43,6 +49,15 @@ def router(service) -> APIRouter:
     @api.get("/api/tasks/{task_id}")
     async def task_detail(task_id: str):
         return service.get_task(task_id)
+
+    @api.get("/api/tasks/{task_id}/share-folders")
+    async def task_share_folders(task_id: str):
+        return await asyncio.to_thread(service.share_folders, task_id)
+
+    @api.post("/api/tasks/{task_id}/share-folder")
+    async def task_select_share_folder(task_id: str, payload: ShareFolderPayload):
+        return await asyncio.to_thread(
+            service.choose_share_folder, task_id, payload.folder_id, remember=payload.remember)
 
     @api.post("/api/tasks/{task_id}/approve")
     async def approve(task_id: str, payload: ActionPayload | None = None):
