@@ -56,6 +56,8 @@ class FileManagerWebTests(WebCase):
                 **body, "drive_id": "old_resource"}).status_code, 409)
             self.assertEqual(self.client.post("/api/storage/folders", json={
                 **body, "name": "../escape"}).status_code, 422)
+            self.assertEqual(self.client.post("/api/storage/folders", json={
+                **body, "name": ".reelay-manifest"}).status_code, 409)
             fs.delete.assert_not_called()
 
     def test_rename_checks_parent_name_type_and_drive(self):
@@ -80,6 +82,8 @@ class FileManagerWebTests(WebCase):
             self.assertEqual(fs.rename.call_count, 1)
             self.assertEqual(self.client.patch("/api/storage/names", json={
                 **body, "name": "forbidden/name.mkv"}).status_code, 422)
+            self.assertEqual(self.client.patch("/api/storage/names", json={
+                **body, "name": ".reelay-private"}).status_code, 409)
             fs.delete.assert_not_called()
 
     def test_disallows_delete_and_remote_cross_origin_write(self):
