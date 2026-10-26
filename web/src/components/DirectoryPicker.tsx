@@ -35,7 +35,7 @@ export default function DirectoryPicker({ open, initialCid = '0', initialName = 
         <span className="text-xs text-muted-foreground">选择网盘</span>
         {([{ id: 'p115', name: '115 网盘' }, { id: 'aliyun', name: '阿里云盘' }] as const).map(item => (
           <Button key={item.id} size="sm" variant={provider === item.id ? 'default' : 'outline'}
-            disabled={busy} onClick={() => { setProvider(item.id); dir.open('0', []); }}>
+            disabled={provider === item.id} onClick={() => { setProvider(item.id); dir.open('0', []); }}>
             {item.name}
           </Button>
         ))}
