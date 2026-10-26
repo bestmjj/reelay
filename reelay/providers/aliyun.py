@@ -298,8 +298,8 @@ class AliyunStorage(ShareStorage):
         return out
 
     def inspect_share(self, parsed, *, describe: bool) -> dict:
-        temp = PipelineContext.__new__(PipelineContext)
-        temp.parsed = parsed
+        from types import SimpleNamespace
+        temp = SimpleNamespace(parsed=parsed)
         try:
             files = self._share_files(temp)
         except ShareUnavailable as exc:
@@ -347,7 +347,7 @@ class AliyunStorage(ShareStorage):
     async def prepare(self, ctx: PipelineContext) -> dict:
         if not self.ready():
             raise RuntimeError("阿里云盘未登录：请在设置中填写 Refresh Token")
-        if ctx.parsed.raw_fields.get("share_provider") not in (None, "aliyun"):
+        if ctx.parsed.raw_fields.get("share_provider") != "aliyun":
             raise NeedsManual("分享链接属于 115，不可用阿里云盘转存")
         listing = await run_blocking(self._share_files, ctx)
         selection = await self.select(ctx, listing)
@@ -386,7 +386,7 @@ class AliyunStorage(ShareStorage):
                 raise TransferUncertain(f"阿里云盘复制响应不确定：{exc}") from None
             except Exception as exc:
                 raise TransferUncertain(f"阿里云盘复制请求结果不确定（{type(exc).__name__}）") from None
-            if not response.get("file_id") and not response.get("async_task_id"):
+            if not response.get("file_id") and not response.get("async_task_id") and not response.get("task_id"):
                 raise TransferUncertain("阿里云盘未确认复制结果，必须只读核验")
         return _await_landing(lambda: self._verify(manifest))
 
