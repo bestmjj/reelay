@@ -1,9 +1,14 @@
 // 网盘目录浏览、115 双凭证认证与阿里云盘单凭证登录
-import { apiUrl, del, get, post, put, query } from './request';
+import { apiUrl, del, get, patch, post, put, query } from './request';
+
+export type CloudProvider = 'p115' | 'aliyun';
 
 export interface IDirItem {
   id: string;
   name: string;
+  pid?: string;
+  is_dir?: boolean;
+  size?: number | null;
 }
 
 export interface IDirListing {
@@ -12,6 +17,20 @@ export interface IDirListing {
   path: IDirItem[];
   next_offset: number | null;
   via: string;
+  drive_id?: string;
+  total_entries?: number;
+}
+
+export interface ICloudWrite {
+  provider: CloudProvider;
+  cid: string;
+  drive_id?: string;
+  name: string;
+}
+export interface ICloudRename extends ICloudWrite {
+  fid: string;
+  old_name: string;
+  is_dir: boolean;
 }
 
 export interface IAuth115Side {
@@ -69,6 +88,12 @@ export interface IAliyunQrStatus {
 
 export const storageApi = {
   dirs: (cid: string, offset = 0, provider?: string) => get<IDirListing>(`storage/dirs${query({ cid, offset, provider })}`),
+  items: (cid: string, offset: number, provider: CloudProvider) =>
+    get<IDirListing>(`storage/items${query({ cid, offset, provider })}`),
+  createFolder: (params: ICloudWrite) =>
+    post<{ ok: boolean; id: string; name: string }>('storage/folders', params),
+  renameEntry: (params: ICloudRename) =>
+    patch<{ ok: boolean; id: string; name: string; unchanged?: boolean }>('storage/names', params),
   auth115Status: () => get<IAuth115Status>('auth115/status'),
   auth115Ping: () => post<{ cookie: string; oauth: string; status: IAuth115Status }>('auth115/ping'),
   auth115SetCookie: (cookies: string) => put<{ ok: boolean; state: string }>('auth115/cookie', { cookies }),
