@@ -120,7 +120,13 @@ async def _serve_fetch(store: Store, source, request: dict) -> None:
     try:
         if not hasattr(source, "recent"):
             raise RuntimeError("当前消息源不支持读取历史消息")
-        messages = await asyncio.wait_for(source.recent(request["bot"], request["max_count"]), 20)
+        if request.get("search_query"):
+            if not hasattr(source, "search_messages"):
+                raise RuntimeError("当前消息源不支持按订阅查询历史消息")
+            operation = source.search_messages(request["bot"], request["search_query"], request["max_count"])
+        else:
+            operation = source.recent(request["bot"], request["max_count"])
+        messages = await asyncio.wait_for(operation, 22)
     except asyncio.CancelledError:
         store.finish_source_fetch(request["id"], error="主进程正在切换消息源")
         raise
