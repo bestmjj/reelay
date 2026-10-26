@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from reelay.core.contracts import NeedsManual, ParsedResource, PipelineContext, RawMessage, TaskState
 from reelay.providers.aliyun import AliyunStorage
-from reelay.providers.storage import P115Storage, _select_video_items, share_folder_choices
+from reelay.providers.storage import P115Storage, _announced_latest, _select_video_items, share_folder_choices
 from tests.fakes import WebCase
 
 
@@ -53,6 +53,21 @@ class FolderChoiceTests(unittest.TestCase):
         with self.assertRaisesRegex(NeedsManual, "已不存在"):
             _select_video_items(two_versions(), self.parsed, scope="message",
                                 share_folder_id="removed-folder")
+
+    def test_latest_announcement_must_exist_in_chosen_folder(self):
+        listing = [file for file in two_versions() if file["id"] != "dovi-folder-14"]
+        ctx = PipelineContext(RawMessage("@shareAliyun", "latest", "小城良方 [更新14集]"))
+        ctx.parsed = self.parsed
+        ctx.ns("share_selection")["folder_id"] = "dovi-folder"
+        self.assertEqual(_announced_latest(ctx), 14)
+        with self.assertRaisesRegex(NeedsManual, "选中版本缺少.*E14"):
+            _select_video_items(listing, self.parsed, scope="share",
+                                share_folder_id="dovi-folder",
+                                required_latest=_announced_latest(ctx))
+        with self.assertRaisesRegex(NeedsManual, "名称已改变"):
+            _select_video_items(two_versions(), self.parsed, scope="message",
+                                share_folder_id="dovi-folder",
+                                share_folder_path="Season 1 (HDR.Vivid)")
 
     def test_duplicate_versions_within_the_chosen_folder_require_review(self):
         listing = [*two_versions(), {**two_versions()[-1], "id": "second-dovi-14",
