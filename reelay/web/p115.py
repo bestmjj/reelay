@@ -113,6 +113,10 @@ def router(service) -> APIRouter:
         """选目录：兼容 115 数字 CID 与阿里云盘不透明文件 ID；错误不伪装成空目录。"""
         cfg = service.pipeline.cfg
         storage_name = provider or cfg["defaults"]["storage"]
+        # 115 uses decimal IDs. Aliyun uses opaque alphanumeric resource
+        # folder IDs and must never be mistaken for invalid 115 IDs.
+        if storage_name == "p115" and not cid.isdecimal():
+            raise HTTPException(status_code=422, detail="115 目录编号必须是数字")
         try:
             storage = service.pipeline.reg.get_provider("storage", storage_name)
         except KeyError:
