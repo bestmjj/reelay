@@ -95,6 +95,9 @@ class WrongCopyQuarantineTests(WebCase):
         task = self.client.get(self.url).json()
         self.assertEqual(task["state"], "done")
         self.assertTrue(task["source_audit"]["quarantine"]["active"])
+        listed = self.client.get("/api/tasks", params={"state": "done"}).json()["items"]
+        self.assertTrue(next(x for x in listed if x["task_id"] == self.ctx.task_id)
+                        ["wrong_source_quarantined"])
         self.assertIn("resolve_quarantine", task["actions"])
         self.assertNotIn("quarantine_wrong_source", task["actions"])
         self.assertEqual(self.client.post(self.url + "/quarantine-wrong-copy",
