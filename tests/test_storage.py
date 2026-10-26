@@ -416,6 +416,46 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([x[3] for x in self.cloud.receives()], [['500'], ['501']])
         self.assertEqual(done.state, TaskState.DONE)
 
+    async def test_variety_bundle_editions_transfer_once_and_new_bonus_only(self):
+        """Mock cloud: upper/lower/bonus/pure survive rename and live dedup."""
+        titles = [
+            "20261026.第3期加更.mp4", "20261025.第3期下.mkv",
+            "20261024.第3期上.mp4", "20261020.第2期还有加更.mp4",
+            "20261019.第2期加更.mp4", "20261018.第2期下.mp4",
+            "20261017.第2期上.mp4", "20261010.纯享 第01期上·慢速目击证人纯享.mp4",
+        ]
+        self.cloud.add_share('variety', *titles)
+        one = self.task('variety', title='某综艺', episodes=(1, 2, 3))
+        one.raw.text = '某综艺 第3期 2026年'
+        self.store.save_task(one)
+        stored = await self.execute(one)
+        self.assertEqual(stored.state, TaskState.DONE, stored.trail)
+        self.assertEqual(len(stored.ns('storage')['landed']), 8)
+        self.assertEqual(len(self.cloud.receives()), 1)
+        self.assertEqual(len(self.cloud.receives()[0][3]), 8)
+        paths = [self.path_of(int(f['id'])) for f in stored.ns('storage')['landed']]
+        self.assertEqual(len(set(paths)), 8)
+        self.assertTrue(any('第 3 期（上）' in path for path in paths))
+        self.assertTrue(any('第 3 期（下）' in path for path in paths))
+        self.assertTrue(any('第 3 期（加更）' in path for path in paths))
+        self.assertTrue(any('第 1 期（纯享上）' in path for path in paths))
+        self.assertEqual(self.store.stored_episode_pairs(works.identity('某综艺'), '1'), [])
+        self.assertEqual(len(self.store.stored_variety_parts_in_drive(
+            works.identity('某综艺'), 'p115')), 8)
+
+        self.cloud.shares['variety'].append({
+            'id': '1600', 'parent_id': 0, 'name': '20261027.第3期还有加更.mp4',
+            'size': 456, 'sha1': 'A' * 40, 'is_dir': False,
+        })
+        second = await self.execute(self.task('variety', title='某综艺', episodes=(3,)))
+        self.assertEqual(second.state, TaskState.DONE, second.trail)
+        self.assertEqual([x[3] for x in self.cloud.receives()][1], ['1600'])
+        self.assertEqual(len(second.ns('storage')['landed']), 1)
+
+        repeated = await self.execute(self.task('variety', title='某综艺', episodes=(3,)))
+        self.assertEqual(repeated.state, TaskState.SKIPPED, repeated.trail)
+        self.assertEqual(len(self.cloud.receives()), 2)
+
     async def test_unresolvable_episode_stops_before_transfer_without_auto_retry(self):
         self.cloud.add_share('share', 'video.mkv')
         failed = await self.execute(self.task())
