@@ -33,7 +33,7 @@ export default function DirectoryPicker({ open, initialCid = '0', initialName = 
 
       <div className="flex flex-wrap items-center gap-2 border-t border-border/70 px-4 py-2">
         <span className="text-xs text-muted-foreground">选择网盘</span>
-        {([{ id: 'p115', name: '115 网盘' }, { id: 'aliyun', name: '阿里云盘' }] as const).map(item => (
+        {([{ id: 'p115', name: '115 网盘' }, { id: 'aliyun', name: '阿里云盘（资源库）' }] as const).map(item => (
           <Button key={item.id} size="sm" variant={provider === item.id ? 'default' : 'outline'}
             disabled={provider === item.id} onClick={() => { setProvider(item.id); dir.open('0', []); }}>
             {item.name}
