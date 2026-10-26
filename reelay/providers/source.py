@@ -242,6 +242,11 @@ class TelegramUserbotSource:
             except Exception as exc:  # noqa: BLE001 - one inaccessible channel doesn't block others
                 failed += 1
                 log.warning("主动追剧：无法访问来源 %s (%s)", target, type(exc).__name__)
+                flood_seconds = getattr(exc, "seconds", None)
+                if isinstance(flood_seconds, (int, float)):
+                    wait = min(max(int(flood_seconds), 60), 86400)
+                    save(discovery.NAMESPACE, "__global__", {"next_at": time.time() + wait})
+                    return {"status": "rate_limited", "queries": 0, "candidates": 0, "failed": failed}
                 # Show actionable errors beside each affected subscription.
                 for sub in active:
                     if not sub.get("auto") or sub.get("finished"):
