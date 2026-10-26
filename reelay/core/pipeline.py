@@ -789,7 +789,8 @@ class Pipeline:
         ns = ctx.ns("storage")
         if not exc.permanent:
             ns["phase"] = "ready"
-            await self._fail(ctx, f"网盘拒绝转存：{exc}，稍后重试", retry_from=TaskState.QUEUED)
+            cloud = "115" if storage.name == "p115" else getattr(storage, "ui_label", storage.name)
+            await self._fail(ctx, f"{cloud} 拒绝转存：{exc}，稍后重试", retry_from=TaskState.QUEUED)
             return
         if hasattr(storage, "discard"):
             try:
