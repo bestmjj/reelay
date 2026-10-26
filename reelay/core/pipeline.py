@@ -570,6 +570,8 @@ class Pipeline:
                 already.update(tuple(pair) for pair in self.store.stored_episode_pairs_in_drive(
                     work, provider_name, drive))
                 ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
+                ns["stored_variety_parts"] = self.store.stored_variety_parts_in_drive(
+                    work, provider_name, drive)
                 observed = existing_media.apply_associations(
                     existing_media.scan_observations(self.store),
                     self.store.state_get("media_associations", "confirmed", {}) or {})
@@ -596,20 +598,10 @@ class Pipeline:
                         ctx.log(f"已实时核验网盘原有文件，跳过 {len(confirmed)} 个重复季集，不记为 Reelay 已转存")
                 declared = {tuple(pair) for pair in ctx.episode_pairs()}
                 if declared and already.issuperset(declared):
-                    if ctx.source_rule.get("episodes_from", "share") == "message":
-                        # A message-scoped subscription explicitly requests only
-                        # these episodes, so the trusted drive ledger is enough
-                        # to skip before any share access.
-                        self.store.release_resource(ctx.task_id)
-                        ctx.state = TaskState.SKIPPED
-                        ctx.log("转存前去重：这条消息声明的全部季集已存在于当前网盘；不会覆盖或重复转存")
-                        self.store.save_task(ctx)
-                        return
-                    # In share-scoped mode the link can grow IN PLACE: a post
-                    # describing E105 may link a share now containing E106.
-                    # Enumerate its live contents and let storage.prepare
-                    # remove already-stored episodes instead of skipping early.
-                    ctx.log("消息标记的集数已存在，但分享可能新增剧集；继续读取分享清单，逐集安全去重")
+                    # Even a previously verified E03 is NOT proof that 第3期下
+                    # or 第3期加更 exists. The link may also have grown in place.
+                    # Always inspect its current files to dedup each edition.
+                    ctx.log("消息中集号已有记录；仍需读取分享，检查是否新增上下期、加更或其它集数")
             else:
                 ns["stored_episodes"] = []
             try:
@@ -624,7 +616,8 @@ class Pipeline:
                 # 读不到分享就无法按清单去重；消息写明的集都已入库时，这条只是重复消息，不算失败
                 declared = ctx.episode_pairs()
                 stored = {tuple(pair) for pair in ns.get("stored_episodes") or []}
-                if self._episodic(ctx) and declared and stored.issuperset(declared):
+                if (self._episodic(ctx) and declared and stored.issuperset(declared)
+                        and not re.search(r"第\s*\d{1,4}\s*期", ctx.raw.text or "")):
                     ctx.state = TaskState.SKIPPED
                     ctx.log(f"执行前去重命中：分享不可用（{exc}），但消息写明的 {pairs_label(declared)} 均已入库")
                     self.store.save_task(ctx)
@@ -643,6 +636,7 @@ class Pipeline:
                 return
             finally:
                 ns.pop("stored_episodes", None)
+                ns.pop("stored_variety_parts", None)
             self._adopt_manifest(ctx, manifest)
             ns["manifest"] = manifest
             ns["phase"] = "ready"
@@ -884,6 +878,8 @@ class Pipeline:
             identity.update(episodes=list(p.episodes), season=p.season)
             if manifest.get("pairs"):
                 identity["pairs"] = [list(pair) for pair in manifest["pairs"]]
+            if manifest.get("variety_parts"):
+                identity["variety_parts"] = [dict(row) for row in manifest["variety_parts"]]
 
     async def _recheck_manifest(self, ctx: PipelineContext, storage, provider_name: str) -> bool:
         ns = ctx.ns("storage")
@@ -893,6 +889,28 @@ class Pipeline:
         if not manifest.get("episodes") and self.store.saved_share(
                 ctx.parsed.share_code, dedup_cid, provider_name):
             reason = "分享已转存到该目录"
+        elif manifest.get("variety_parts") and ctx.parsed.title:
+            # Verified editions are tracked independently: E03 上 does not
+            # suppress E03 下, 加更 or 纯享 while waiting for a transfer slot.
+            work = ns.get("identity", {}).get("work") or works.of(ctx.parsed, ctx.meta.get("tmdb"))
+            drive = str(storage.client.drive_id) if provider_name == "aliyun" else None
+            stored_parts = {tuple(row) for row in self.store.stored_variety_parts_in_drive(
+                work, provider_name, drive)}
+            remaining = [file for file in manifest["files"]
+                         if (file["season"], file["episode"], file["variant"]) not in stored_parts]
+            if not remaining:
+                reason = "这些综艺期数的上/下/加更/纯享均已有核验的文件"
+            elif len(remaining) < len(manifest["files"]):
+                manifest["files"] = remaining
+                manifest["variety_parts"] = [
+                    {"season": file["season"], "episode": file["episode"], "variant": file["variant"]}
+                    for file in remaining]
+                manifest["pairs"] = [list(pair) for pair in sorted(
+                    {(file["season"], file["episode"]) for file in remaining})]
+                manifest["season"], manifest["episodes"] = summarize_pairs(manifest["pairs"])
+                self._adopt_manifest(ctx, manifest)
+                ctx.log("同一期的已保存版本已逐文件跳过，保留新出现的综艺分段与加更")
+                self.store.save_task(ctx)
         elif manifest.get("episodes") and ctx.parsed.title:
             work = ns.get("identity", {}).get("work") or works.of(ctx.parsed, ctx.meta.get("tmdb"))
             stored = {tuple(pair) for pair in self.store.stored_episode_pairs(work, dedup_cid, provider_name)}
