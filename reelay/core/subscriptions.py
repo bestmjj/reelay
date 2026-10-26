@@ -3,10 +3,11 @@
 订阅是用户数据，存在数据库（``Store.subscriptions``），在管理台「追剧订阅」、Telegram 审批卡片「追剧」、
 控制 Bot 与 MCP 里维护；缺集追更也用它。每项::
 
-    {id, title: 剧名, season: 1, total: 36, tmdbid: 12345, auto: true, finished: None}
+    {id, title: 剧名, season: 1, total: 36, tmdbid: 12345, auto: true, save_to: None, finished: None}
 
 - ``tmdbid``：TMDB 条目 ID；有它时按 ID 匹配，没有时按 TMDB 规范片名匹配；
 - ``auto``：是否自动放行新集（默认 true；设为 false 只做缺集追更提醒）；
+- ``save_to``：可选的订阅专属保存目录别名；为 null 时沿用来源与媒体自动分类；
 - ``finished``：这一季播完且全部入库后，每日缺集巡检把订阅标为已完结（``{date, episodes}``）：不再自动放行、
   不再巡检缺集，可以继续订阅或删除。
 
@@ -41,6 +42,10 @@ def normalize(item: Any) -> dict[str, Any]:
     if item.get("auto") is not None and type(item["auto"]) is not bool:
         raise ValueError("auto 必须是布尔值")
     out["auto"] = item.get("auto") is not False
+    alias = item.get("save_to")
+    if alias is not None and (type(alias) is not str or not alias.strip() or alias != alias.strip()):
+        raise ValueError("save_to 必须是有效的保存目录别名，或 null（按来源自动保存）")
+    out["save_to"] = alias
     return out
 
 
