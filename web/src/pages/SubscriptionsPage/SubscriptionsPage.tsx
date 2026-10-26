@@ -369,6 +369,12 @@ export default function SubscriptionsPage() {
                    testResult.status === 'no_source' ? '没有监听来源' : '被规则阻止'}
                 </ToneBadge>
                 {testResult.source ? <span className="text-xs text-muted-foreground">{testResult.source}</span> : null}
+                {testResult.example_origin ? (
+                  <span className="text-xs text-muted-foreground">
+                    {testResult.example_origin === 'telegram_search' ? '· Telegram 频道历史' :
+                     testResult.example_origin === 'pasted' ? '· 粘贴的消息' : '· 已接收的消息'}
+                  </span>
+                ) : null}
               </div>
               <p>{testResult.reason}</p>
               {testResult.parsed ? (
