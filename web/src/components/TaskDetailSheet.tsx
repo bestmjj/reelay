@@ -71,6 +71,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const [shareFolderId, setShareFolderId] = useState('');
   const [rememberShareFolder, setRememberShareFolder] = useState(true);
   const [shareFolderBusy, setShareFolderBusy] = useState(false);
+  const [wrongCopyReason, setWrongCopyReason] = useState('');
   // 换了任务或保存了修改：表单回到这份详情（渲染时同步，而不是在 effect 里再设一次）
   if (detail !== shown) {
     setShown(detail);
@@ -82,6 +83,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       setShareFolders(null);
       setShareFolderId('');
       setRememberShareFolder(true);
+      setWrongCopyReason('');
     }
   }
 
@@ -108,6 +110,43 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       finish(conflict ? CONFLICT_DONE[conflict] : ACTION_DONE[action]);
     } catch (err) {
       toast.error(errorMessage(err, '操作失败'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const quarantineWrongCopy = async () => {
+    if (!detail || wrongCopyReason.trim().length < 5) return;
+    if (!window.confirm('将撤回这条任务的入库去重记录，并暂停对应集数后续自动转存。\n不会修改或删除云盘文件。确认标记错片？')) return;
+    setBusy(true);
+    try {
+      await taskApi.quarantineWrongCopy(detail.task_id, wrongCopyReason.trim());
+      toast.success('已隔离疑似错片：不会继续当作正确集数去重，也不会自动重转');
+      loaded.reload();
+      onChanged?.();
+    } catch (err) {
+      toast.error(errorMessage(err, '标记错片失败'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolveWrongCopy = async () => {
+    if (!detail) return;
+    const message = window.prompt(
+      '请先在阿里云盘人工核实并处理错误文件（例如移至正确作品目录）。'
+      + '\n解除后才允许该集后续转存，旧的错误去重记录不会恢复。'
+      + '\n确认已处理后，请输入：我已核对并处理错片',
+    );
+    if (message !== '我已核对并处理错片') return;
+    setBusy(true);
+    try {
+      await taskApi.resolveWrongCopy(detail.task_id);
+      toast.success('已解除隔离。请手动选择具有明确集号的正确分享来源，切勿自动混用');
+      loaded.reload();
+      onChanged?.();
+    } catch (err) {
+      toast.error(errorMessage(err, '解除隔离失败'));
     } finally {
       setBusy(false);
     }
@@ -273,6 +312,58 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                 ) : null}
               </div>
             </div>
+          ) : null}
+
+          {detail.source_audit?.available ? (
+            <Section title="实际转存来源核验" icon={ShieldCheck}>
+              <p className="text-xs leading-5 text-muted-foreground">
+                转存校验只证明文件已落到网盘，不能证明影片内容与片名一致。以下是当时实际选择的原始分享文件。
+              </p>
+              <ul className="space-y-2 rounded-lg border bg-muted/30 p-3 text-xs">
+                {detail.source_audit.entries.map((file, index) => (
+                  <li key={`${file.file_id}-${index}`} className="break-all">
+                    <p className="font-medium">{file.source_path || file.source_name}</p>
+                    <p className="text-muted-foreground">
+                      当时映射：{file.season != null ? `S${String(file.season).padStart(2, '0')}` : '未知季'}
+                      {file.episode != null ? ` E${String(file.episode).padStart(3, '0')}` : ' · 集号未知'}
+                      {typeof file.size === 'number' ? ` · ${(file.size / (1024 ** 3)).toFixed(2)} GiB` : ''}
+                    </p>
+                    {file.issue ? <p className="mt-1 font-medium text-destructive">{file.issue}</p> : null}
+                  </li>
+                ))}
+              </ul>
+              {detail.source_audit.quarantine?.active ? (
+                <div className="space-y-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs">
+                  <p className="font-semibold text-destructive">此任务已标记错片并暂停对应集数自动转存</p>
+                  <p>原因：{detail.source_audit.quarantine.reason}</p>
+                  <p>请先在网盘里人工核对、移走或整理错误视频。Reelay 不会自动删除，也不会恢复旧的错误去重记录。</p>
+                  {can('resolve_quarantine') ? (
+                    <Button size="sm" variant="outline" disabled={busy}
+                      onClick={() => void resolveWrongCopy()}>人工处理完成，解除隔离</Button>
+                  ) : null}
+                </div>
+              ) : detail.source_audit.quarantine ? (
+                <p className="text-xs text-muted-foreground">历史错片隔离已解除，旧错误去重记录没有恢复。</p>
+              ) : can('quarantine_wrong_source') ? (
+                <div className="space-y-2 rounded-lg border p-3">
+                  {detail.source_audit.suspect ? (
+                    <p className="font-medium text-xs text-destructive">
+                      原始文件名的集号无法支持入库结论，请立即核对视频内容。
+                    </p>
+                  ) : null}
+                  <Textarea value={wrongCopyReason} onChange={(e) => setWrongCopyReason(e.target.value)}
+                    placeholder="例如：E247 实际取自其他目录的 4K.mp4，核对后发现不是《吞噬星空》"
+                    rows={2} />
+                  <Button variant="outline" size="sm" disabled={busy || wrongCopyReason.trim().length < 5}
+                    onClick={() => void quarantineWrongCopy()}>
+                    <AlertTriangle />标记错片并暂停自动转存
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    仅撤回这条任务自己的去重声明并阻止后续自动转存；保留原任务与回执，不修改网盘文件。
+                  </p>
+                </div>
+              ) : null}
+            </Section>
           ) : null}
 
           {can('choose_share_folder') ? (
