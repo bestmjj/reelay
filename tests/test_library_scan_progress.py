@@ -9,11 +9,11 @@ from tests.test_library_scan import FakeCloud, item
 
 
 class ScanProgressTests(unittest.TestCase):
-    CFG = {"save_dirs": {"动漫": "aliyun:root"}, "defaults": {"storage": "aliyun", "save_to": "动漫"}}
+    CFG = {"save_dirs": {"动漫": "aliyun:shows"}, "defaults": {"storage": "aliyun", "save_to": "动漫"}}
 
     def test_resumes_after_folder_budget_and_keeps_real_file_ids(self):
         cloud = FakeCloud({
-            "root": [item("series", "牧神记 (2024) [tmdbid=236534]", folder=True)],
+            "shows": [item("series", "牧神记 (2024) [tmdbid=236534]", folder=True)],
             "series": [item("first", "牧神记.S01E105.mp4", size=100),
                        item("second", "牧神记.S01E106.mp4", size=200)],
         })
@@ -30,22 +30,22 @@ class ScanProgressTests(unittest.TestCase):
         self.assertEqual(final["groups"][0]["episode_pairs"], [[1, 105], [1, 106]])
         self.assertEqual({r["id"] for r in cursor["records"]}, {"first", "second"})
         self.assertEqual({r["tmdbid"] for r in cursor["records"]}, {236534})
-        self.assertEqual(cloud.fs.calls.count("root"), 1)
+        self.assertEqual(cloud.fs.calls.count("shows"), 1)
         self.assertEqual(cloud.fs.calls.count("series"), 1)
 
     def test_more_than_one_page_in_a_single_directory_resumes_without_data_loss(self):
-        cloud = FakeCloud({"root": [item("f" + str(i), "动漫.S01E%03d.mkv" % i) for i in range(1, 7)]})
+        cloud = FakeCloud({"shows": [item("f" + str(i), "动漫.S01E%03d.mkv" % i) for i in range(1, 7)]})
         with patch.object(library_scan, "MAX_ITEMS_PER_FOLDER", 2):
             first, cursor = library_scan_progress.step(self.CFG, lambda _: cloud)
             self.assertEqual(first["file_count"], 6)
             self.assertTrue(first["complete"])
             self.assertEqual(cursor["records"][0]["id"], "f1")
             self.assertEqual(len({r["id"] for r in cursor["records"]}), 6)
-            self.assertGreaterEqual(cloud.fs.calls.count("root"), 3)
+            self.assertGreaterEqual(cloud.fs.calls.count("shows"), 3)
 
     def test_configuration_change_invalidates_old_cursor(self):
         cloud = FakeCloud({
-            "root": [item("folder", "sub", folder=True)],
+            "shows": [item("folder", "sub", folder=True)],
             "folder": [item("ep", "剧.S01E01.mp4")],
             "another": [item("ep2", "新剧.S01E02.mp4")],
         })
