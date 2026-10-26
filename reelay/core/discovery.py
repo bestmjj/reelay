@@ -37,7 +37,7 @@ def due(state: dict, now: float) -> bool:
                       float(state.get("next_at") or 0))
 
 
-def cutoff(state: dict, now: float) -> float:
+def cutoff(state: dict, now: float, subscribed_at: float | None = None) -> float:
     """Only recent messages become auto-processing candidates.
 
     Subsequent runs overlap one hour for eventual-consistency and catch-up;
@@ -46,7 +46,7 @@ def cutoff(state: dict, now: float) -> float:
     """
     previous = float(state.get("checked_at") or 0)
     earliest = previous - 3600 if previous else now - INITIAL_LOOKBACK_HOURS * 3600
-    return max(now - MAX_AGE_DAYS * 86400, earliest)
+    return max(now - MAX_AGE_DAYS * 86400, earliest, float(subscribed_at or 0))
 
 
 def safe_status(state: dict) -> dict:
