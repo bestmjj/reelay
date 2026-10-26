@@ -41,6 +41,7 @@ export interface ILibraryScanResp extends ILibraryResp {
   errors: string[];
   complete: boolean;
   truncated: boolean;
+  has_more?: boolean;
   limits?: { folders: number; videos: number; depth: number; seconds: number };
 }
 
