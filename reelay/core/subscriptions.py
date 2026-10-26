@@ -90,6 +90,52 @@ def match(subscriptions: list[dict], parsed, tmdb_ns: dict, *, seasons: set[int]
     return None
 
 
+# “更新至第 106 集” describes the newest release, not permission to
+# automatically copy all 106 historical episodes from a series-pack share.
+# Never infer this from a bare “全106集”, “S01E01-E106” or a TMDB episode count.
+_PROGRESS_LATEST = re.compile(r"(?:更新至|更新到|更至|更到)\\s*(?:第\\s*)?(\\d{1,4})(?!\\d)")
+
+
+def scope_latest_progress(ctx, active: list[dict]) -> str | None:
+    """Limit a VERIFIED subscribed progress announcement to the newest episode.
+
+    Returns "scoped" when the per-task manifest must select that one episode,
+    "below_floor" when a subscription explicitly excludes the release, or None
+    when no safe automatic inference is available. Idempotent for old failed
+    tasks retried after an upgrade; never examines or mutates cloud files.
+    """
+    parsed = ctx.parsed
+    if not parsed or not parsed.title or parsed.media_type not in ("tv", "anime"):
+        return None
+    if (ctx.meta.get("storage") or {}).get("manifest"):
+        return None  # A prepared transfer must keep its immutable manifest.
+    hits = {int(m.group(1)) for m in _PROGRESS_LATEST.finditer(ctx.raw.text or "")}
+    if len(hits) != 1:
+        return None
+    episode = hits.pop()
+    if episode < 1 or episode not in parsed.episodes or episode != max(parsed.episodes):
+        return None  # A contradictory parse/progress marker needs human review.
+    seasons = seasons_of(ctx)
+    if len(seasons) != 1:
+        return None
+    item = match(active, parsed, ctx.meta.get("tmdb", {}), seasons=seasons)
+    if not item:
+        return None
+    floor = item.get("start_episode")
+    if floor is not None and episode < floor:
+        ctx.ns("subscription_progress")["below_floor"] = episode
+        ctx.log(f"订阅《{item['title']}》仅从 E{floor} 起：更新至 E{episode} 不自动转存历史合集")
+        return "below_floor"
+    if parsed.episodes != [episode] or ctx.source_rule.get("episodes_from") != "message":
+        original = len(parsed.episodes)
+        parsed.episodes = [episode]
+        ctx.source_rule["episodes_from"] = "message"
+        ctx.ns("subscription_progress")["latest"] = episode
+        ctx.log(f"订阅《{item['title']}》更新至 E{episode}（原解析 {original} 集）："
+                "仅选分享清单中的这一集；找不到或同集版本不明确则停止，不复制整季")
+    return "scoped"
+
+
 def subscribable(ctx) -> bool:
     """能直接「追这部剧」：TMDB 匹配到的剧集，且只涉及一季（跨多季的合集要在订阅页选季）。"""
     p = ctx.parsed
