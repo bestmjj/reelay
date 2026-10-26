@@ -174,7 +174,9 @@ export default function LibraryPage() {
       scanned.reload();
       toast.success(snapshot.complete
         ? `扫描完成：发现 ${snapshot.file_count} 个视频文件`
-        : `扫描获得 ${snapshot.file_count} 个视频文件；请查看未完成提示`);
+        : snapshot.has_more
+          ? `本次扫描累计 ${snapshot.file_count} 个视频；进度已保存，可继续扫描`
+          : `已扫描 ${snapshot.file_count} 个视频；部分目录可能无法访问`);
     } catch (e) {
       toast.error(errorMessage(e, '扫描失败，保留上次索引'));
     } finally {
@@ -209,7 +211,7 @@ export default function LibraryPage() {
         {origin === 'scanned' ? (
           <Button size="sm" variant="outline" disabled={scanning} onClick={() => void scanNow()}>
             <RefreshCw className={scanning ? 'animate-spin' : ''} />
-            {scanning ? '正在扫描' : '扫描已配置目录'}
+            {scanning ? '正在扫描' : scanned.data?.has_more ? '继续扫描剩余目录' : '扫描已配置目录'}
           </Button>
         ) : null}
       </div>
@@ -220,8 +222,10 @@ export default function LibraryPage() {
               ? `上次扫描：${fullTime(scanned.data.scanned_at)} · ${scanned.data.scanned_roots} 个目录入口 · ${scanned.data.file_count} 个视频`
               : '尚未扫描。点击「扫描已配置目录」读取现有网盘文件，不会改变 Reelay 的转存记录。'}
           </p>
-          {scanned.data?.truncated ? (
-            <p className="text-warning">扫描达到深度、文件数或时间上限，仅显示部分内容。</p>
+          {scanned.data?.has_more ? (
+            <p className="text-warning">扫描进度已保存，还有目录尚未遍历；点击「继续扫描剩余目录」即可从中断位置继续。</p>
+          ) : scanned.data?.truncated ? (
+            <p className="text-warning">部分目录读取失败或超过深度限制；以下索引不代表全部网盘文件。</p>
           ) : null}
           {scanned.data?.errors.map((err, i) => (
             <p key={i} role="status">未扫描完整：{err}</p>
