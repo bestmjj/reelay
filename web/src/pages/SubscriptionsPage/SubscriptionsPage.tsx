@@ -289,7 +289,7 @@ export default function SubscriptionsPage() {
             <div className="space-y-3">
               <Textarea rows={3} maxLength={12000} value={resourceText}
                 onChange={(e) => setResourceText(e.target.value)} disabled={resourceBusy}
-                placeholder="例如：牧神记 (2024) 第106集 4K；链接：https://www.alipan.com/s/..." />
+                placeholder="例如：https://t.me/shareAliyun/123456 或 牧神记 (2024) 第106集；https://www.alipan.com/s/..." />
               <div className="flex items-center gap-3">
                 <Button disabled={resourceBusy || !resourceText.trim()} onClick={() => void submitResource()}>
                   {resourceBusy ? <Loader2 className="animate-spin" /> : <BellPlus />}
@@ -298,7 +298,9 @@ export default function SubscriptionsPage() {
                 <Link to="/tasks" className="text-xs text-primary hover:underline">查看任务</Link>
               </div>
               <p className="text-xs leading-5 text-muted-foreground">
-                这里只接受完整资源消息和网盘分享，不接受单独的 t.me 消息地址；识别不确定时仍会进入待审批。
+                可粘贴已配置频道的 t.me/频道名/消息ID、完整资源消息或网盘分享链接。
+                单独网盘链接若无法识别作品会进入人工处理；同一链接重复提交不会重复建立任务。
+                仅允许使用你已经登录且有读取权限的 Telegram 来源。
                 不会改变现有监听来源的「人工确认」设置。
               </p>
             </div>
