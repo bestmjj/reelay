@@ -51,6 +51,23 @@ class ExistingMediaTests(unittest.TestCase):
         self.assertEqual(existing_media.observed_for_subscription(observed,
             {**sub, "tmdbid": 77777}), [107])
 
+    def test_historical_e01_e105_do_not_block_missing_e106(self):
+        """Hundreds of other episodes are not candidates for the requested E106."""
+        records = [{**self.record, "episode": ep, "id": f"file{ep}",
+                    "name": f"牧神记.S01E{ep:03d}.mkv"}
+                   for ep in range(1, 106)]
+        result = existing_media.check(self.cloud, records, self.parsed, {}, provider="aliyun")
+        self.assertEqual(result, {"covered": [], "uncertain": ""})
+        self.fs.get_attr.assert_not_called()
+
+    def test_too_many_versions_of_the_exact_same_episode_still_fail_closed(self):
+        records = [{**self.record, "id": f"different{idx}", "name": f"牧神记.S01E106-v{idx}.mkv"}
+                   for idx in range(existing_media.MAX_CHECKS + 1)]
+        result = existing_media.check(self.cloud, records, self.parsed, {}, provider="aliyun")
+        self.assertEqual(result["covered"], [])
+        self.assertTrue(result["uncertain"])
+        self.fs.get_attr.assert_not_called()
+
     def test_stale_file_causes_manual_review(self):
         self.fs.get_attr.return_value["parent_id"]="moved"
         result=existing_media.check(self.cloud,[self.record],self.parsed,{},provider="aliyun")
