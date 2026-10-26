@@ -19,6 +19,10 @@ class CatalogMixin(ServiceBase):
                 save_dir_alias: str | None = None) -> list[dict[str, Any]]:
         """按目录筛选应在作品汇总前进行，避免同名作品跨目录被合并后丢失归属。"""
         snapshots = self.store.done_snapshots(query or None, media_type or None)
+        # A wrongly attributed transfer must not keep appearing as a
+        # confirmed episode in the media library while under review.
+        disputed = self.store.disputed_task_ids()
+        snapshots = [row for row in snapshots if row.get("task_id") not in disputed]
         if save_dir_alias:
             snapshots = [item for item in snapshots if item.get("save_dir_alias") == save_dir_alias]
         return library.group_library(snapshots, self.store.replaced_file_ids())
