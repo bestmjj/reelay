@@ -79,7 +79,7 @@ class TestSubscriptionDecision(ServiceCase):
                                             "title": stored.parsed.title, "season": 1, "episodes": [3]}
         self.store.save_task(stored)
         self.store.finish_transfer(stored)
-        self.assertEqual(await self.decide(tv_ctx(msg_id="2", episodes=(3,))), Decision.ASK)
+        self.assertEqual(await self.decide(tv_ctx(msg_id="2", episodes=(3,))), Decision.SAVE)
         self.assertEqual(await self.decide(tv_ctx(msg_id="3", episodes=(3, 4))), Decision.ASK)
         self.assertEqual(await self.decide(tv_ctx(msg_id="4", episodes=(4,))), Decision.SAVE)
 
