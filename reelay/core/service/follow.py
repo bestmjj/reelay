@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Any
 
-from .. import ai, discovery, ignored, messages, subscriptions, tmdb, works
+from .. import ai, discovery, existing_media, ignored, messages, subscriptions, tmdb, works
 from ..contracts import PipelineContext, TaskState
 from ..media import format_episodes
 from ..rules import tv_category
@@ -34,6 +34,8 @@ class FollowMixin(ServiceBase):
         cfg = self.get_config()
         subs = self.store.subscriptions()
         stored = self.store.stored_series()
+        scan = self.store.state_get("library_scan", "snapshot") or {}
+        observed_files = self.store.state_get("library_scan", "files", []) or []
         report = (self.pipeline.query("episode_report") or {}).get("series", {})
         items = []
         discovery_state = self.store.state_items(discovery.NAMESPACE)
@@ -45,7 +47,10 @@ class FollowMixin(ServiceBase):
             checks = [discovery.safe_status(value) for key, value in discovery_state.items()
                       if key.rsplit(":", 1)[-1] == str(item["id"])]
             latest = max(checks, key=lambda check: float(check.get("checked_at") or 0), default=None)
-            items.append({**item, "have": have, "missing": entry.get("missing", []), "aired": entry.get("aired"),
+            observed = existing_media.observed_for_subscription(observed_files, item)
+            items.append({**item, "have": have, "observed": observed,
+                          "scan_complete": bool(scan.get("complete")),
+                          "missing": entry.get("missing", []), "aired": entry.get("aired"),
                           "category": self._tv_category(item, sorted(titles)), "discovery": latest})
         # 转存方式按来源设置，defaults 只是兜底，只报告实际在监听的来源
         deciders = self.pipeline.reg.providers.get("decision", {})
