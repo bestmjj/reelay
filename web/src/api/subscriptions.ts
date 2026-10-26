@@ -13,6 +13,9 @@ export interface ISubscription {
   /** Smallest episode number eligible for future auto-transfer, inclusive. */
   start_episode: number | null;
   have: number[];
+  /** Scan observations only; never count as a completed Reelay transfer. */
+  observed?: number[];
+  scan_complete?: boolean;
   missing: number[];
   aired: number | null;
   /** 电视剧 / 动漫 / 综艺 / 纪录片 / 少儿（按 TMDB 题材）。 */
