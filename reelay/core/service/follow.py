@@ -59,7 +59,8 @@ class FollowMixin(ServiceBase):
         inactive = [s["bot"] for s in cfg["sources"]
                     if not getattr(deciders.get({**cfg["defaults"], **s}.get("decision")), "releases_subscriptions", False)]
         return {"items": items, "suggestions": self.subscription_suggestions(subs),
-                "inactive": inactive, "save_dirs": cfg["save_dirs"]}
+                "inactive": inactive, "save_dirs": cfg["save_dirs"],
+                "sources": [source["bot"] for source in cfg["sources"]]}
 
     async def simulate_subscription(self, subscription_id: int, *, text: str | None = None,
                                     source: str | None = None) -> dict[str, Any]:
