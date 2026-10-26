@@ -57,16 +57,9 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
 
   const rawCid = (ref: string) => ref.startsWith('aliyun:') ? ref.slice('aliyun:'.length) : ref;
   const qualified = (provider: string, id: string) => provider === 'aliyun' ? `aliyun:${id}` : id;
-  const inferredProvider = (alias: string, ref: string): 'p115' | 'aliyun' => {
-    if (ref.startsWith('aliyun:')) return 'aliyun';
-    // Legacy root (0) can belong to either cloud; infer from its actual sources.
-    if (ref === '0') {
-      const used = [...new Set(sources.filter(x => text(x.save_to || defaults.save_to) === alias)
-        .map(x => text(x.storage || defaults.storage || 'p115')))];
-      if (used.length === 1 && used[0] === 'aliyun') return 'aliyun';
-    }
-    return 'p115';
-  };
+  // Both providers use 0 for root; only the explicit aliyun: prefix identifies Aliyun.
+  const inferredProvider = (ref: string): 'p115' | 'aliyun' =>
+    ref.startsWith('aliyun:') ? 'aliyun' : 'p115';
   const dirLabel = (ref: string): string | undefined =>
     rawCid(ref) === '0' ? '根目录' : dirNames[ref];
   const usage = (alias: string) => ({
@@ -125,14 +118,14 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
                     {u.sources ? <Tag muted>{u.sources} 个来源</Tag> : null}
                   </div>
                   <p className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground" title={`网盘目录 ID ${text(cid)}`}>
-                    <span className="truncate">{name === undefined ? `目录编号 ${text(cid)}` : `网盘 / ${name}`}</span>
+                    <span className="truncate">{name === undefined ? `${inferredProvider(text(cid)) === 'aliyun' ? '阿里云盘' : '115'} · 目录编号 ${rawCid(text(cid))}` : `${inferredProvider(text(cid)) === 'aliyun' ? '阿里云盘' : '115'} / ${name}`}</span>
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center">
                   <Button
                     variant="ghost" size="icon" className="size-9 text-muted-foreground hover:text-primary sm:size-8"
                     aria-label={`更换「${alias}」对应的目录`} title="更换目录"
-                    onClick={() => setPicker({ alias, cid: rawCid(text(cid)), provider: inferredProvider(alias, text(cid)), name: name?.split(' / ').at(-1) || alias })}
+                    onClick={() => setPicker({ alias, cid: rawCid(text(cid)), provider: inferredProvider(text(cid)), name: name?.split(' / ').at(-1) || alias })}
                   >
                     <FolderSearch />
                   </Button>
