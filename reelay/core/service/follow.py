@@ -40,6 +40,7 @@ class FollowMixin(ServiceBase):
             self.store.state_get("media_associations", "confirmed", {}) or {})
         report = (self.pipeline.query("episode_report") or {}).get("series", {})
         items = []
+        destinations = self.store.state_get("subscription_destinations", "items", {}) or {}
         discovery_state = self.store.state_items(discovery.NAMESPACE)
         for item in subs:
             titles = {item["title"], *(self.store.titles_for_tmdbid(item["tmdbid"]) if item["tmdbid"] else [])}
@@ -51,6 +52,7 @@ class FollowMixin(ServiceBase):
             latest = max(checks, key=lambda check: float(check.get("checked_at") or 0), default=None)
             observed = existing_media.observed_for_subscription(observed_files, item)
             items.append({**item, "have": have, "observed": observed,
+                          "destination": destinations.get(str(item["id"])),
                           "scan_complete": bool(scan.get("complete")),
                           "missing": entry.get("missing", []), "aired": entry.get("aired"),
                           "category": self._tv_category(item, sorted(titles)), "discovery": latest})
@@ -236,6 +238,62 @@ class FollowMixin(ServiceBase):
                 "file_count": snapshot["file_count"], "eligible": len(matched),
                 "skipped": skipped, "complete": snapshot["complete"],
                 "has_more": snapshot["has_more"], "errors": snapshot["errors"]}
+
+    def set_existing_subscription_destination(self, subscription_id: int, *,
+                                              naming_mode: str = "simple") -> dict[str, Any]:
+        """Opt-in: send FUTURE subscribed releases directly to the scanned old folder.
+
+        Does not move/rename existing files, change global aliases or mutate
+        queued/finished tasks. A fresh resource-drive and path read is mandatory.
+        """
+        item = self.store.subscription(subscription_id)
+        if not item:
+            raise NotFoundError("该订阅不存在")
+        if naming_mode not in ("simple", "default"):
+            raise ValueError("只能选择保持原命名或标准命名")
+        scan = (self.store.state_get("subscription_folder_scan", "scopes", {}) or {}).get(str(subscription_id))
+        if not scan or not scan.get("snapshot", {}).get("complete") or not scan.get("records"):
+            raise ValueError("请先选择含有已识别剧集的旧视频文件夹，并完成只读扫描")
+        provider_name, cid = scan["provider"], scan["cid"]
+        storage = self.pipeline.reg.get_provider("storage", provider_name)
+        if not storage.ready():
+            raise ConflictError("网盘未登录，不能设置未来转存目录")
+        with self.pipeline.scope():
+            live = storage.browse(cid, 0, 1)
+            real_path = storage.dir_path(cid)
+        disk = str(storage.client.drive_id) if provider_name == "aliyun" else "115"
+        if not real_path or disk != scan["drive_id"] or str(live.get("drive_id")) != disk:
+            raise ConflictError("所选文件夹所属网盘发生变化，请重新扫描")
+        if not live.get("path") or str(live["path"][-1].get("id")) != cid:
+            raise ConflictError("无法确认所选文件夹的真实 ID，请重新选择")
+        actual = "/" + "/".join(str(part.get("name") or "") for part in live["path"]
+                                if str(part.get("id")) not in ("0", "root"))
+        if actual != real_path:
+            raise ConflictError("所选文件夹的层级与云盘实际路径不一致，请重新选择")
+        if naming_mode == "simple":
+            from ..media import episode_of
+            import re
+            # Never guess the user's naming convention from one unrelated file.
+            pattern = re.compile(rf"^{re.escape(item['title'])}-S{item['season']:02d}E\d{{2,4}}\.[A-Za-z0-9]+$", re.I)
+            if not any(pattern.fullmatch(row["name"]) and
+                       episode_of(row["name"])[1] == row["episode"]
+                       for row in scan["records"]):
+                raise ValueError("旧文件不是「片名-S01E01.mp4」格式，不能自动套用此命名")
+        entry = {"provider": provider_name, "cid": cid, "drive_id": disk,
+                 "path": real_path, "naming_mode": naming_mode}
+        destinations = self.store.state_get("subscription_destinations", "items", {}) or {}
+        destinations[str(subscription_id)] = entry
+        self.store.state_set("subscription_destinations", "items", destinations)
+        return {"ok": True, "destination": entry,
+                "note": "仅影响之后接收的订阅新集；现有文件和已排队的任务均不改动"}
+
+    def clear_existing_subscription_destination(self, subscription_id: int) -> dict[str, Any]:
+        if not self.store.subscription(subscription_id):
+            raise NotFoundError("该订阅不存在")
+        destinations = self.store.state_get("subscription_destinations", "items", {}) or {}
+        destinations.pop(str(subscription_id), None)
+        self.store.state_set("subscription_destinations", "items", destinations)
+        return {"ok": True}
 
     def existing_subscription_candidates(self, subscription_id: int, *, offset: int = 0) -> dict[str, Any]:
         """Only suggest strongly named historical files; never move or mark transfers."""
@@ -507,6 +565,9 @@ class FollowMixin(ServiceBase):
     async def remove_subscription(self, item: dict[str, Any]) -> None:
         found = self.find_subscription(item)
         self.store.remove_subscription(found["id"])
+        destinations = self.store.state_get("subscription_destinations", "items", {}) or {}
+        if destinations.pop(str(found["id"]), None):
+            self.store.state_set("subscription_destinations", "items", destinations)
 
     async def _remember_genres(self, item: dict[str, Any]) -> None:
         """还没有这部剧的入库任务时，从 TMDB 记下它的题材，订阅列表据此显示类型（动漫、综艺……）。"""
