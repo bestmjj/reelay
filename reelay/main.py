@@ -142,6 +142,12 @@ async def _serve_subscription_discovery(pipeline: Pipeline, source, emit) -> Non
             emit, store.subscriptions(), store.state_get, store.state_set)
         store.heartbeat("subscription_discovery", **result,
                         interval=discovery.INTERVAL_SEC, check_interval=discovery.INTERVAL_SEC)
+        if result.get("status") == "partial" and result.get("failed"):
+            store.raise_alert("subscription_discovery",
+                              "追剧资源检索有来源不可读或查询失败，实时监听仍会继续；请在追剧订阅页查看检索状态",
+                              pipeline.notify_targets())
+        elif result.get("status") == "ok":
+            store.clear_alert("subscription_discovery", "追剧来源查询已恢复正常", pipeline.notify_targets())
         if result.get("candidates"):
             logging.getLogger("reelay.source").info(
                 "主动追剧检索 %d 次，发现 %d 条候选消息（重复消息由任务库跳过）",
