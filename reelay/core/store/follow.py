@@ -14,7 +14,7 @@ from .base import _locked
 
 def _subscription(row: sqlite3.Row) -> dict[str, Any]:
     return {"id": row["id"], "title": row["title"], "season": row["season"], "total": row["total"],
-            "tmdbid": row["tmdbid"], "auto": bool(row["auto"]),
+            "tmdbid": row["tmdbid"], "auto": bool(row["auto"]), "save_to": row["save_to"],
             "finished": json.loads(row["finished"]) if row["finished"] else None}
 
 
@@ -39,13 +39,21 @@ class FollowRepository:
         """新增订阅；同一部剧同一季已经订阅过时返回 None。"""
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT OR IGNORE INTO subscriptions (identity, title, season, total, tmdbid, auto, created_at) "
-                "VALUES (?,?,?,?,?,?,?)", (identity, item["title"], item["season"], item.get("total"),
-                                           item.get("tmdbid"), 1 if item.get("auto", True) else 0, time.time()))
+                "INSERT OR IGNORE INTO subscriptions "
+                "(identity, title, season, total, tmdbid, auto, save_to, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)", (identity, item["title"], item["season"], item.get("total"),
+                                             item.get("tmdbid"), 1 if item.get("auto", True) else 0,
+                                             item.get("save_to"), time.time()))
             if not cur.rowcount:
                 return None
             return _subscription(self._conn.execute("SELECT * FROM subscriptions WHERE id=?",
                                                     (cur.lastrowid,)).fetchone())
+
+    def set_subscription_destination(self, subscription_id: int, alias: str | None) -> bool:
+        """Change only future automatic transfers; existing task snapshots are unchanged."""
+        with self._lock, self._conn:
+            return bool(self._conn.execute(
+                "UPDATE subscriptions SET save_to=? WHERE id=?", (alias, subscription_id)).rowcount)
 
     def remove_subscription(self, subscription_id: int) -> bool:
         with self._lock, self._conn:
