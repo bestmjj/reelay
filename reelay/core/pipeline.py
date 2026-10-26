@@ -432,6 +432,10 @@ class Pipeline:
                 raise ValueError(f"目录「{alias}」属于阿里云盘，当前任务使用 {provider}，请更换保存目录")
             cid = configured.removeprefix("aliyun:")
         else:
+            # Aliyun folder IDs must be explicitly provider-qualified, including the root.
+            # Numeric 115 CIDs (including "0") must never silently target Aliyun.
+            if provider == "aliyun":
+                raise ValueError(f"目录「{alias}」属于 115；请重新选择以 aliyun: 开头的阿里云盘目录")
             cid = configured
         if provider == "p115" and not cid.isdecimal():
             raise ValueError(f"目录「{alias}」不是有效的 115 目录，请在设置中重新选择")
