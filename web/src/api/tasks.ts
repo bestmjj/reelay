@@ -12,6 +12,9 @@ export interface IShareFolderChoice {
   count: number;
   episodes: number[][];
   unrecognized: number;
+  direct_count?: number;
+  selectable?: boolean;
+  samples?: Array<{ name: string; path: string; size: number | null }>;
 }
 
 export interface IShareFolderPreview {
