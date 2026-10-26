@@ -32,6 +32,31 @@ class SubscriptionSimulationWebTests(WebCase):
         self.assertEqual(self.client.post("/api/subscriptions/simulate",
             json={"id": sub["id"], "source": "@other", "text": "test"}).status_code, 422)
 
+    def test_no_local_message_queries_telegram_history_without_creating_a_task(self):
+        sub = self.subscribe()
+        service = self.app.state.service
+        base = {
+            "parsed": {"title": "牧神记", "season": 1, "episodes": [106]},
+            "matched_subscription": {"id": sub["id"], "title": "牧神记", "season": 1},
+            "released_by_subscription": True, "decision": "save",
+            "routing": {"share_provider": "aliyun", "target_storage": "aliyun", "compatible": True},
+            "target_preview": "动漫/国产动漫", "confidence": {}, "trail": ["订阅自动放行"],
+        }
+        history = {"messages": [{"text": "牧神记 第106集 https://www.alipan.com/s/abc123",
+                                  "urls": [], "msg_id": "123"}],
+                   "origin": "telegram_search", "problem": None}
+        with patch.object(service, "source_messages", new_callable=AsyncMock,
+                          return_value=history) as source, \
+                patch.object(service, "test_parse", new_callable=AsyncMock,
+                             return_value=base) as parser:
+            reply = self.client.post("/api/subscriptions/simulate", json={"id": sub["id"]})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(reply.json()["status"], "automatic")
+        self.assertEqual(reply.json()["example_origin"], "telegram_search")
+        source.assert_awaited_once_with("@shareAliyun", limit=5, search="牧神记")
+        parser.assert_awaited_once()
+        self.assertEqual(self.app.state.store.counts_by_state(), {})
+
     def test_simulation_classifies_automatic_and_manual_without_creating_tasks(self):
         sub = self.subscribe()
         service = self.app.state.service
