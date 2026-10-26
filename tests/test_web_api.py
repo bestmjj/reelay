@@ -160,6 +160,18 @@ class TestManagementApi(WebCase):
         store.heartbeat("p115_cookie", status="expired", error="登录失效", check_interval=30)
         self.assertEqual(p115_status(), "expired")
 
+    def test_search_fetch_request_is_migrated_and_remains_read_only(self):
+        store = self.app.state.store
+        columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(source_fetches)")}
+        self.assertIn("search_query", columns)
+        request_id = store.request_source_fetch("@shareAliyun", 5, search="牧神记")
+        requests = store.claim_source_fetches()
+        self.assertEqual(requests[0]["id"], request_id)
+        self.assertEqual(requests[0]["search_query"], "牧神记")
+        self.assertEqual(store.counts_by_state(), {})
+        with self.assertRaises(ValueError):
+            store.request_source_fetch("@shareAliyun", 5, search="")
+
     def test_failed_delivery_can_be_requeued_without_mutating_resource_task(self):
         from reelay.core.contracts import TaskState
         store = self.app.state.store
