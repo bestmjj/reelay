@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { ChevronRight, CircleAlert, Folder, FolderOpen, House, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -7,15 +8,16 @@ import { useDirListing, type Crumb } from '@/hooks/useDirListing';
 import { cn } from '@/lib/utils';
 
 /** 选中的目录；path 是从根目录起的路径，如「影视 / 剧集」。 */
-export type PickedDir = Crumb & { path: string };
+export type PickedDir = Crumb & { path: string; provider: 'p115' | 'aliyun' };
 
 /** 选择 网盘目录的弹窗；打开时才挂载（见 BasicTab），从 initialCid 开始浏览。 */
-export default function DirectoryPicker({ open, initialCid = '0', initialName = '根目录', onOpenChange, onSelect }:
-  { open: boolean; initialCid?: string; initialName?: string; onOpenChange: (open: boolean) => void; onSelect: (dir: PickedDir) => void }) {
+export default function DirectoryPicker({ open, initialCid = '0', initialName = '根目录', initialProvider = 'p115', onOpenChange, onSelect }:
+  { open: boolean; initialCid?: string; initialName?: string; initialProvider?: 'p115' | 'aliyun'; onOpenChange: (open: boolean) => void; onSelect: (dir: PickedDir) => void }) {
+  const [provider, setProvider] = useState<'p115' | 'aliyun'>(initialProvider);
   const dir = useDirListing({
     cid: initialCid || '0',
     path: !initialCid || initialCid === '0' ? [] : [{ id: initialCid, name: initialName || '当前目录' }],
-  });
+  }, provider);
   const current = dir.path.at(-1) ?? { id: '0', name: '根目录' };
   const navigating = dir.loading && !dir.ready;
   const busy = dir.loading || dir.loadingMore;
@@ -25,9 +27,19 @@ export default function DirectoryPicker({ open, initialCid = '0', initialName = 
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent className="flex max-h-[85vh] max-w-xl flex-col gap-0 overflow-hidden p-0">
       <DialogHeader className="space-y-1 px-5 pb-3 pr-12 pt-5 text-left">
-        <DialogTitle className="text-base">选择 网盘目录</DialogTitle>
-        <DialogDescription className="text-xs">逐级进入目录后选择当前位置；不会创建、移动或删除网盘内容。</DialogDescription>
+        <DialogTitle className="text-base">选择网盘目录</DialogTitle>
+        <DialogDescription className="text-xs">先选择网盘，再逐级进入目录；只读取目录，不修改文件。</DialogDescription>
       </DialogHeader>
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-border/70 px-4 py-2">
+        <span className="text-xs text-muted-foreground">选择网盘</span>
+        {([{ id: 'p115', name: '115 网盘' }, { id: 'aliyun', name: '阿里云盘' }] as const).map(item => (
+          <Button key={item.id} size="sm" variant={provider === item.id ? 'default' : 'outline'}
+            disabled={busy} onClick={() => { setProvider(item.id); dir.open('0', []); }}>
+            {item.name}
+          </Button>
+        ))}
+      </div>
 
       <nav aria-label="目录路径" className="flex flex-wrap items-center gap-0.5 border-y border-border/70 bg-muted/40 px-4 py-2 text-[13px] text-muted-foreground">
         <button type="button" className={cn(crumb, 'flex items-center gap-1', !dir.path.length && 'font-medium text-foreground')} disabled={navigating} onClick={() => dir.open('0', [])}>
@@ -95,7 +107,7 @@ export default function DirectoryPicker({ open, initialCid = '0', initialName = 
           <Button
             className="flex-1 sm:flex-none" disabled={busy || Boolean(error)}
             onClick={() => {
-              onSelect({ ...current, path: dir.path.map(x => x.name).join(' / ') || '根目录' });
+              onSelect({ ...current, provider, path: dir.path.map(x => x.name).join(' / ') || '根目录' });
               onOpenChange(false);
               toast.success(`已选择目录「${current.name}」`);
             }}
