@@ -61,7 +61,7 @@ def candidates_for_subscription(records: list[dict], sub: dict, *,
             matched = tmdb.normalize(record.get("title") or "") == wanted
         if matched:
             found.append(record)
-        if len(found) > limit:
+        if len(found) >= limit:
             break
     return found
 
