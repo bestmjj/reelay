@@ -1,6 +1,7 @@
 import { Bot, Film, PlugZap, Send, Sparkles } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import Auth115Card from '@/components/Auth115Card';
+import AuthAliyunCard from '@/components/AuthAliyunCard';
 import { Panel } from '@/components/app/Panel';
 import { ToneBadge } from '@/components/app/StatusBadge';
 import { fullTime, relativeTime } from '@/lib/format';
@@ -18,6 +19,7 @@ export function ConnectionsTab({ connections, config, setField }: {
   return (
     <div className="space-y-5">
       <Auth115Card />
+      <AuthAliyunCard />
       <P115LimitsPanel config={config} setField={setField} />
       {others.length ? (
         <Panel icon={PlugZap} title="其他连接" description="已填写凭证不等于连接成功，以运行中实际观察到的状态为准；凭证在「AI 与 TMDB」「Telegram」中填写。" bodyClassName="p-4 sm:p-5">
