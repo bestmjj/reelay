@@ -1,5 +1,7 @@
 # 配置参考
 
+> 阿里云盘扫码登录、Refresh Token 轮换、目录选择与防重复转存：参见 [阿里云盘使用说明](aliyun-drive.md)。
+
 所有设置都能在管理台修改，保存后约 1 秒生效（个别项注明需要重启主进程）。本页是完整的字段说明，日常使用不需要逐项阅读，遇到具体问题时按目录查找即可。
 
 - [系统配置](#系统配置system)：[目录与来源](#目录与来源save_dirs--sources--providers) · [识别与决策](#识别与决策defaults--sources) · [AI 能力](#ai-能力ai) · [版本偏好](#版本偏好release) · [转发、审批提醒、定时](#转发审批提醒定时) · [AI 服务与 TMDB](#ai-服务与-tmdbllm--tmdb) · [Telegram](#telegramtelegram) · [115 请求限速](#115-请求限速p115) · [网络代理](#网络代理proxy) · [运行参数](#运行参数runtime)
