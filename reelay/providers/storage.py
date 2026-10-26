@@ -437,7 +437,7 @@ def _announced_latest(ctx: PipelineContext) -> int | None:
     if ctx.parsed.media_type not in ("tv", "anime"):
         return None
     hits = {int(v) for v in re.findall(
-        r"(?:更新至|更新到|更至|更新)\\s*(?:第\\s*)?(\\d{1,4})\\s*集",
+        r"(?:更新至|更新到|更至|更新)\s*(?:第\s*)?(\d{1,4})\s*集",
         ctx.raw.text or "")}
     if len(hits) != 1:
         return None
