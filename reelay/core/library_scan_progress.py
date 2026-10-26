@@ -136,27 +136,27 @@ def step(config: dict, get_provider: Callable[[str], object],
             # The iterator itself can be paginated by the provider; cap our
             # own consumption and flag a folder we cannot fully enumerate.
             iterator = fs.iterdir(int(cid) if provider_name == "p115" else cid)
-            listing = list(itertools.islice(iterator, library_scan.MAX_ITEMS_PER_FOLDER + 1))
+            offset = int(current.get("offset") or 0)
+            listing = list(itertools.islice(iterator, offset,
+                       offset + library_scan.MAX_ITEMS_PER_FOLDER + 1))
         except Exception as exc:  # noqa: BLE001 - continue with other configured roots
             state["errors"].append(f"「{alias}」目录读取失败（{type(exc).__name__}），请检查网盘连接或目录")
             continue
 
-        if len(listing) > library_scan.MAX_ITEMS_PER_FOLDER:
-            # Keep this folder in the cursor; page it on next invocation by
-            # re-iterating to the saved offset (no duplicate mutations or files).
-            offset = int(current.get("offset") or 0)
-            usable = listing[offset:offset + library_scan.MAX_ITEMS_PER_FOLDER]
-            if len(usable) < library_scan.MAX_ITEMS_PER_FOLDER:
-                state["hard_truncated"] = True
-                state["errors"].append(f"「{alias}」单目录过大，API 无法可靠分页")
+        has_next_page = len(listing) > library_scan.MAX_ITEMS_PER_FOLDER
+        usable = listing[:library_scan.MAX_ITEMS_PER_FOLDER]
+        # For a directory with >1200 entries, re-list from a saved offset
+        # next time, without claiming this folder has been fully enumerated.
+        if has_next_page:
+            state["queue"].insert(0, {**current,
+                                      "offset": offset + library_scan.MAX_ITEMS_PER_FOLDER})
         else:
-            usable = listing
-        visited.add(physical)
-        state["seen_folders"].append(physical)
+            visited.add(physical)
+            state["seen_folders"].append(physical)
+            state["folder_count"] += 1
+            if current["root"]:
+                state["scanned_roots"] += 1
         per_run_folders += 1
-        state["folder_count"] += 1
-        if current["root"]:
-            state["scanned_roots"] += 1
         for item in usable:
             if not isinstance(item, dict):
                 continue
