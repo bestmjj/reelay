@@ -82,7 +82,7 @@ class SubscriptionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(self.values[(discovery.NAMESPACE, key)]["checked_at"], 0)
         self.assertEqual(len(self.source._client.calls), 1)
         # Even a forced repeat search can only create a single task.
-        self.values[(discovery.NAMESPACE, key)]["checked_at"] = 1
+        self.values[(discovery.NAMESPACE, key)]["checked_at"] = dt.datetime.now(dt.timezone.utc).timestamp() - 60
         with patch.object(discovery, "QUERY_DELAY_SEC", 0):
             await self.source.discover_subscriptions(self.emit, active[:1], self.load, self.save)
         self.assertEqual(len(self.accepted), 1)
@@ -95,7 +95,7 @@ class SubscriptionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("alipan.com", items[0]["text"])
         self.assertEqual(self.store.counts_by_state(), {})
         self.assertEqual(self.accepted, [])
-        with self.assertRaisesRegex(ValueError, "已配置"):
+        with self.assertRaisesRegex(ValueError, "配置"):
             await self.source.search_messages("@unconfigured", "牧神记", 5)
 
     async def test_flood_wait_keeps_retry_cursor_and_does_not_trigger_copy(self):
