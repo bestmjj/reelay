@@ -127,7 +127,12 @@ class OverviewMixin(ServiceBase):
         state_value = filters.pop("state", None)
         states = [TaskState(item.strip()) for item in str(state_value).split(",") if item.strip()] \
             if state_value else None
-        return self.store.list_tasks(states=states, **filters)
+        rows = self.store.list_tasks(states=states, **filters)
+        # A historical DONE receipt can be disputed without changing the
+        # immutable task history. Never render a misleading green-only status.
+        quarantined = self.store.disputed_task_ids()
+        return [{**row, "wrong_source_quarantined": row["task_id"] in quarantined}
+                for row in rows]
 
     def explanation(self, task_id: str, state: str | None = None) -> dict | None:
         """失败解释扩展写下的原因与建议操作（见 plugins/failure_explainer/）；与任务当前状态不符的旧解释不返回。"""
