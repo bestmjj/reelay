@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SubscriptionPayload(BaseModel):
@@ -21,6 +21,12 @@ class SubscriptionDestinationPayload(BaseModel):
 
 class TextPayload(BaseModel):
     text: str
+
+
+class SubscriptionTestPayload(BaseModel):
+    id: int = Field(gt=0)
+    text: str | None = Field(default=None, max_length=12000)
+    source: str | None = Field(default=None, max_length=150)
 
 
 class IgnoredWorkPayload(BaseModel):
@@ -44,6 +50,12 @@ def router(service) -> APIRouter:
     @api.post("/api/subscriptions")
     async def add_subscription(payload: SubscriptionPayload):
         return await service.add_subscription(payload.model_dump(exclude={"id"}))
+
+    @api.post("/api/subscriptions/simulate")
+    async def simulate_subscription(payload: SubscriptionTestPayload):
+        """Never enqueues a job or touches a destination cloud."""
+        return await service.simulate_subscription(
+            payload.id, text=payload.text, source=payload.source)
 
     @api.post("/api/subscriptions/resolve")
     async def resolve(payload: TextPayload):
