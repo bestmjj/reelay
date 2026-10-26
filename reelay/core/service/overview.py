@@ -27,7 +27,13 @@ class OverviewMixin(ServiceBase):
             TaskState.SAVING, TaskState.STORED, TaskState.ORGANIZING,
         ))
         connections = self.connection_status()
-        live_ready = connections["telegram"]["configured"] and connections["p115"]["configured"]
+        self.pipeline.reload_config()
+        defaults = self.pipeline.cfg["defaults"]
+        rules = self.pipeline.cfg.get("sources") or [defaults]
+        storages = {rule.get("storage") or defaults["storage"] for rule in rules}
+        live_ready = connections["telegram"]["configured"] and all(
+            connections.get(name, {}).get("configured", True) for name in storages
+        )
         health = self.store.health_status()
         worker = health.get("worker", {})
         source = health.get("source", {})
@@ -69,6 +75,10 @@ class OverviewMixin(ServiceBase):
                 "configured": self._p115_configured(),
                 "label": "115 网盘",
             },
+            "aliyun": {
+                "configured": bool(secret_store.get("aliyun_refresh_token")),
+                "label": "阿里云盘",
+            },
             "llm": {
                 "configured": bool(secret_store.get("llm_api_key")),
                 "label": "AI 解析",
@@ -79,7 +89,7 @@ class OverviewMixin(ServiceBase):
             },
         }
         health = self.store.health_status()
-        observed_as = {"telegram": "source", "p115": "p115_cookie"}
+        observed_as = {"telegram": "source", "p115": "p115_cookie", "aliyun": "aliyun"}
         for key, conn in connections.items():
             conn["status"] = "unverified" if conn["configured"] else "not_configured"
             observation = health.get(observed_as.get(key, key))
