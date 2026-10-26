@@ -15,6 +15,12 @@ def router(service) -> APIRouter:
         """已入库作品（不限条数，按作品汇总后返回），与 MCP 的 search_library 同一套汇总。"""
         return service.library(query=q, media_type=media_type, save_dir_alias=save_dir_alias)
 
+    @api.get("/api/library/overview")
+    async def overview(q: str | None = None, media_type: str | None = None,
+                       save_dir_alias: str | None = None):
+        """The default UI library, combining read-only inventory with verified records."""
+        return service.library_overview(query=q, media_type=media_type, save_dir_alias=save_dir_alias)
+
     @api.get("/api/library/scan")
     async def scanned_library(q: str | None = None, media_type: str | None = None,
                               save_dir_alias: str | None = None):
