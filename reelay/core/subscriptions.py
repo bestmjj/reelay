@@ -46,6 +46,10 @@ def normalize(item: Any) -> dict[str, Any]:
     if alias is not None and (type(alias) is not str or not alias.strip() or alias != alias.strip()):
         raise ValueError("save_to 必须是有效的保存目录别名，或 null（按来源自动保存）")
     out["save_to"] = alias
+    floor = item.get("start_episode")
+    if floor is not None and (type(floor) is not int or not 1 <= floor <= 100000):
+        raise ValueError("start_episode 必须是 1–100000 的集号，或 null")
+    out["start_episode"] = floor
     return out
 
 
