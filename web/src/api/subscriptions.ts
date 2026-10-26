@@ -10,6 +10,8 @@ export interface ISubscription {
   tmdbid: number | null;
   /** false 只做缺集提醒，不自动放行新集。 */
   auto: boolean;
+  /** Smallest episode number eligible for future auto-transfer, inclusive. */
+  start_episode: number | null;
   have: number[];
   missing: number[];
   aired: number | null;
@@ -101,9 +103,11 @@ export const subscriptionApi = {
   submitManual: (text: string, source?: string) =>
     post<{ task_id: string; state: string; note: string }>('resources/submit', { text, source: source || null }),
   resolve: (text: string) => post<IResolveResp>('subscriptions/resolve', { text }),
-  add: (item: { title: string; season?: number | null; tmdbid?: number | null; total?: number | null; auto?: boolean }) =>
+  add: (item: { title: string; season?: number | null; tmdbid?: number | null; total?: number | null; auto?: boolean; start_episode?: number | null }) =>
     post<IAddSubscriptionResp>('subscriptions', item),
   addFromTask: (taskId: string) => post<IAddSubscriptionResp>(`subscriptions/from-task/${taskId}`),
+  setStart: (id: number, startEpisode: number | null) =>
+    post<ISubscription>('subscriptions/start', { id, start_episode: startEpisode }),
   remove: (item: ShowKey) => post<{ ok: boolean }>('subscriptions/remove', item),
   reopen: (item: ShowKey) => post<{ ok: boolean }>('subscriptions/reopen', item),
   /** 订阅建议「不用了」：这部剧这一季不再出现在建议里（Telegram 上同样不再提示）。 */
