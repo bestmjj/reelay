@@ -151,6 +151,7 @@ export default function SubscriptionsPage() {
   const [startInput, setStartInput] = useState('');
   const [startBusy, setStartBusy] = useState(false);
   const [resourceText, setResourceText] = useState('');
+  const [resourceSource, setResourceSource] = useState('');
   const [resourceBusy, setResourceBusy] = useState(false);
 
   /** 操作后两份列表都重新读取。 */
@@ -287,7 +288,13 @@ export default function SubscriptionsPage() {
     if (!resourceText.trim() || resourceBusy) return;
     setResourceBusy(true);
     try {
-      const result = await subscriptionApi.submitManual(resourceText.trim());
+      const sourceChoices = data?.sources ?? [];
+      const chosen = resourceSource || (sourceChoices.length === 1 ? sourceChoices[0] : '');
+      if (!chosen) {
+        toast.error('请先选择本次资源使用的 Telegram 来源');
+        return;
+      }
+      const result = await subscriptionApi.submitManual(resourceText.trim(), chosen);
       setResourceText('');
       toast.success(`已创建任务 ${result.task_id}，后台将自动识别并核验资源`);
     } catch (e) {
@@ -340,8 +347,17 @@ export default function SubscriptionsPage() {
               <Textarea rows={3} maxLength={12000} value={resourceText}
                 onChange={(e) => setResourceText(e.target.value)} disabled={resourceBusy}
                 placeholder="例如：https://t.me/shareAliyun/123456 或 牧神记 (2024) 第106集；https://www.alipan.com/s/..." />
+              <div className="space-y-1">
+                <label htmlFor="manual-resource-source" className="text-xs font-medium">本次使用的监听来源</label>
+                <Select id="manual-resource-source"
+                  value={resourceSource || ((data?.sources?.length ?? 0) === 1 ? data!.sources[0] : '')}
+                  placeholder="选择 Telegram 来源"
+                  options={(data?.sources ?? []).map((source) => ({ value: source, label: source }))}
+                  onValueChange={setResourceSource} disabled={resourceBusy} />
+              </div>
               <div className="flex items-center gap-3">
-                <Button disabled={resourceBusy || !resourceText.trim()} onClick={() => void submitResource()}>
+                <Button disabled={resourceBusy || !resourceText.trim() || !(resourceSource || (data?.sources?.length === 1))}
+                  onClick={() => void submitResource()}>
                   {resourceBusy ? <Loader2 className="animate-spin" /> : <BellPlus />}
                   {resourceBusy ? '正在提交' : '立即加入转存队列'}
                 </Button>
