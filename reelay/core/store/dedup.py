@@ -11,7 +11,7 @@ import time
 
 from .. import works
 from ..contracts import PipelineContext
-from .base import DEDUP_EPISODE, DEDUP_SHARE, _locked
+from .base import DEDUP_EPISODE, DEDUP_SHARE, DEDUP_VARIETY, _locked
 
 
 class DedupRepository:
@@ -56,8 +56,16 @@ class DedupRepository:
             # 跨多季的合集按（季, 集）逐个记录；单季剧集的清单没有 pairs，按季与集数
             pairs = identity.get("pairs") or [[identity["season"], ep] for ep in identity["episodes"]]
             work = identity.get("work") or works.of(ctx.parsed, ctx.meta.get("tmdb"))
-            keys += [(DEDUP_EPISODE, f"{prefix}:{self.episode_key(work, season, ep)}")
-                     for season, ep in pairs if identity["title"]]
+            # A variety period can contain 上 / 下 / 加更 / 纯享.
+            # Writing the ordinary episode key here would incorrectly mark
+            # all those distinct parts complete after saving just one file.
+            variety_parts = identity.get("variety_parts") or []
+            if variety_parts:
+                keys += [(DEDUP_VARIETY, f"{prefix}:{self.episode_key(work, row['season'], row['episode'])}|V{row['variant']}")
+                         for row in variety_parts if identity["title"]]
+            else:
+                keys += [(DEDUP_EPISODE, f"{prefix}:{self.episode_key(work, season, ep)}")
+                         for season, ep in pairs if identity["title"]]
             self._conn.executemany(
                 "INSERT OR IGNORE INTO dedup VALUES (?,?,?,?)",
                 [(kind, key, ctx.task_id, time.time()) for kind, key in keys],
@@ -130,6 +138,32 @@ class DedupRepository:
             if found and works.same(found[0], work):
                 pairs.add((found[1], found[2]))
         return [list(pair) for pair in sorted(pairs)]
+
+    @_locked
+    def stored_variety_parts_in_drive(self, work: dict, provider: str,
+                                      drive_id: str | None = None) -> list[list]:
+        """Only verified, previously transferred parts on the SAME cloud drive.
+
+        A normal E03 is never proof that E03 的加更 or 下 has been saved.
+        """
+        if provider == "p115":
+            allowed = re.compile(r"^[0-9]+:")
+        elif provider == "aliyun" and drive_id:
+            scope = hashlib.sha256(str(drive_id).encode("utf-8")).hexdigest()
+            allowed = re.compile(r"^aliyun:resource_" + scope + r"_[A-Za-z0-9_-]+:")
+        else:
+            return []
+        parts = set()
+        for row in self._conn.execute("SELECT key FROM dedup WHERE kind=?", (DEDUP_VARIETY,)):
+            key = row["key"]
+            matched = allowed.match(key)
+            if not matched:
+                continue
+            identity, delim, variant = key[matched.end():].rpartition("|V")
+            parsed = split_episode_key(identity) if delim else None
+            if parsed and re.fullmatch(r"[a-z_]{1,32}", variant) and works.same(parsed[0], work):
+                parts.add((parsed[1], parsed[2], variant))
+        return [list(row) for row in sorted(parts)]
 
     @_locked
     def stored_series(self) -> list[dict]:
