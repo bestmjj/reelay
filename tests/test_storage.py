@@ -566,7 +566,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         a, b = self.task('a', episodes=()), self.task('b', episodes=())
         # a 先占住 E02：b 拿到清单后无法占位，释放全部占位重新排队（不持有任何键等待）。
         self.store.claim_resource(self.store.get_task(a.task_id), 'p115:1:a',
-                                  content_keys=['p115:1:episode:' + works.claim_key('剧集', 1, 2)])
+                                  content_keys=['p115:account:episode:' + works.claim_key('剧集', 1, 2)])
         waiting = await self.execute(b)
         self.assertEqual(waiting.state, TaskState.QUEUED)
         self.assertEqual(waiting.ns('storage')['manifest']['episodes'], [2, 3])
