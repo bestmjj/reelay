@@ -97,7 +97,7 @@ def share_folder_choices(video_items: list[dict]) -> list[dict]:
         entry = buckets.setdefault(cid, {
             "folder_id": cid, "path": path or "分享根目录（仅当前层）",
             "count": 0, "direct_count": 0,
-            "episodes": set(), "unrecognized": 0,
+            "episodes": set(), "unrecognized": 0, "samples": [],
         })
         if path and entry["path"] != path:
             raise NeedsManual("分享文件夹 ID 的目录路径不一致，不能安全选择")
@@ -126,6 +126,10 @@ def share_folder_choices(video_items: list[dict]) -> list[dict]:
             path = "/".join(segments[:i + 1]) if ancestors else ""
             entry = add(cid, path)
             entry["count"] += 1
+            if len(entry["samples"]) < 6:
+                entry["samples"].append({"name": name,
+                                         "path": "/".join(filter(None, [item.get("share_path") or "", name])),
+                                         "size": item.get("size")})
             if i == len(ids) - 1:
                 entry["direct_count"] += 1
             if ep is None:
