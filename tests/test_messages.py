@@ -191,6 +191,9 @@ class TestDelivery(unittest.IsolatedAsyncioTestCase):
         class Client:
             fail = False
 
+            def is_connected(self):
+                return True
+
             async def send_file(self, chat, file, **kwargs):
                 if self.fail:
                     raise ValueError("bad image")
