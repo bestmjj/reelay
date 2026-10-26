@@ -1,4 +1,4 @@
-// 115 网盘：只读浏览目录，以及扫码登录 / 文件管理授权两种凭证
+// 网盘目录浏览、115 双凭证认证与阿里云盘单凭证登录
 import { apiUrl, del, get, post, put, query } from './request';
 
 export interface IDirItem {
@@ -52,6 +52,21 @@ export type QrMode = 'cookie' | 'oauth';
 
 const qrBase = (mode: QrMode) => (mode === 'cookie' ? 'auth115/cookie/qr' : 'auth115/oauth/qr');
 
+export interface IAuthAliyunStatus {
+  configured: boolean;
+  state: 'not_configured' | 'unknown' | 'active' | 'expired' | 'error';
+  checked_at: number | null;
+  drive_id: string | null;
+  error: string | null;
+}
+
+export interface IAliyunQrStart { uid: string; expires_at: number }
+export interface IAliyunQrStatus {
+  status: 'NEW' | 'SCANED' | 'CONFIRMED' | 'EXPIRED' | 'CANCELED';
+  message: string;
+  authenticated: boolean;
+}
+
 export const storageApi = {
   dirs: (cid: string, offset = 0) => get<IDirListing>(`storage/dirs${query({ cid, offset })}`),
   auth115Status: () => get<IAuth115Status>('auth115/status'),
@@ -61,4 +76,13 @@ export const storageApi = {
   qrStatus: (mode: QrMode, uid: string) => get<IQrStatus>(`${qrBase(mode)}${query({ uid })}`),
   qrImageUrl: (mode: QrMode, uid: string) => apiUrl(`${qrBase(mode)}/image${query({ uid })}`),
   auth115ClearOauth: () => del<{ ok: boolean }>('auth115/oauth'),
+  authAliyunStatus: () => get<IAuthAliyunStatus>('authaliyun/status'),
+  authAliyunPing: () => post<IAuthAliyunStatus>('authaliyun/ping'),
+  authAliyunSetToken: (refresh_token: string) =>
+    put<{ ok: boolean; status: IAuthAliyunStatus }>('authaliyun/token', { refresh_token }),
+  authAliyunClearToken: () => del<{ ok: boolean; status: IAuthAliyunStatus }>('authaliyun/token'),
+  authAliyunQrStart: () => post<IAliyunQrStart>('authaliyun/qr'),
+  authAliyunQrStatus: (uid: string) => get<IAliyunQrStatus>(`authaliyun/qr${query({ uid })}`),
+  authAliyunQrImageUrl: (uid: string) => apiUrl(`authaliyun/qr/image${query({ uid })}`),
+  authAliyunQrCancel: (uid: string) => del<{ ok: boolean }>(`authaliyun/qr${query({ uid })}`),
 };
