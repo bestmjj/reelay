@@ -13,6 +13,7 @@ class FakeDrive:
     def __init__(self):
         self.mkdir = Mock(return_value="created-folder-1")
         self.rename = Mock()
+        self.move = Mock()
         self.delete = Mock()
         self.get_attr = Mock(return_value={
             "id": "file_1", "parent_id": "parent_1",
@@ -86,8 +87,40 @@ class FileManagerWebTests(WebCase):
                 **body, "name": ".reelay-private"}).status_code, 409)
             fs.delete.assert_not_called()
 
+    def test_same_drive_file_move_without_delete_or_overwrite(self):
+        cloud = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        fs = FakeDrive()
+        file = {"id": "file_1", "parent_id": "parent_1", "name": "before.mkv", "is_dir": False}
+        target = {"id": "folder_2", "parent_id": "root", "name": "新目录", "is_dir": True}
+        values = {"file_1": file, "folder_2": target}
+        fs.get_attr.side_effect = lambda fid: dict(values[fid])
+        fs.move.side_effect = lambda fid, cid: file.update(parent_id=cid)
+        source = {"items": [{"id": "file_1", "name": "before.mkv", "is_dir": False}],
+                  "total_entries": 1, "drive_id": "resource_1", "next_offset": None}
+        dest = {"items": [], "total_entries": 0, "drive_id": "resource_1", "next_offset": None}
+        def browse(cid, offset, limit, include_files):
+            return source if cid == "parent_1" else dest
+        body = {"provider": "aliyun", "cid": "parent_1", "drive_id": "resource_1",
+                "fid": "file_1", "name": "before.mkv", "destination_cid": "folder_2"}
+        with patch.object(cloud, "client", SimpleNamespace(drive_id="resource_1")), \
+                patch.object(cloud, "browse", side_effect=browse), \
+                patch.object(cloud, "library", return_value=fs):
+            result = self.client.post("/api/storage/move", json=body)
+            self.assertEqual(result.status_code, 200, result.text)
+            fs.move.assert_called_once_with("file_1", "folder_2")
+            self.assertEqual(self.client.post("/api/storage/move", json=body).status_code, 409)
+            file["parent_id"] = "parent_1"
+            dest["items"] = [{"id": "other", "name": "before.mkv"}]
+            self.assertEqual(self.client.post("/api/storage/move", json=body).status_code, 409)
+            self.assertEqual(self.client.post("/api/storage/move", json={
+                **body, "drive_id": "backup-drive"}).status_code, 409)
+            self.assertEqual(self.client.post("/api/storage/move", json={
+                **body, "destination_cid": "parent_1"}).status_code, 422)
+            fs.delete.assert_not_called()
+            self.assertEqual(fs.move.call_count, 1)
+
     def test_disallows_delete_and_remote_cross_origin_write(self):
-        for url in ("/api/storage/folders", "/api/storage/names", "/api/storage/items"):
+        for url in ("/api/storage/folders", "/api/storage/names", "/api/storage/items", "/api/storage/move"):
             self.assertEqual(self.client.delete(url).status_code, 405)
         response = self.client.post("/api/storage/folders",
             headers={"Origin": "https://attacker.example"},
