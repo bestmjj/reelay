@@ -58,8 +58,8 @@ def _resource_drive_id(payload: dict) -> str:
     not prove the default drive is safe for media storage.
     """
     resource = payload.get("resource_drive_id")
-    if isinstance(resource, str) and resource.strip():
-        return resource.strip()
+    if type(resource) in (str, int) and str(resource).strip() and str(resource) != "0":
+        return str(resource).strip()
     raise ValueError(
         "阿里云盘未返回资源库（数据盘）ID，拒绝自动使用备份盘；请确认账号存在资源库"
     )
