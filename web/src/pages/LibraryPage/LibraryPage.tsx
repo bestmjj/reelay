@@ -1,6 +1,7 @@
 import { FolderTree, LayoutGrid, LibraryBig, List, RefreshCw, Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { libraryApi, type ITitleGroup } from '@/api/library';
+import { configApi } from '@/api/config';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { errorMessage } from '@/lib/utils';
@@ -141,13 +142,27 @@ export default function LibraryPage() {
   const [scanning, setScanning] = useState(false);
   const submitted = useDebounced(query);
   const [type, setType] = useState('');
+  const [directory, setDirectory] = useState('');
   const [sort, setSort] = useState<Sort>('recent');
   const [view, setView] = useState<View>(() => (localStorage.getItem('reelay-library-view') as View) || 'grid');
   const [open, setOpen] = useState<ITitleGroup | null>(null);
 
-  const library = useAsync(() => libraryApi.list(submitted || undefined, type || undefined), [submitted, type], '读取媒体库失败');
-  const scanned = useAsync(() => libraryApi.scanned(submitted || undefined, type || undefined),
-    [submitted, type], '读取网盘已有文件索引失败');
+  // Directory aliases are configuration, not media types: show empty aliases too.
+  const config = useAsync(() => configApi.get(), [], '读取保存目录失败');
+  const directoryOptions = useMemo(() => {
+    const aliases = config.data?.config.save_dirs;
+    const names = aliases && typeof aliases === 'object' && !Array.isArray(aliases)
+      ? Object.keys(aliases)
+      : [];
+    return [{ value: '', label: '全部保存目录' }, ...names.map((value) => ({ value, label: value }))];
+  }, [config.data]);
+
+  const library = useAsync(
+    () => libraryApi.list(submitted || undefined, type || undefined, directory || undefined),
+    [submitted, type, directory], '读取媒体库失败');
+  const scanned = useAsync(
+    () => libraryApi.scanned(submitted || undefined, type || undefined, directory || undefined),
+    [submitted, type, directory], '读取网盘已有文件索引失败');
   const result = origin === 'scanned'
     ? (scanned.stale ? undefined : scanned.data)
     : (library.stale ? undefined : library.data);
@@ -215,7 +230,9 @@ export default function LibraryPage() {
         </div>
       ) : null}
       <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center">
-        <Segmented label="类型" size="md" value={type} onChange={setType} options={TYPES} className="shrink-0 self-start" />
+        <Segmented label="媒体类型" size="md" value={type} onChange={setType} options={TYPES} className="shrink-0 self-start" />
+        <Select aria-label="按保存目录筛选" value={directory} onValueChange={setDirectory}
+          options={directoryOptions} className="w-full shrink-0 sm:w-44" />
         <div className="flex flex-1 gap-2">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -226,6 +243,19 @@ export default function LibraryPage() {
         </div>
       </div>
 
+      {directory && result?.groups.length === 0 && !submitted && !type ? (
+        <p className="mb-4 rounded-lg border border-border bg-card px-4 py-3 text-xs leading-5 text-muted-foreground">
+          「{directory}」已在保存目录中配置，但{origin === 'transfers'
+            ? '目前没有 Reelay 完成的入库记录。' : '当前扫描索引还没有属于此目录的作品。'}
+          {origin === 'scanned' ? '如需发现网盘已有影视文件，请点击「扫描已配置目录」。' : ''}
+        </p>
+      ) : null}
+      {config.error ? (
+        <p role="status" className="mb-3 text-xs text-muted-foreground">
+          保存目录列表暂时无法读取，<button type="button" className="text-primary underline"
+            onClick={config.reload}>重试加载</button>。
+        </p>
+      ) : null}
       {!result ? (
         active.error ? (
           <ErrorState title="读取媒体库失败" error={active.error} onRetry={active.reload} retrying={active.loading} />
@@ -236,9 +266,9 @@ export default function LibraryPage() {
         )
       ) : groups.length === 0 ? (
         <EmptyState
-          icon={submitted || type ? Search : LibraryBig}
-          title={submitted || type ? '没有匹配的作品' : origin === 'scanned' ? '还没有扫描到网盘视频' : '媒体库还是空的'}
-          description={submitted || type ? '换个关键词或类型试试。' : origin === 'scanned' ? '点击「扫描已配置目录」获取网盘中已有的影视文件。' : '资源转存并整理完成后，会按片名汇总到这里。'}
+          icon={submitted || type || directory ? Search : LibraryBig}
+          title={submitted || type || directory ? '这个筛选下暂无作品' : origin === 'scanned' ? '还没有扫描到网盘视频' : '媒体库还是空的'}
+          description={submitted || type || directory ? '可以切换媒体类型或保存目录；空目录不会被当作已入库作品。' : origin === 'scanned' ? '点击「扫描已配置目录」获取网盘中已有的影视文件。' : '资源转存并整理完成后，会按片名汇总到这里。'}
         />
       ) : view === 'grid' ? (
         <div className="grid grid-cols-3 gap-x-3 gap-y-5 sm:grid-cols-4 sm:gap-x-4 md:grid-cols-5 lg:grid-cols-6">
