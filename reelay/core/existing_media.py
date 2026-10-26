@@ -149,7 +149,17 @@ def check(storage, records: list[dict], parsed, tmdb_meta: dict | None,
     drive_id = str(storage.client.drive_id) if provider == "aliyun" else "115"
     strong, ambiguous = candidates(records, parsed, tmdb_meta, provider=provider, drive_id=drive_id)
     if len(strong) + len(ambiguous) > MAX_CHECKS:
-        return {"covered": [], "uncertain": "媒体库中存在太多同集候选，需要先整理或核对文件索引"}
+        # The previous message incorrectly called a 100-episode season pack
+        # "too many versions of the same episode". Keep the live-read budget,
+        # but accurately distinguish broad ranges from true collisions.
+        pairs = {(row.get("season"), row.get("episode")) for row in [*strong, *ambiguous]}
+        if len(pairs) > MAX_CHECKS:
+            message = (f"本次涉及 {len(pairs)} 个不同的历史集数候选，超过单次 "
+                       f"{MAX_CHECKS} 个文件的核验上限；请缩小到明确的目标单集，不会认定这些集已入库")
+        else:
+            message = (f"目标集数存在 {len(strong) + len(ambiguous)} 个历史文件或重复版本，"
+                       "超过实时核验上限；请核对媒体库或缩小选集范围")
+        return {"covered": [], "uncertain": message}
     covered = set()
     if strong:
         fs = storage.library()
