@@ -29,6 +29,21 @@ class TestSubscriptionDecision(ServiceCase):
         self.assertEqual(ctx.source_rule["episodes_from"], "message")
         self.assertEqual(ctx.parsed.episodes, [3])
 
+    async def test_explicit_episode_floor_blocks_old_reposts_but_includes_current_latest(self):
+        sub = self.store.subscriptions()[0]
+        self.assertTrue(self.store.set_subscription_start(sub["id"], 100))
+        self.assertEqual(self.store.subscription(sub["id"])["start_episode"], 100)
+        self.assertEqual(await self.decide(tv_ctx(msg_id="old", episodes=(99,))), Decision.ASK)
+        now = tv_ctx(msg_id="latest", episodes=(100,))
+        self.assertEqual(await self.decide(now), Decision.SAVE)
+        self.assertEqual(now.parsed.episodes, [100])
+        self.assertEqual(await self.decide(tv_ctx(msg_id="next", episodes=(101,))), Decision.SAVE)
+        self.assertTrue(self.store.set_subscription_start(sub["id"], 101))
+        self.assertEqual(await self.decide(tv_ctx(msg_id="no100", episodes=(100,))), Decision.ASK)
+        # Clearing the floor restores the normal single-episode policy.
+        self.assertTrue(self.store.set_subscription_start(sub["id"], None))
+        self.assertIsNone(self.store.subscription(sub["id"])["start_episode"])
+
     async def test_finished_subscription_no_longer_auto_releases_and_can_be_reopened(self):
         first = self.store.subscriptions()[0]
         self.store.set_subscription_finished(first["id"], {"date": "2026-10-01", "episodes": 30})
@@ -132,6 +147,17 @@ class TestSubscriptionService(ServiceCase):
         self.assertEqual(listed["inactive"], [])
         await self.service.remove_subscription({"title": "剧", "season": 1, "tmdbid": 100})
         self.assertEqual(self.service.list_subscriptions()["items"], [])
+
+    async def test_new_subscription_floor_is_persisted_and_validated(self):
+        with self.assertRaises(ValueError):
+            await self.service.add_subscription({"title": "Wrong", "start_episode": 0})
+        result = await self.service.add_subscription({"title": "新剧", "season": 1, "start_episode": 100})
+        self.assertEqual(result["subscription"]["start_episode"], 100)
+        edited = self.service.set_subscription_start({"id": result["subscription"]["id"], "start_episode": 101})
+        self.assertEqual(edited["start_episode"], 101)
+        with self.assertRaises(ValueError):
+            self.service.set_subscription_start({"id": result["subscription"]["id"], "start_episode": "100"})
+        self.assertEqual(self.service.list_subscriptions()["items"][-1]["start_episode"], 101)
 
     async def test_subscribe_from_inbox_uses_the_tasks_tmdb_entry(self):
         ctx = await self.pending_tv("1")
