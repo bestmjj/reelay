@@ -6,6 +6,7 @@ A refresh token is stored in Reelay's secret store.  Each transfer uses its own
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -299,6 +300,16 @@ class AliyunStorage(ShareStorage):
 
     def __init__(self):
         self.client = AliyunClient()
+
+    def dedup_cid(self, cid: str) -> str:
+        """Namespace dedup by the actual resource drive, not only folder ID.
+
+        A historical backup-disk root and a resource-disk root both use '0'.
+        Their dedup records must never collide. A hash keeps IDs out of keys.
+        """
+        drive = self.client.drive_id
+        scope = hashlib.sha256(drive.encode("utf-8")).hexdigest()
+        return f"resource_{scope}_{_id(cid)}"
 
     def ready(self) -> bool:
         return bool(secret_store.get("aliyun_refresh_token"))
