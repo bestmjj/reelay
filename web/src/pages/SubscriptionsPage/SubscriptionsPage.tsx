@@ -2,7 +2,7 @@ import { Ban, BellPlus, BellRing, CircleAlert, Flag, FlaskConical, Lightbulb, Lo
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
-import { subscriptionApi, type IIgnoredWork, type IResolveResp, type IShowCandidate, type ISubscription, type ISubscriptionSimulation } from '@/api/subscriptions';
+import { subscriptionApi, type IExistingPreview, type IIgnoredWork, type IResolveResp, type IShowCandidate, type ISubscription, type ISubscriptionSimulation } from '@/api/subscriptions';
 import { ErrorState } from '@/components/app/ErrorState';
 import { MediaCover } from '@/components/app/MediaCover';
 import { Page } from '@/components/app/Page';
@@ -56,8 +56,8 @@ function CandidateCard({ candidate, wanted, onSubscribe, busy }: {
   );
 }
 
-function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart }: {
-  item: ISubscription; busy: boolean; onRemove: () => void; onReopen: () => void; onTest: () => void; onStart: () => void;
+function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart, onExisting }: {
+  item: ISubscription; busy: boolean; onRemove: () => void; onReopen: () => void; onTest: () => void; onStart: () => void; onExisting: () => void;
 }) {
   const finished = item.finished;
   return (
@@ -103,6 +103,9 @@ function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart }: {
           </p>
         ) : null}
       </div>
+      <Button size="sm" variant="outline" disabled={busy} onClick={onExisting} title="预览并确认云盘已有文件，不移动、不删除、不转存">
+        关联旧集
+      </Button>
       <Button size="sm" variant="outline" disabled={busy} onClick={onStart} title="设置本订阅最早自动转存的集号">
         起始集
       </Button>
@@ -138,6 +141,11 @@ export default function SubscriptionsPage() {
   const [testText, setTestText] = useState('');
   const [testResult, setTestResult] = useState<ISubscriptionSimulation | null>(null);
   const [testBusy, setTestBusy] = useState(false);
+  const [existingItem, setExistingItem] = useState<ISubscription | null>(null);
+  const [existingData, setExistingData] = useState<IExistingPreview | null>(null);
+  const [existingOffset, setExistingOffset] = useState(0);
+  const [existingBusy, setExistingBusy] = useState(false);
+  const [existingSelected, setExistingSelected] = useState<string[]>([]);
   const [startOnAdd, setStartOnAdd] = useState('');
   const [startItem, setStartItem] = useState<ISubscription | null>(null);
   const [startInput, setStartInput] = useState('');
@@ -219,8 +227,43 @@ export default function SubscriptionsPage() {
       onStart={() => {
         setStartItem(item);
         setStartInput(item.start_episode?.toString() ?? '');
+      }}
+      onExisting={() => {
+        setExistingItem(item);
+        setExistingData(null);
+        setExistingSelected([]);
+        setExistingOffset(0);
+        void loadExisting(item.id, 0);
       }} />
   );
+  const loadExisting = async (id: number, offset: number) => {
+    setExistingBusy(true);
+    setExistingSelected([]);
+    try {
+      const preview = await subscriptionApi.existing(id, offset);
+      setExistingData(preview);
+      setExistingOffset(offset);
+    } catch (e) {
+      toast.error(errorMessage(e, '读取网盘历史文件失败'));
+    } finally {
+      setExistingBusy(false);
+    }
+  };
+  const associateExisting = async () => {
+    if (!existingItem || !existingSelected.length || existingBusy) return;
+    setExistingBusy(true);
+    try {
+      const result = await subscriptionApi.associateExisting(existingItem.id, existingSelected);
+      toast.success(`已经核验并关联 ${result.associated} 个历史文件；没有执行移动或转存`);
+      setExistingSelected([]);
+      setExistingData(await subscriptionApi.existing(existingItem.id, existingOffset));
+      subs.reload();
+    } catch (e) {
+      toast.error(errorMessage(e, '关联旧文件失败；请重新扫描后重试'));
+    } finally {
+      setExistingBusy(false);
+    }
+  };
   const saveStart = async () => {
     if (!startItem || startBusy) return;
     const floor = startInput.trim() ? Number(startInput) : null;
@@ -430,6 +473,73 @@ export default function SubscriptionsPage() {
           </Panel>
         </div>
       </div>
+      <Dialog open={Boolean(existingItem)} onOpenChange={(open) => {
+        if (!open && !existingBusy) { setExistingItem(null); setExistingData(null); setExistingSelected([]); }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>关联已有文件 · {existingItem?.title} 第 {existingItem?.season} 季</DialogTitle>
+            <DialogDescription>
+              从当前网盘扫描索引中找出可能属于这部剧的历史文件。
+              选中文件并确认后，只核实其所在网盘、文件 ID 和实际属性，不移动、不覆盖、不删除、不重复转存。
+            </DialogDescription>
+          </DialogHeader>
+          {existingData ? (
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">
+                共 {existingData.total} 个候选；当前显示第 {existingOffset + 1}–{existingOffset + existingData.items.length} 个。
+                {existingData.scan_complete ? '' : ' 网盘扫描未完成，候选可能不完整。'}
+              </p>
+              <div className="max-h-64 space-y-1 overflow-auto rounded-lg border border-border p-2">
+                {existingData.items.map((file) => {
+                  const checked = existingSelected.includes(file.file_key);
+                  return (
+                    <label key={file.file_key} className="flex items-start gap-2 rounded-md px-2 py-2 text-xs hover:bg-muted/60">
+                      <input type="checkbox" className="mt-0.5" checked={checked} disabled={existingBusy || file.associated}
+                        onChange={(event) => setExistingSelected((old) => event.target.checked
+                          ? [...old, file.file_key] : old.filter((key) => key !== file.file_key))}/>
+                      <span className="min-w-0 flex-1 break-all">
+                        <span className="font-medium">{file.name} · E{file.episode}</span>
+                        <span className="block text-muted-foreground">
+                          {file.provider === 'aliyun' ? '阿里云盘' : '115'} / {file.alias} / {file.path}
+                        </span>
+                      </span>
+                      {file.associated ? <span className="shrink-0 text-success">已关联</span> : null}
+                    </label>
+                  );
+                })}
+                {!existingData.items.length ? <p className="p-3 text-sm text-muted-foreground">
+                  暂未从索引中识别到这部剧。请先扫描包含原视频的保存目录，或核对视频命名。
+                </p> : null}
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" disabled={existingBusy || existingOffset === 0}
+                    onClick={() => existingItem && void loadExisting(existingItem.id, Math.max(0, existingOffset - 50))}>
+                    上一页
+                  </Button>
+                  <Button variant="outline" size="sm" disabled={existingBusy || existingData.next_offset === null}
+                    onClick={() => existingItem && existingData.next_offset !== null
+                      && void loadExisting(existingItem.id, existingData.next_offset)}>
+                    下一页
+                  </Button>
+                </div>
+                <Button variant="outline" size="sm" disabled={existingBusy || !existingData.items.some((file) => !file.associated)}
+                  onClick={() => setExistingSelected(existingData.items.filter((file) => !file.associated).map((file) => file.file_key))}>
+                  选择本页未关联项
+                </Button>
+              </div>
+              <Button disabled={existingBusy || !existingSelected.length} onClick={() => void associateExisting()}>
+                {existingBusy ? '核验中' : `确认关联 ${existingSelected.length} 个文件`}
+              </Button>
+              <p className="text-xs leading-5 text-muted-foreground">
+                关联表示你确认这些文件属于当前 TMDB 作品，不代表 Reelay 曾经转存成功。
+                如果远端文件已变动，本次关联会被拒绝；再次去重时也会实时读取文件，无法确认的转人工。
+              </p>
+            </div>
+          ) : <p className="text-sm text-muted-foreground">{existingBusy ? '读取索引中…' : '没有可显示的候选文件'}</p>}
+        </DialogContent>
+      </Dialog>
       <Dialog open={Boolean(startItem)} onOpenChange={(open) => { if (!open && !startBusy) setStartItem(null); }}>
         <DialogContent>
           <DialogHeader>
