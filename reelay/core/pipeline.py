@@ -380,6 +380,17 @@ class Pipeline:
                 ctx.decision = await decider.decide(ctx)
         if ctx.decision == Decision.SAVE and ctx.meta.get("parse", {}).get("fallback"):
             ctx.decision = Decision.ASK
+        if ctx.raw.extra.get("manual_import") and ctx.parsed and (
+                ctx.parsed.media_type in ("tv", "anime") or ctx.parsed.episodes):
+            # One-click historical saves must never copy an entire hidden
+            # season pack when the message identifies a single episode.
+            declared = ctx.episode_pairs()
+            if len(declared) == 1 and ctx.parsed.episodes:
+                ctx.source_rule["episodes_from"] = "message"
+                ctx.log("手动提交单集：分享清单只允许选择消息明确声明的这一集")
+            else:
+                ctx.decision = Decision.ASK
+                ctx.log("手动提交的剧集分享未能确认恰好一个季集，需人工核对，禁止盲目转存整季")
         ctx.log(f"决策 = {ctx.decision.value}")
 
         if ctx.decision == Decision.SKIP:
