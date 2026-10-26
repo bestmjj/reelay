@@ -805,8 +805,18 @@ class Pipeline:
             scope = "resource_" + match.group(1) if match else cid
         else:
             scope = "account"  # all directories of the same 115 account
-        return [f"{storage_name}:{scope}:episode:{works.claim_key(title, season, ep)}"
-                for season, ep in ctx.episode_pairs() if title]
+        work = works.of(ctx.parsed, ctx.meta.get("tmdb"))
+        tmdb_id = work.get("tmdb")
+        claims = []
+        for season, ep in ctx.episode_pairs():
+            if not title:
+                continue
+            claims.append(f"{storage_name}:{scope}:episode:{works.claim_key(title, season, ep)}")
+            # Concurrent posts may use Chinese/English aliases with different
+            # filenames and hashes. Lock both on authoritative TMDB+season+ep.
+            if tmdb_id:
+                claims.append(f"{storage_name}:{scope}:episode:{tmdb_id}|S{season or 1:02d}|E{ep:02d}")
+        return claims
 
     @staticmethod
     def _adopt_manifest(ctx: PipelineContext, manifest: dict) -> None:
@@ -837,7 +847,7 @@ class Pipeline:
         dedup_cid = ns.get("dedup_cid") or ctx.save_dir_cid
         reason = None
         if not manifest.get("episodes") and self.store.saved_share(
-                ctx.parsed.share_code, ctx.save_dir_cid, provider_name):
+                ctx.parsed.share_code, dedup_cid, provider_name):
             reason = "分享已转存到该目录"
         elif manifest.get("episodes") and ctx.parsed.title:
             work = ns.get("identity", {}).get("work") or works.of(ctx.parsed, ctx.meta.get("tmdb"))
