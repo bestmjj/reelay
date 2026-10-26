@@ -7,8 +7,8 @@ import { errorMessage } from '@/lib/utils';
 export type Crumb = { id: string; name: string };
 
 /**
- * 逐级浏览 115 目录（115 目录页与目录选择弹窗共用）：进入目录、面包屑路径、分页加载更多。
- * 路径优先用 115 返回的真实路径（按编号定位时也能显示正确的目录名）；根目录由界面单独显示，这里不含。
+ * 逐级浏览 网盘目录（网盘目录页与目录选择弹窗共用）：进入目录、面包屑路径、分页加载更多。
+ * 路径优先用 网盘返回的真实路径（按编号定位时也能显示正确的目录名）；根目录由界面单独显示，这里不含。
  */
 export function useDirListing(initial: { cid: string; path: Crumb[] } = { cid: '0', path: [] }) {
   const [target, setTarget] = useState(initial);
