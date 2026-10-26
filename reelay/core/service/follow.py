@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Any
 
-from .. import ai, ignored, messages, subscriptions, tmdb, works
+from .. import ai, discovery, ignored, messages, subscriptions, tmdb, works
 from ..contracts import PipelineContext, TaskState
 from ..media import format_episodes
 from ..rules import tv_category
@@ -36,19 +36,95 @@ class FollowMixin(ServiceBase):
         stored = self.store.stored_series()
         report = (self.pipeline.query("episode_report") or {}).get("series", {})
         items = []
+        discovery_state = self.store.state_items(discovery.NAMESPACE)
         for item in subs:
             titles = {item["title"], *(self.store.titles_for_tmdbid(item["tmdbid"]) if item["tmdbid"] else [])}
             have = sorted(works.episodes(stored, works.identity(item["title"], tmdbid=item["tmdbid"]), item["season"]))
             entry = next((report[f"{title}|S{item['season']:02d}"] for title in titles
                           if f"{title}|S{item['season']:02d}" in report), {})
+            checks = [discovery.safe_status(value) for key, value in discovery_state.items()
+                      if key.rsplit(":", 1)[-1] == str(item["id"])]
+            latest = max(checks, key=lambda check: float(check.get("checked_at") or 0), default=None)
             items.append({**item, "have": have, "missing": entry.get("missing", []), "aired": entry.get("aired"),
-                          "category": self._tv_category(item, sorted(titles))})
+                          "category": self._tv_category(item, sorted(titles)), "discovery": latest})
         # 转存方式按来源设置，defaults 只是兜底，只报告实际在监听的来源
         deciders = self.pipeline.reg.providers.get("decision", {})
         inactive = [s["bot"] for s in cfg["sources"]
                     if not getattr(deciders.get({**cfg["defaults"], **s}.get("decision")), "releases_subscriptions", False)]
         return {"items": items, "suggestions": self.subscription_suggestions(subs),
                 "inactive": inactive, "save_dirs": cfg["save_dirs"]}
+
+    async def simulate_subscription(self, subscription_id: int, *, text: str | None = None,
+                                    source: str | None = None) -> dict[str, Any]:
+        """Read-only diagnostic: use the real parser/decision, never accept tasks.
+
+        If no message is supplied, use the latest locally received matching
+        message from a configured Telegram source. A subscription alone is not
+        a share or a promise of new episodes; report 'no_sample' honestly.
+        """
+        entry = self.store.subscription(subscription_id)
+        if not entry:
+            raise NotFoundError("该追剧订阅不存在")
+        cfg = self.get_config()
+        sources = [rule["bot"] for rule in cfg["sources"]]
+        if source:
+            matched_sources = [bot for bot in sources if bot.casefold() == source.casefold()]
+            if not matched_sources:
+                raise ValueError("只能测试已配置的 Telegram 监听来源")
+            sources = matched_sources
+        if not sources:
+            return {"status": "no_source", "reason": "请先在设置中配置一个 Telegram 监听来源",
+                    "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
+                    "task_created": False}
+        sample = None
+        if text and text.strip():
+            if len(text) > 12000:
+                raise ValueError("模拟消息不能超过 12000 个字符")
+            sample = {"source": sources[0], "text": text.strip(), "urls": []}
+        else:
+            # The received-message store is local and read-only. The background
+            # discoverer will add more recent matching posts as they are found.
+            for bot in sources:
+                for message in self.store.source_messages(bot, limit=200):
+                    if discovery.contains_title(message["text"], entry["title"]):
+                        sample = {"source": bot, "text": message["text"], "urls": message["urls"]}
+                        break
+                if sample:
+                    break
+        if not sample:
+            return {"status": "no_sample",
+                    "reason": "尚未收到这部剧的资源消息；后台会定时检索已配置的频道。也可手动粘贴一条消息测试。",
+                    "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
+                    "source": sources[0], "task_created": False}
+
+        preview = await self.test_parse(sample["text"], sample["urls"], sample["source"])
+        matched = preview.get("matched_subscription")
+        same = bool(matched and matched["id"] == entry["id"])
+        route = preview.get("routing") or {}
+        decision = preview.get("decision")
+        released = bool(preview.get("released_by_subscription"))
+        if not same:
+            status, reason = "not_matched", "这条消息未匹配到当前订阅的 TMDB 作品与季号"
+        elif not route.get("compatible"):
+            status, reason = "blocked", "分享网盘与来源配置的存储网盘不一致"
+        elif decision == "skip":
+            status, reason = "blocked", "消息被过滤规则拒绝，请检查下方识别轨迹"
+        elif decision == "save" and released:
+            status, reason = "automatic", "订阅新集满足放行条件，将进入自动转存队列"
+        else:
+            status, reason = "manual", "不满足自动放行条件，会进入待审批，请查看识别轨迹"
+        return {
+            "status": status, "reason": reason,
+            "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
+            "source": sample["source"], "parsed": preview["parsed"],
+            "matched_subscription": matched,
+            "decision": decision, "routing": route,
+            "target_preview": preview.get("target_preview"),
+            "confidence": preview.get("confidence"),
+            "trail": preview["trail"][-20:],
+            "task_created": False,
+            "share_checked": False, "dedup_checked": False,
+        }
 
     def find_subscription(self, item: dict[str, Any]) -> dict[str, Any]:
         """按 id，或片名、季与 tmdbid 找到一条订阅；没有时抛 NotFoundError。"""
