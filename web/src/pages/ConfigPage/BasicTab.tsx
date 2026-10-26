@@ -65,7 +65,7 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
     const alias = newAlias.trim();
     if (!alias) { setAddError('请给目录取个名字'); return; }
     if (Object.hasOwn(dirs, alias)) { setAddError(`已经有名为「${alias}」的目录`); return; }
-    if (!newDir) { setAddError('请从 115 网盘中选择对应的目录'); return; }
+    if (!newDir) { setAddError('请从 当前默认网盘中选择对应的目录'); return; }
     update('save_dirs', { ...dirs, [alias]: newDir.id });
     setNewAlias(''); setNewDir(null); setAddError('');
   };
@@ -93,7 +93,7 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
       <Panel
         icon={FolderPlus}
         title="保存目录"
-        description="给 115 网盘里的常用目录取个好记的名字，之后选择保存位置时直接选名字即可。"
+        description="给 当前默认网盘里的常用目录取个好记的名字，之后选择保存位置时直接选名字即可。"
         bodyClassName="p-4 sm:p-5"
       >
         <div className="grid gap-3 md:grid-cols-2">
@@ -111,8 +111,8 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
                     {u.isDefault ? <Tag>默认</Tag> : null}
                     {u.sources ? <Tag muted>{u.sources} 个来源</Tag> : null}
                   </div>
-                  <p className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground" title={`115 目录编号 ${text(cid)}`}>
-                    <span className="truncate">{name === undefined ? `目录编号 ${text(cid)}` : `115 / ${name}`}</span>
+                  <p className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground" title={`网盘目录 ID ${text(cid)}`}>
+                    <span className="truncate">{name === undefined ? `目录编号 ${text(cid)}` : `网盘 / ${name}`}</span>
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center">
@@ -155,7 +155,7 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
               onClick={() => setPicker({ cid: newDir?.id ?? '0', name: newDir?.name ?? '根目录' })}
             >
               <FolderSearch className="text-primary" />
-              <span className={cn('truncate', !newDir && 'text-muted-foreground')}>{newDir ? `115 / ${newDir.name}` : '选择 115 目录'}</span>
+              <span className={cn('truncate', !newDir && 'text-muted-foreground')}>{newDir ? `网盘 / ${newDir.name}` : '选择 115 目录'}</span>
             </Button>
             <Button type="button" onClick={addDir}><Plus />添加</Button>
           </div>
