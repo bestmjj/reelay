@@ -70,6 +70,82 @@ _NUMBER_QUALITY_RE = re.compile(
 )
 
 
+# Chinese variety shows use "第 3 期上/下/加更/还有加更/纯享" rather
+# than E03. Date prefixes are upload dates, never episode identifiers.
+_VAR_PERIOD_RE = re.compile(rf'第\s*({CN_NUMBER})\s*期')
+_VAR_PART_WORDS = ('还有加更', '纯享上', '纯享下', '加更', '纯享', '上', '下')
+_VAR_PART_IDS = {
+    '上': 'upper', '下': 'lower', '加更': 'bonus',
+    '还有加更': 'bonus_more', '纯享': 'pure',
+    '纯享上': 'pure_upper', '纯享下': 'pure_lower',
+}
+VARIETY_LABELS = {
+    'main': '正片', 'upper': '上', 'lower': '下',
+    'bonus': '加更', 'bonus_more': '还有加更',
+    'pure': '纯享', 'pure_upper': '纯享上', 'pure_lower': '纯享下',
+    'pure_bonus': '纯享加更', 'pure_bonus_more': '纯享还有加更',
+}
+_VAR_NORMALIZED_PART_RE = re.compile(
+    r'(?i)S\d{1,2}E\d{1,4}[-_. ]*'
+    r'(还有加更|纯享上|纯享下|加更|纯享|上|下)(?=[._\s\-]|$)'
+)
+_VAR_PURE_PREFIX_RE = re.compile(r'(?:^|[.\s_\-])纯享(?=[.\s_\-]|$)')
+_VAR_DESCRIPTION_SEPARATORS = ' ：:·._-/'
+_VAR_QUALITY_SUFFIX_RE = re.compile(
+    r'(?i)^[-_.\s]*(?:2160p|1080p|720p|4k|uhd|fhd)'
+    r'(?:[.\s_-]+(?:HDR|HEVC|H265|H264|WEB-DL))*$'
+)
+
+
+def variety_episode(filename: str) -> tuple[int, str] | None:
+    """Strictly identify (period, edition) for Chinese variety-show VIDEO names.
+
+    The file prefix may contain an eight-digit date, but only "第 N 期"
+    supplies the episode. Unknown edition labels fail closed instead of
+    silently colliding with the regular episode.
+    """
+    stem = strip_ext(filename)
+    matches = list(_VAR_PERIOD_RE.finditer(stem))
+    if len(matches) != 1:
+        return None
+    matched = matches[0]
+    number = cn_number(matched.group(1))
+    if number is None or not 0 < number <= 2000:
+        return None
+    prefix, tail = stem[:matched.start()], stem[matched.end():].strip()
+    pure = bool(_VAR_PURE_PREFIX_RE.search(prefix))
+    normalized = _VAR_NORMALIZED_PART_RE.search(prefix)
+    edition = normalized.group(1) if normalized else None
+    if tail.startswith(('（', '(')):
+        bracket = re.match(r'^[（(]([^）)]+)[）)]', tail)
+        if not bracket or bracket.group(1) not in _VAR_PART_IDS:
+            return None
+        if edition and edition != bracket.group(1):
+            return None
+        edition = bracket.group(1)
+        tail = tail[bracket.end():].strip()
+    else:
+        for word in _VAR_PART_WORDS:
+            if tail.startswith(word):
+                remainder = tail[len(word):]
+                if remainder and remainder[0] not in _VAR_DESCRIPTION_SEPARATORS:
+                    return None
+                if edition and edition != word:
+                    return None
+                edition = word
+                tail = remainder.strip()
+                break
+    if tail and tail[0] not in _VAR_DESCRIPTION_SEPARATORS:
+        return None
+    # A standardized filename may add "- 2160p" after the period.
+    if tail and tail[0] in '-._' and not _VAR_QUALITY_SUFFIX_RE.fullmatch(tail):
+        return None
+    variant = _VAR_PART_IDS.get(edition, 'main')
+    if pure and not variant.startswith('pure'):
+        variant = 'pure' if variant == 'main' else 'pure_' + variant
+    return (number, variant) if variant in VARIETY_LABELS else None
+
+
 def episode_of(filename: str) -> tuple[int | None, int | None]:
     """文件名 →（季, 集）；没写季时季为 None，认不出集号时集为 None。年份与分辨率数字不当成集号。"""
     name = filename or ''
@@ -85,6 +161,9 @@ def episode_of(filename: str) -> tuple[int | None, int | None]:
             episode = int(next(group for group in found.groups() if group))
             if episode and episode not in _NOT_EPISODE:
                 return season, episode
+    variety = variety_episode(name)
+    if variety:
+        return season, variety[0]
     stem = strip_ext(name).strip()
     if stem.isdigit() and len(stem) <= 4:
         episode = int(stem)
