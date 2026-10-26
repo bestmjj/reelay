@@ -12,11 +12,17 @@ class SubscriptionPayload(BaseModel):
     tmdbid: int | None = None
     total: int | None = None
     auto: bool = True
+    start_episode: int | None = Field(default=None, ge=1, le=100000)
 
 
 class SubscriptionDestinationPayload(BaseModel):
     id: int
     save_to: str | None = None
+
+
+class SubscriptionStartPayload(BaseModel):
+    id: int = Field(gt=0)
+    start_episode: int | None = Field(default=None, ge=1, le=100000)
 
 
 class TextPayload(BaseModel):
@@ -68,6 +74,11 @@ def router(service) -> APIRouter:
     @api.post("/api/subscriptions/destination")
     async def set_subscription_destination(payload: SubscriptionDestinationPayload):
         return service.set_subscription_destination(payload.model_dump())
+
+    @api.post("/api/subscriptions/start")
+    async def set_start(payload: SubscriptionStartPayload):
+        """Per-subscription automatic episode floor; does not alter prior jobs."""
+        return service.set_subscription_start(payload.model_dump())
 
     @api.post("/api/subscriptions/reopen")
     async def reopen(payload: SubscriptionPayload):
