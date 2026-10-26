@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     total INTEGER,                       -- 这一季的总集数（缺集巡检用），不知道为 NULL
     tmdbid INTEGER,
     auto INTEGER NOT NULL DEFAULT 1,     -- 1：新集自动转存；0：只巡检缺集
+    save_to TEXT,                        -- NULL: 跟随来源与自动分类；否则目录别名
     finished TEXT,                       -- 一季播完且全部入库后自动结束：{"date", "episodes"}；在追为 NULL
     created_at REAL NOT NULL
 );
@@ -203,7 +204,14 @@ def _episode_work_keys(conn: sqlite3.Connection) -> None:
             conn.execute("INSERT OR IGNORE INTO resource_claims VALUES (?,?,?)", (new, task_id, created))
 
 
-MIGRATIONS = (lambda conn: None, _episode_work_keys)
+def _subscription_destinations(conn: sqlite3.Connection) -> None:
+    """v3: optional per-series destination. Idempotent for freshly-created databases."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscriptions)")}
+    if "save_to" not in columns:
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN save_to TEXT")
+
+
+MIGRATIONS = (lambda conn: None, _episode_work_keys, _subscription_destinations)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
