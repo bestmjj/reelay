@@ -30,7 +30,7 @@ class FakeSearchClient:
     async def get_entity(self, target):
         return SimpleNamespace(username="shareAliyun", id=99)
 
-    async def iter_messages(self, entity, *, search, limit):
+    async def iter_messages(self, entity, *, search=None, limit):
         self.calls.append((search, limit))
         if self.error:
             raise self.error
@@ -86,6 +86,17 @@ class SubscriptionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(discovery, "QUERY_DELAY_SEC", 0):
             await self.source.discover_subscriptions(self.emit, active[:1], self.load, self.save)
         self.assertEqual(len(self.accepted), 1)
+
+    async def test_read_only_channel_history_sample_is_allowed_and_never_queues_a_task(self):
+        self.source._client = FakeSearchClient([msg(51, "牧神记", hours=72)])
+        items = await self.source.search_messages("@sharealiyun", "牧神记", 5)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["msg_id"], "51")
+        self.assertIn("alipan.com", items[0]["text"])
+        self.assertEqual(self.store.counts_by_state(), {})
+        self.assertEqual(self.accepted, [])
+        with self.assertRaisesRegex(ValueError, "已配置"):
+            await self.source.search_messages("@unconfigured", "牧神记", 5)
 
     async def test_flood_wait_keeps_retry_cursor_and_does_not_trigger_copy(self):
         self.source._client = FakeSearchClient([], error=FloodWait())
