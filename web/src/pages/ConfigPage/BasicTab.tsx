@@ -138,7 +138,7 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
                   </Button>
                   <Button
                     variant="ghost" size="icon" className="size-9 text-muted-foreground hover:bg-destructive/10 hover:text-destructive sm:size-8"
-                    aria-label={`删除目录「${alias}」`} title="删除"
+                    aria-label={`移除目录别名「${alias}」`} title="仅移除保存目录别名，不删除网盘文件"
                     onClick={() => removeDir(alias)}
                   >
                     <Trash2 />
