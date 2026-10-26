@@ -98,6 +98,8 @@ export const subscriptionApi = {
   list: () => get<ISubscriptionsResp>('subscriptions'),
   simulate: (id: number, text?: string) =>
     post<ISubscriptionSimulation>('subscriptions/simulate', { id, text: text || null }),
+  submitManual: (text: string, source?: string) =>
+    post<{ task_id: string; state: string; note: string }>('resources/submit', { text, source: source || null }),
   resolve: (text: string) => post<IResolveResp>('subscriptions/resolve', { text }),
   add: (item: { title: string; season?: number | null; tmdbid?: number | null; total?: number | null; auto?: boolean }) =>
     post<IAddSubscriptionResp>('subscriptions', item),
