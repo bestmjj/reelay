@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
-from ..core import ai, rules, runtime, subscriptions, works
+from ..core import ai, rules, runtime, subscriptions
 from ..core.contracts import ApprovalMode, Decision, PipelineContext
 from ..core.media import pairs_label, planned_pairs
 from ..core.registry import register
