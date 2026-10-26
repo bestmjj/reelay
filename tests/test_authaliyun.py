@@ -33,6 +33,17 @@ class AuthAliyunTest(unittest.TestCase):
         self.assertEqual(status["state"], "active")
         self.assertNotIn("rotated-refresh-token", str(status))
 
+    def test_user_login_status_identifies_resource_not_backup_drive(self):
+        with patch("reelay.providers.aliyun.AliyunClient._send", return_value={
+            "access_token": "access", "refresh_token": "rotated-refresh-token-123456",
+            "resource_drive_id": "resource123", "default_drive_id": "backup456",
+            "backup_drive_id": "backup456",
+        }):
+            state = self.auth.set_token("initial-refresh-token-123456")
+        self.assertEqual(state["state"], "active")
+        self.assertEqual(state["drive_id"], "resource123")
+        self.assertEqual(self.secrets.get("aliyun_refresh_token"), "rotated-refresh-token-123456")
+
     def test_failed_replacement_preserves_existing_credentials(self):
         self.secrets.update({"aliyun_refresh_token": "previous-working-token-123"})
         with patch.object(self.auth, "_exchange", side_effect=AliyunAPIError(401, "InvalidToken")):
