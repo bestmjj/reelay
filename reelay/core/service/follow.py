@@ -152,15 +152,15 @@ class FollowMixin(ServiceBase):
             "share_checked": False, "dedup_checked": False,
         }
 
-    def existing_subscription_candidates(self, subscription_id: int) -> dict[str, Any]:
+    def existing_subscription_candidates(self, subscription_id: int, *, offset: int = 0) -> dict[str, Any]:
         """Only suggest strongly named historical files; never move or mark transfers."""
         item = self.store.subscription(subscription_id)
         if not item:
             raise NotFoundError("该订阅不存在")
         scanned = self.store.state_get("library_scan", "files", []) or []
-        found = existing_media.candidates_for_subscription(scanned, item, limit=50)
-        if len(found) > 50:
-            raise ConflictError("匹配文件超过 50 个；请先按目录整理，再分批关联")
+        found = existing_media.candidates_for_subscription(scanned, item, limit=10000)
+        if not 0 <= offset <= len(found):
+            raise ValueError("分页偏移量无效")
         bound = self.store.state_get("media_associations", "confirmed", {}) or {}
         return {"items": [{
             "file_key": existing_media.record_key(row), "provider": row["provider"],
@@ -169,7 +169,9 @@ class FollowMixin(ServiceBase):
             "episode": row["episode"], "season": row["season"],
             "size": row.get("size"),
             "associated": existing_media.same_observed_file(bound.get(existing_media.record_key(row), {}), row),
-        } for row in found], "scan_complete": bool(
+        } for row in found[offset:offset + 50]], "total": len(found),
+            "next_offset": offset + 50 if offset + 50 < len(found) else None,
+            "scan_complete": bool(
             (self.store.state_get("library_scan", "snapshot") or {}).get("complete")),
             "subscription": {"id": item["id"], "title": item["title"], "season": item["season"],
                              "tmdbid": item.get("tmdbid")}}
@@ -190,7 +192,7 @@ class FollowMixin(ServiceBase):
             raise ValueError("请选择 1–50 个不重复的历史文件")
         records = self.store.state_get("library_scan", "files", []) or []
         candidates = {existing_media.record_key(row): row
-                      for row in existing_media.candidates_for_subscription(records, item, limit=50)}
+                      for row in existing_media.candidates_for_subscription(records, item, limit=10000)}
         if not set(file_keys).issubset(candidates):
             raise ConflictError("所选文件与当前订阅不匹配，或扫描索引已变化，请重新预览")
         from ..media import is_video
