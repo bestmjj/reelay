@@ -70,8 +70,9 @@ class TaskOpsMixin(ServiceBase):
                 and ctx.parsed and ctx.parsed.share_code
                 and not storage.get("manifest") and not storage.get("landed")):
             out.append("choose_share_folder")
-        if state == TaskState.DONE and storage.get("manifest") and len(
-                storage["manifest"].get("files") or []) == 1 and len(ctx.episode_pairs()) == 1:
+        if (state == TaskState.DONE and isinstance(storage.get("manifest"), dict)
+                and len(storage["manifest"].get("files") or []) == 1
+                and len(ctx.episode_pairs()) == 1):
             dispute = self.store.disputed_transfer(ctx.task_id)
             if dispute and dispute.get("active"):
                 out.append("resolve_quarantine")
