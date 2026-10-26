@@ -60,6 +60,16 @@ class ExistingMediaTests(unittest.TestCase):
         self.assertEqual(result, {"covered": [], "uncertain": ""})
         self.fs.get_attr.assert_not_called()
 
+    def test_full_season_candidates_are_not_mislabeled_same_episode(self):
+        self.parsed.episodes = list(range(1, 107))
+        records = [{**self.record, "episode": ep, "id": f"file{ep}",
+                    "name": f"牧神记.S01E{ep:03d}.mkv"}
+                   for ep in range(1, 106)]
+        result = existing_media.check(self.cloud, records, self.parsed, {}, provider="aliyun")
+        self.assertEqual(result["covered"], [])
+        self.assertIn("105 个不同的历史集数", result["uncertain"])
+        self.fs.get_attr.assert_not_called()
+
     def test_too_many_versions_of_the_exact_same_episode_still_fail_closed(self):
         records = [{**self.record, "id": f"different{idx}", "name": f"牧神记.S01E106-v{idx}.mkv"}
                    for idx in range(existing_media.MAX_CHECKS + 1)]
