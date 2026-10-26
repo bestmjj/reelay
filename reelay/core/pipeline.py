@@ -39,7 +39,7 @@ from .registry import Registry
 from .store import Store, _load_ctx
 from .config import config_revision, load_config, merge_config, normalize_config
 from .media import pairs_label, summarize_pairs
-from . import confidence, existing_media, ignored, messages, runtime, works
+from . import confidence, existing_media, ignored, messages, runtime, subscriptions, works
 
 log = logging.getLogger("reelay.pipeline")
 
@@ -369,6 +369,9 @@ class Pipeline:
 
         # 决策只看确定性信号算出的置信度；TMDB 等补全 Hook 已在上面跑完。
         confidence.apply(ctx)
+        # “更新至 E106” is a release announcement, not a request to copy E01-E106.
+        # Only a verified, active subscription can select the latest episode.
+        progress_scope = subscriptions.scope_latest_progress(ctx, self.store.subscriptions())
         blocked = ignored.match(self.store.ignored_works(), ctx.parsed, ctx.meta.get("tmdb", {}))
         if blocked:
             ctx.decision = Decision.SKIP
@@ -380,6 +383,9 @@ class Pipeline:
                 ctx.decision = await decider.decide(ctx)
         if ctx.decision == Decision.SAVE and ctx.meta.get("parse", {}).get("fallback"):
             ctx.decision = Decision.ASK
+        if progress_scope == "below_floor" and ctx.decision == Decision.SAVE:
+            ctx.decision = Decision.ASK
+            ctx.log("这条更新早于订阅起始集号，不自动转存")
         if ctx.raw.extra.get("manual_import") and ctx.parsed and (
                 ctx.raw.extra.get("manual_unlabeled") or not ctx.parsed.title):
             # A bare share URL has no trustworthy work identity. Always ask
@@ -506,6 +512,15 @@ class Pipeline:
             await self._abandon(ctx, storage)
             return
         if not ns.get("manifest"):
+            # Old FAILED tasks keep the original parsed snapshot. Narrow again
+            # before claiming episode keys, so retry also obeys latest-only
+            # and cannot be blocked by 100 unrelated historical scan entries.
+            if ctx.decision == Decision.SAVE:
+                progress_scope = subscriptions.scope_latest_progress(ctx, self.store.subscriptions())
+                if progress_scope == "below_floor":
+                    await self._fail(ctx, "当前更新早于订阅起始集号，禁止自动补收历史合集",
+                                     retry_from=TaskState.QUEUED, auto_retry=False)
+                    return
             if not await self.run_hooks("before_save", ctx):
                 ctx.state = TaskState.SKIPPED
                 self.store.save_task(ctx)
