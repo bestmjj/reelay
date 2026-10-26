@@ -99,7 +99,7 @@ class AliyunAuth:
         result = AliyunClient._send(TOKEN_API, {
             "grant_type": "refresh_token", "refresh_token": token})
         rotated = result.get("refresh_token") or token
-        drive = AliyunClient.resource_drive(result)
+        drive = AliyunClient().resource_drive(result)
         if not isinstance(result.get("access_token"), str) or not result["access_token"]:
             raise ValueError("阿里云盘没有返回 Access Token")
         if not isinstance(rotated, str) or len(rotated) < 16 or not isinstance(drive, str) or not drive:
