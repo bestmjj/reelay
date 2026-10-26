@@ -83,6 +83,26 @@ class ProgressEpisodeTests(ServiceCase):
                                             "name": "牧神记.S01E106.other.mkv"}],
                                 ctx.parsed, scope="message")
 
+    def test_real_telegram_4k_numbered_share_selects_only_e106(self):
+        # Regression from production: 41 4K.mp4, 36 4K.mp4 etc. used to
+        # trigger "AI cannot identify file episodes" and abort even when
+        # the only requested episode was E106.
+        ctx = self.progress(text="牧神记 S01 E106 4K", episodes=[106])
+        ctx.source_rule["episodes_from"] = "message"
+        listing = [{"id": f"file{ep}", "name": f"{ep} 4K.mp4",
+                    "size": 1000, "sha1": None, "is_dir": False}
+                   for ep in range(1, 107)]
+        selected = _select_video_items(listing, ctx.parsed, scope="message")
+        self.assertEqual([x["id"] for x in selected["files"]], ["file106"])
+        self.assertEqual(selected["episodes"], [106])
+        self.assertEqual(selected["pairs"], [[1, 106]])
+        with self.assertRaisesRegex(NeedsManual, "106"):
+            _select_video_items(listing[:-1], ctx.parsed, scope="message")
+        with self.assertRaisesRegex(NeedsManual, "多个文件"):
+            _select_video_items(listing + [{"id": "duplicate106", "name": "106 2160p.mkv",
+                                            "size": 1000, "sha1": None, "is_dir": False}],
+                                ctx.parsed, scope="message")
+
     async def test_old_failed_task_retry_skips_105_historical_scan_matches(self):
         """Prove narrowing happens BEFORE transfer claims and the historical-file guard."""
         ctx = self.progress()
