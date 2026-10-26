@@ -91,8 +91,12 @@ class SourceMixin(ServiceBase):
         # Deterministic ID: double-clicks and repeated manual submissions must
         # not generate endless duplicate tasks. Failed tasks can be retried.
         msg_id = "manual-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+        # A share link by itself carries no verified title/season/episode.
+        # Parsers may mistakenly interpret its URL as a movie title.
+        bare_share = bool(re.fullmatch(r"https?://\\S+", text.strip(), re.I))
         raw = RawMessage(source=selected, msg_id=msg_id,
-                         text=text, urls=urls, extra={"manual_import": True})
+                         text=text, urls=urls,
+                         extra={"manual_import": True, "manual_unlabeled": bare_share})
         ctx = PipelineContext(raw=raw)
         accepted = await self.pipeline.accept(ctx)
         if not accepted:
