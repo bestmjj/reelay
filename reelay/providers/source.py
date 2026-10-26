@@ -269,8 +269,8 @@ class TelegramUserbotSource:
                         urls = _extract_urls(msg)
                         # No share link => no actionable new episode; avoids
                         # flooding approval with discussion/announcement posts.
-                        from ..core.parse_rules import extract_share
-                        if not extract_share(text, urls):
+                        from ..core.parse_rules import parse_share_url
+                        if not parse_share_url(text, urls)[0]:
                             continue
                         await emit(RawMessage(
                             source=source, msg_id=str(msg.id), text=text, urls=urls,
