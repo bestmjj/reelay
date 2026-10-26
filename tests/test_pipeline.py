@@ -626,7 +626,7 @@ class TestParserCostControls(PipelineCase):
         resource = await parser.parse(ctx)
         self.assertEqual(parser._client.calls, [])
         self.assertFalse(resource.is_media)
-        self.assertEqual(ctx.ns("parse")["prefilter"], "无 115 链接")
+        self.assertEqual(ctx.ns("parse")["prefilter"], "未找到支持的网盘分享链接")
 
     async def test_prefilter_applies_block_keywords_and_must_have(self):
         parser = self.parser(media())
