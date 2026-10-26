@@ -98,8 +98,16 @@ def route(p, source_rule: dict, *, current: str | None = None, pinned: str | Non
         root, _, rest = selected.partition("/")
         # 第一段是某个保存目录的别名时，转存根目录跟随它；否则保留来源指定目录，
         # 整理时在其下创建完整路径。
-        if root in (runtime.get("save_dirs", {}) or {}):
+        dirs = runtime.get("save_dirs", {}) or {}
+        provider = source_rule.get("storage") or runtime.get("defaults.storage", "p115")
+        dest = str(dirs.get(root, ""))
+        compatible = (dest.startswith("aliyun:") if provider == "aliyun"
+                      else dest.isdecimal() if provider == "p115" else bool(dest))
+        # A category name may match an alias on another cloud; never switch cloud silently.
+        if root in dirs and compatible:
             return {**result, "alias": root, "category_path": selected, "relative_category": rest, "note": note}
+        if root in dirs and not compatible:
+            note = f"{note}；「{root}」目录属于另一网盘，保留来源保存目录并创建分类子文件夹"
         return {**result, "alias": current, "category_path": selected, "relative_category": selected, "note": note}
     alias = current or source_rule.get("save_to") or "默认"
     missing = "二级分类元数据" if layout == "category" else "可识别的媒体类型"
