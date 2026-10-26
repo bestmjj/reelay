@@ -123,7 +123,8 @@ def _overlapping_share_versions(video_items: list[dict], parsed) -> list[str]:
 
 def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: str = 'share',
                         hints: dict | None = None, stored_variety_parts=(),
-                        share_folder_id: str | None = None) -> dict:
+                        share_folder_id: str | None = None, share_folder_path: str | None = None,
+                        required_latest: int | None = None) -> dict:
     """确定本次转存的文件。分享清单是集数的事实来源，消息/LLM 给出的集数只作提示。
 
     返回 ``{'files', 'episodes', 'season', 'pairs'}``：每个文件带自己的季与集，``pairs`` 为
@@ -139,8 +140,12 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
     episodic = parsed.media_type in ('tv', 'anime') or bool(parsed.episodes)
     if share_folder_id is not None:
         candidates = share_folder_choices(video_items)
-        if str(share_folder_id) not in {choice["folder_id"] for choice in candidates}:
+        chosen = next((choice for choice in candidates if choice["folder_id"] == str(share_folder_id)), None)
+        if chosen is None:
             raise NeedsManual("选中的分享版本文件夹已不存在或没有视频，请重新选择；禁止自动切换到其他版本")
+        if (share_folder_path and
+                chosen["path"].split("/", 1)[0] != share_folder_path.split("/", 1)[0]):
+            raise NeedsManual("选中的分享版本文件夹名称已改变，请重新确认，禁止自动使用另一种 HDR 版本")
         video_items = [x for x in video_items
                        if str(x.get("share_folder_id") or "root") == str(share_folder_id)]
     else:
@@ -223,6 +228,9 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         if missing:
             raise NeedsManual(f'分享内未找到消息声明的集数 {sorted(missing)}')
         picked = [(item, s, ep) for item, s, ep in picked if ep in requested]
+    if required_latest is not None and required_latest not in {ep for _, _, ep in picked}:
+        raise NeedsManual(f"选中版本缺少消息明确更新的 E{required_latest:02d}，"
+                          "不从其他版本补集，也不自动转存旧集")
     # Variety episodes have *editions*: upper/lower/bonus/pure are not
     # alternative resolutions of the same episode. They must be saved and
     # deduplicated independently, never collapsed to a single E03.
@@ -422,6 +430,21 @@ def _verified_files(expected: list[dict], actual: list[dict]) -> list[dict]:
     return [by_name[x['name']] for x in expected]
 
 
+def _announced_latest(ctx: PipelineContext) -> int | None:
+    """Only check a clear 'updated to E14' when a user selected a version."""
+    if not ctx.ns("share_selection").get("folder_id"):
+        return None
+    if ctx.parsed.media_type not in ("tv", "anime"):
+        return None
+    hits = {int(v) for v in re.findall(
+        r"(?:更新至|更新到|更至|更新)\\s*(?:第\\s*)?(\\d{1,4})\\s*集",
+        ctx.raw.text or "")}
+    if len(hits) != 1:
+        return None
+    episode = hits.pop()
+    return episode if not ctx.parsed.episodes or episode in ctx.parsed.episodes else None
+
+
 class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
     """按分享清单选定转存文件（与具体网盘无关）：规则无法确定时先让 AI 给方案，方案经同一套规则校验。"""
 
@@ -431,14 +454,17 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
                                    stored=ctx.ns('storage').get('stored_episodes') or [],
                                    scope=ctx.source_rule.get('episodes_from', 'share'), hints=hints,
                                    stored_variety_parts=ctx.ns('storage').get('stored_variety_parts') or [],
-                                   share_folder_id=ctx.ns('share_selection').get('folder_id'))
+                                   share_folder_id=ctx.ns('share_selection').get('folder_id'),
+                                   share_folder_path=ctx.ns('share_selection').get('path'),
+                                   required_latest=_announced_latest(ctx))
 
     async def select(self, ctx: PipelineContext, listing: list[dict]) -> dict:
         """按规则确定转存文件；规则无法确定时先让 AI 给出方案，方案经同一套规则校验，不过再转人工。"""
         try:
             return self._select(ctx, listing)
         except NeedsManual as exc:
-            if str(exc).startswith(("分享包含多个版本文件夹", "选中的分享版本文件夹")):
+            if str(exc).startswith(("分享包含多个版本文件夹", "选中的分享版本文件夹",
+                                    "选中版本缺少")):
                 raise  # Folder selection must be explicit; AI cannot bypass it.
             if self._client is None or not runtime.get('ai.assist', True):
                 raise
