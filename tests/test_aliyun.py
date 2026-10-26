@@ -70,6 +70,22 @@ class AliyunTests(unittest.TestCase):
             self.assertNotIn("backup-drive-id-456", str(calls[1].args[1]))
             self.assertNotIn("backup-drive-id-456", str(calls[2].args[1]))
 
+    def test_missing_resource_in_token_reads_account_before_using_default(self):
+        client = AliyunClient()
+        with secret_store.override(aliyun_refresh_token="old-refresh-token-123456") as secrets:
+            with patch.object(client, "_send", side_effect=[
+                {"access_token": "access123", "refresh_token": "new-refresh-token-123456",
+                 "default_drive_id": "backup-drive-id", "backup_drive_id": "backup-drive-id"},
+                {"resource_drive_id": "resource-drive-id", "backup_drive_id": "backup-drive-id"},
+                {"items": []},
+            ]) as send:
+                self.assertEqual(client.children("root"), [])
+                self.assertEqual(client.drive_id, "resource-drive-id")
+            self.assertIn("/v2/user/get", send.call_args_list[1].args[0])
+            self.assertEqual(send.call_args_list[1].args[2]["Authorization"], "Bearer access123")
+            self.assertEqual(send.call_args_list[2].args[1]["drive_id"], "resource-drive-id")
+            self.assertEqual(secrets.get("aliyun_refresh_token"), "new-refresh-token-123456")
+
     def test_does_not_silently_fall_back_to_known_backup_disk(self):
         with self.assertRaisesRegex(ValueError, "拒绝自动使用备份盘"):
             _resource_drive_id({"default_drive_id": "backup1", "backup_drive_id": "backup1"})
@@ -146,10 +162,10 @@ class AliyunTests(unittest.TestCase):
         with secret_store.override(aliyun_refresh_token="old-refresh-token-123456"):
             results = [
                 {"access_token": "access1", "refresh_token": "rotated-refresh-token-123456",
-                 "default_drive_id": "drive123"},
+                 "resource_drive_id": "drive123", "default_drive_id": "backup123"},
                 AliyunAPIError(200, "AccessTokenInvalid"),
                 {"access_token": "access2", "refresh_token": "rotated2-refresh-token-123456",
-                 "default_drive_id": "drive123"},
+                 "resource_drive_id": "drive123", "default_drive_id": "backup123"},
                 {"items": []},
             ]
             with patch.object(client, "_send", side_effect=results) as sent:
