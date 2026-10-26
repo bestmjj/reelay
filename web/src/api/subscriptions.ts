@@ -80,6 +80,7 @@ export interface ISubscriptionSimulation {
   status: 'no_source' | 'no_sample' | 'not_matched' | 'blocked' | 'automatic' | 'manual';
   reason: string;
   source?: string;
+  example_origin?: 'pasted' | 'local' | 'telegram_search' | 'history';
   subscription: { id: number; title: string; season: number };
   parsed?: { title?: string; media_type?: string; season?: number; episodes?: number[];
              share_code?: string; raw_fields?: Record<string, unknown> } | null;
