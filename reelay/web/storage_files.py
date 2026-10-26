@@ -36,6 +36,12 @@ class RenameEntry(FolderCreate):
     is_dir: bool
 
 
+class MoveFile(FolderCreate):
+    """Only move an existing ordinary file between directories in ONE cloud."""
+    fid: str = Field(min_length=1, max_length=128)
+    destination_cid: str = Field(min_length=1, max_length=128)
+
+
 def _validate_id(provider: Cloud, value: str, *, allow_root: bool = True) -> str:
     if not _ID.fullmatch(value) or (provider == "p115" and not value.isdecimal()):
         raise HTTPException(status_code=422, detail="无效的网盘文件或目录 ID")
@@ -122,6 +128,48 @@ def router(service) -> APIRouter:
         fs.rename(fid, name)
         return {"ok": True, "id": body.fid, "name": name}
 
+    def move_file(storage, body: MoveFile):
+        _validate_id(body.provider, body.fid, allow_root=False)
+        _validate_id(body.provider, body.destination_cid, allow_root=False)
+        if body.cid == body.destination_cid:
+            raise HTTPException(status_code=422, detail="源目录和目标目录相同，无需移动")
+        name = _validate_name(body.name)
+        fs, items = before_write(storage, body)
+        entry = next((x for x in items if str(x["id"]) == body.fid), None)
+        if not entry or entry.get("is_dir") or str(entry.get("name")) != name:
+            raise HTTPException(status_code=409, detail="源文件已发生变化或目标是目录，请刷新")
+        fid = int(body.fid) if body.provider == "p115" else body.fid
+        original = fs.get_attr(fid)
+        expected_parent = str(int(body.cid)) if body.provider == "p115" else (
+            "root" if body.cid == "0" else body.cid)
+        if (str(original.get("id")) != body.fid
+                or str(original.get("parent_id")) != expected_parent
+                or original.get("name") != name or original.get("is_dir")):
+            raise HTTPException(status_code=409, detail="文件属性或位置已变化，请刷新")
+        # Never move Reelay's in-flight staging files.
+        if name.casefold().startswith(".reelay-"):
+            raise HTTPException(status_code=409, detail="禁止移动 Reelay 暂存文件")
+        dest = browse(storage, body.destination_cid, limit=MAX_CHECK_ENTRIES)
+        if dest.get("next_offset") is not None or dest.get("total_entries", 0) > MAX_CHECK_ENTRIES:
+            raise HTTPException(status_code=409, detail="目标目录文件太多，无法安全检查同名冲突")
+        if (body.provider == "aliyun" and str(dest.get("drive_id")) != body.drive_id):
+            raise HTTPException(status_code=409, detail="目标资源库已变化，请刷新")
+        destination = int(body.destination_cid) if body.provider == "p115" else body.destination_cid
+        dst = fs.get_attr(destination)
+        if str(dst.get("id")) != body.destination_cid or not dst.get("is_dir"):
+            raise HTTPException(status_code=409, detail="目标不是有效文件夹")
+        if str(dst.get("name") or "").casefold().startswith(".reelay-"):
+            raise HTTPException(status_code=409, detail="不能把旧文件移动到 Reelay 暂存目录")
+        if any(str(item.get("name") or "").casefold() == name.casefold() for item in dest["items"]):
+            raise HTTPException(status_code=409, detail="目标目录已有同名文件，已拒绝覆盖")
+        require_scope(storage, body.provider, body.drive_id)
+        # One mutation, no automatic retry if upstream response is uncertain.
+        fs.move(fid, destination)
+        after = fs.get_attr(fid)
+        if str(after.get("parent_id")) != ("root" if body.destination_cid == "0" and body.provider == "aliyun" else body.destination_cid):
+            raise RuntimeError("移动结果尚未得到确认，请刷新源与目标目录")
+        return {"ok": True, "id": body.fid, "destination_cid": body.destination_cid, "name": name}
+
     @api.get("/api/storage/items")
     async def list_items(provider: Cloud, cid: str = Query(default="0", min_length=1, max_length=128),
                          offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=200)):
@@ -162,6 +210,21 @@ def router(service) -> APIRouter:
                 raise HTTPException(
                     status_code=502,
                     detail="重命名的结果不确定，请先刷新核对文件名；不要立即重复提交",
+                ) from None
+
+    @api.post("/api/storage/move")
+    async def move_file_entry(body: MoveFile):
+        if write_lock.locked():
+            raise HTTPException(status_code=409, detail="已有网盘操作正在执行")
+        async with write_lock:
+            try:
+                return await asyncio.to_thread(move_file, provider_for(body.provider), body)
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(
+                    status_code=502,
+                    detail="移动结果无法确认，请先刷新两个目录核对；不要立即重复提交",
                 ) from None
 
     return api
