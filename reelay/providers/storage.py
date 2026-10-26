@@ -644,8 +644,8 @@ def browse_dirs(credentials, cid: str, offset: int = 0, limit: int = 100, *, inc
                 pid = item.get('parent_id', cid)
             else:
                 is_dir = not item.get('fid')
-                fid, name = item.get('cid'), item.get('n')
-                pid = item.get('pid', cid)
+                fid, name = (item.get('cid') if is_dir else item.get('fid')), item.get('n')
+                pid = item.get('pid', cid) if is_dir else item.get('cid', cid)
             if is_dir or include_files:
                 if not str(fid or '').isascii() or not str(fid or '').isdecimal():
                     raise StorageBrowseError('invalid_response', '115 返回了无效的文件或目录 ID。', 502)
