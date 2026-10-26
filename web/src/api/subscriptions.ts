@@ -17,6 +17,14 @@ export interface ISubscription {
   category: string;
   /** 播完且全部入库后由每日巡检标记：不再自动转存与巡检缺集。 */
   finished: { date: string; episodes: number } | null;
+  discovery?: {
+    source?: string;
+    checked_at?: number;
+    matches?: number;
+    emitted?: number;
+    error?: string | null;
+    next_at?: number;
+  } | null;
 }
 
 export interface ISubscriptionSuggestion {
@@ -68,8 +76,27 @@ export interface IAddSubscriptionResp {
 /** 一部剧的一季：已有订阅带上 id；订阅建议只有片名、季与 tmdbid。 */
 type ShowKey = { id?: number; title: string; season: number; tmdbid: number | null };
 
+export interface ISubscriptionSimulation {
+  status: 'no_source' | 'no_sample' | 'not_matched' | 'blocked' | 'automatic' | 'manual';
+  reason: string;
+  source?: string;
+  subscription: { id: number; title: string; season: number };
+  parsed?: { title?: string; media_type?: string; season?: number; episodes?: number[];
+             share_code?: string; raw_fields?: Record<string, unknown> } | null;
+  matched_subscription?: { id: number; title: string; season: number } | null;
+  decision?: string;
+  routing?: { share_provider: string | null; target_storage: string; compatible: boolean };
+  target_preview?: string | null;
+  trail?: string[];
+  task_created: false;
+  share_checked?: false;
+  dedup_checked?: false;
+}
+
 export const subscriptionApi = {
   list: () => get<ISubscriptionsResp>('subscriptions'),
+  simulate: (id: number, text?: string) =>
+    post<ISubscriptionSimulation>('subscriptions/simulate', { id, text: text || null }),
   resolve: (text: string) => post<IResolveResp>('subscriptions/resolve', { text }),
   add: (item: { title: string; season?: number | null; tmdbid?: number | null; total?: number | null; auto?: boolean }) =>
     post<IAddSubscriptionResp>('subscriptions', item),
