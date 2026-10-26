@@ -924,5 +924,19 @@ class TestConfigSnapshots(PipelineCase):
         self.assertEqual(self.store._conn.execute("SELECT COUNT(*) FROM config_snapshots").fetchone()[0], 2)
 
 
+class AliyunDirectoryResolution(PipelineCase):
+    def test_storage_specific_alias_is_not_treated_as_115_cid(self):
+        pipeline = self.pipeline({"save_dirs": {"默认": "0", "动漫": "aliyun:FolderAbc_123"}})
+        ctx = message()
+        ctx.source_rule = {"save_to": "动漫", "storage": "aliyun"}
+        pipeline._resolve_directory(ctx)
+        self.assertEqual((ctx.save_dir_alias, ctx.save_dir_cid), ("动漫", "FolderAbc_123"))
+
+        other = message(msg_id="another")
+        other.source_rule = {"save_to": "动漫", "storage": "p115"}
+        with self.assertRaisesRegex(ValueError, "属于阿里云盘"):
+            pipeline._resolve_directory(other)
+
+
 if __name__ == "__main__":
     unittest.main()
