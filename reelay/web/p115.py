@@ -107,9 +107,9 @@ def router(service) -> APIRouter:
         return {"ok": True}
 
     @api.get("/api/storage/dirs")
-    async def storage_dirs(cid: str = Query(default="0", pattern=r"^[0-9]+$"), offset: int = Query(default=0, ge=0),
+    async def storage_dirs(cid: str = Query(default="0", pattern=r"^[A-Za-z0-9_-]{1,128}$"), offset: int = Query(default=0, ge=0),
                            limit: int = Query(default=100, ge=1, le=1000)):
-        """选目录：列出 cid 下的子目录（默认存储 Provider 的网盘）；错误不伪装成空目录。"""
+        """选目录：兼容 115 数字 CID 与阿里云盘不透明文件 ID；错误不伪装成空目录。"""
         cfg = service.pipeline.cfg
         storage = service.pipeline.reg.get_provider("storage", cfg["defaults"]["storage"])
         if not hasattr(storage, "browse"):
