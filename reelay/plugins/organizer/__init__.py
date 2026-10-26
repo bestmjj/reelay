@@ -46,6 +46,12 @@ from .settings import DEFAULT_NAMING
 log = logging.getLogger("reelay.plugin.organizer")
 
 
+
+def _fid(value):
+    """115 IDs are numeric; Aliyun IDs are opaque. Never coerce opaque IDs to int."""
+    value = str(value)
+    return int(value) if value.isdecimal() else value
+
 def _safe(name: str) -> str:
     """清洗成合法目录/文件名片段。"""
     return re.sub(r'[\\/:*?"<>|]', " ", str(name or "")).strip()
@@ -386,10 +392,10 @@ class Organizer(_MediaLibrary):
         """整理成功后：删除空的 .reelay-<task> 暂存目录（非空则保留，绝不误删），清掉只在重放时用的删除记录。"""
         state = runtime.services().state(self.name)
         for item in ctx.ns("organize").get("plan") or []:
-            state.delete(f"skipped:{int(item['src_id'])}")
+            state.delete(f"skipped:{_fid(item['src_id'])}")
         manifest = ctx.ns("storage").get("manifest") or {}
         stage = manifest.get("staging_cid")
-        if not isinstance(stage, int):
+        if stage is None:
             return
         try:
             if drive.iterdir(stage):
@@ -405,7 +411,7 @@ class Organizer(_MediaLibrary):
     def _remove(drive, file_id: int, parent: int, what: str) -> None:
         """删除（进回收站）后读回目录，确认文件已不在原处。删除可重复执行，结果不明时重来即可。"""
         drive.delete([file_id])
-        if any(x["id"] == file_id for x in drive.iterdir(int(parent))):
+        if any(x["id"] == file_id for x in drive.iterdir(_fid(parent))):
             raise RuntimeError(f"删除{what}后读回仍在原目录，停止整理")
 
     def _resolve_conflict(self, ctx, strategy, drive, target_cid, item, source_id, source_parent, existing, candidate,
@@ -429,7 +435,7 @@ class Organizer(_MediaLibrary):
                     return "suffix", candidate
             raise FileExistsError(f"同名文件过多，保留源文件：{name}")
         if strategy in ("skip", "upgrade", "replace"):
-            existing_id = int(existing["id"])
+            existing_id = _fid(existing["id"])
             recorded = state.get(f"file:{existing_id}") or {}
             current = {"rank": recorded.get("rank") or resolution_rank(existing.get("name")),
                        "release": recorded.get("release") or release.from_text(existing.get("name")),
@@ -440,7 +446,7 @@ class Organizer(_MediaLibrary):
                 self._record_conflict(ctx, item, strategy, existing_id)
                 self._remove(drive, existing_id, target_cid, "库里的旧文件")
                 return strategy, name
-            state.set(f"skipped:{source_id}", {"kept": existing_id, "name": name, "parent": int(source_parent)})
+            state.set(f"skipped:{source_id}", {"kept": existing_id, "name": name, "parent": _fid(source_parent)})
             self._remove(drive, source_id, source_parent, "本次转存的文件")
             return "skip", name
         raise FileExistsError(f"库里已有「{existing.get('name')}」，请选择删除转存文件或覆盖保存")
@@ -466,7 +472,7 @@ class Organizer(_MediaLibrary):
             runtime.services().store.save_task(ctx)
 
     def _apply_sync(self, ctx: PipelineContext, p, plan: list[dict], drive) -> None:
-        base_cid = int(ctx.save_dir_cid or 0)
+        base_cid = _fid(ctx.save_dir_cid or 0)
         dir_cache: dict[str, int] = {}
 
         def ensure_dir(rel_dir: str) -> int:
@@ -500,15 +506,15 @@ class Organizer(_MediaLibrary):
         state = runtime.services().state(self.name)
         new_rank = resolution_rank(p.resolution)
         title, is_tv = _safe(p.title), p.media_type == "tv" or bool(p.episodes)
-        ours = {int(item["src_id"]) for item in plan}  # 同一批的其他文件（如分段电影）不算冲突
+        ours = {_fid(item["src_id"]) for item in plan}  # 同一批的其他文件（如分段电影）不算冲突
 
         for item in plan:
-            source_id = int(item["src_id"])
+            source_id = _fid(item["src_id"])
             skipped = state.get(f"skipped:{source_id}")
             if skipped:
                 # 冲突时已决定删除本次的新文件：上次删除结果不明就再删一次并读回
                 parent = skipped.get("parent")
-                if parent is not None and any(x["id"] == source_id for x in drive.iterdir(int(parent))):
+                if parent is not None and any(x["id"] == source_id for x in drive.iterdir(_fid(parent))):
                     self._remove(drive, source_id, parent, "本次转存的文件")
                 continue
             target_cid = ensure_dir(item["target_dir"])
@@ -537,7 +543,7 @@ class Organizer(_MediaLibrary):
                     }
                 action, target_name = self._resolve_conflict(
                     ctx, strategy, drive, target_cid, item, source_id, current["parent_id"], existing, candidate, state)
-                self._record_conflict(ctx, item, action, int(existing["id"]))
+                self._record_conflict(ctx, item, action, _fid(existing["id"]))
                 if action == "skip":
                     ctx.log(f"删除了本次转存的「{item.get('src_name')}」，保留库里的「{existing.get('name')}」")
                     continue
