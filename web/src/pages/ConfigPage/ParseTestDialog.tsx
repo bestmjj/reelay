@@ -246,7 +246,9 @@ export function ParseTestDialog({ open, onOpenChange, source }: ParseTestDialogP
                 <h3 className="text-[13px] font-medium">识别结果</h3>
                 <p className="mt-0.5 text-xs text-muted-foreground">{(result && DECISION_HINTS[result.decision]) ?? '与真实流程一致，但只用于预览，不会保存'}</p>
               </div>
-              {decision ? (
+              {result?.routing?.compatible === false ? (
+                <ToneBadge tone="danger" className="shrink-0 px-2.5 py-1 text-[13px]">目标网盘不匹配</ToneBadge>
+              ) : decision ? (
                 <ToneBadge tone={decision.tone} className="shrink-0 px-2.5 py-1 text-[13px]">{decision.label}</ToneBadge>
               ) : null}
             </div>
