@@ -6,7 +6,6 @@ import unittest
 
 from reelay.core import works
 from reelay.core.contracts import ParsedResource, PipelineContext, RawMessage, TaskState, NeedsManual
-from reelay.core.media import episode_of
 from reelay.core.store import Store
 from reelay.providers.storage import SHARE_ROOT_DIRECT, _select_video_items
 from tests.fakes import WebCase
