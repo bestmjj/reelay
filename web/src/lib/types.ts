@@ -102,6 +102,7 @@ export interface ITaskSummary {
   msg_id: string | null;
   title: string | null;
   error: string | null;
+  wrong_source_quarantined?: boolean;
   retries: number;
   created_at: number;
   updated_at: number;
