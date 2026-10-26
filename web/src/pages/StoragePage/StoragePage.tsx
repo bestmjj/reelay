@@ -66,7 +66,7 @@ export default function StoragePage() {
   return (
     <Page
       title="网盘目录"
-      description="只读浏览你的 当前默认网盘，确认保存位置是否正确；不会创建、移动或删除任何文件。"
+      description="只读浏览当前默认网盘。阿里云盘使用资源库（数据盘），不会误将备份盘当作资源库；不创建、移动或删除文件。"
       actions={(
         <Button variant="outline" className="bg-card" disabled={busy} onClick={dir.reload}>
           <RefreshCw className={cn(busy && 'animate-spin')} />刷新
