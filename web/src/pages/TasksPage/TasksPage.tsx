@@ -61,6 +61,11 @@ function TaskRow({ item, onOpen }: { item: ITaskSummary; onOpen: () => void }) {
         </div>
         <MediaMeta mediaType={item.media_type} season={item.season} episodes={item.episodes} pairs={item.episode_pairs}
           resolution={item.resolution} size={item.size} className="mt-0.5" />
+        {item.wrong_source_quarantined ? (
+          <p className="mt-0.5 truncate text-xs font-semibold text-destructive">
+            <span aria-label="错片隔离">来源存疑，已暂停该集自动转存</span>
+          </p>
+        ) : null}
         {item.error ? <p className="mt-0.5 truncate text-xs text-destructive">{item.error}</p> : null}
         <p className="mt-0.5 truncate text-xs text-muted-foreground md:hidden">
           {item.source} · {relativeTime(item.updated_at)}
