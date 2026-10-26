@@ -402,7 +402,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((done.parsed.season, done.parsed.episodes), (3, [1]))
         self.assertEqual(self.path_of(int(done.ns('storage')['landed'][0]['id'])),
                          '剧集 (2026)/Season 03/剧集 - S03E01 - 第 1 集.mkv')
-        self.assertEqual(done.ns('storage')['content_keys'], ['p115:1:episode:剧集|S03|E01'])
+        self.assertEqual(done.ns('storage')['content_keys'], ['p115:account:episode:剧集|S03|E01'])
 
     async def test_message_scope_only_receives_new_declared_episodes(self):
         self.cloud.add_share('share', 'S01E01.mkv', 'S01E02.mkv')
@@ -669,13 +669,15 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.state, TaskState.DONE)
         self.assertEqual([x['id'] for x in self.cloud.children(season)], [existing['id']])
 
-    async def test_dedup_is_scoped_to_target_directory(self):
+    async def test_dedup_is_scoped_to_physical_drive_not_target_folder(self):
+        # A verified E01 anywhere on the same physical drive is already
+        # available, even when the new subscription uses another save alias.
         self.cloud.add_share('share', 'S01E01.mkv')
-        await self.execute(self.task())
-        done = await self.execute(self.task(alias='新目录'))
-        self.assertEqual(done.state, TaskState.DONE)
-        self.assertEqual(len(self.cloud.receives()), 2)
-        self.assertEqual(done.result['to_cid'], 2)
+        first = await self.execute(self.task())
+        self.assertEqual(first.state, TaskState.DONE)
+        repeated = await self.execute(self.task(alias='新目录'))
+        self.assertEqual(repeated.state, TaskState.SKIPPED)
+        self.assertEqual(len(self.cloud.receives()), 1)
 
     async def test_timeout_after_receive_is_reconciled_without_resending(self):
         self.cloud.add_share('share', 'S01E01.mkv')
