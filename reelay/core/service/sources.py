@@ -38,6 +38,38 @@ class SourceMixin(ServiceBase):
         self.pipeline.reg.validate_config(normalize_config(candidate))
         return merge_config({**copy.deepcopy(cfg["defaults"]), "forward": copy.deepcopy(cfg["forward"])}, draft)
 
+    async def submit_manual_resource(self, text: str, *, source: str | None = None) -> dict[str, Any]:
+        """Explicit user action to enqueue one existing share using the normal pipeline.
+
+        This is NOT a direct cloud copy. The worker will run normal parser,
+        provider routing, content dedup and duplicate-safe recovery first.
+        """
+        import uuid
+        from ..contracts import RawMessage
+        from ..parse_rules import parse_share_url
+
+        text = ai.text_field(text, limit=12000, label="资源消息")
+        if not text or not parse_share_url(text, [])[0]:
+            raise ValueError("请粘贴包含阿里云盘或 115 分享链接的完整资源消息；只有 Telegram 消息地址还不能直接转存")
+        configured = [rule["bot"] for rule in self.get_config().get("sources", [])]
+        if not configured:
+            raise ValueError("请先添加 Telegram 监听来源并配置目标网盘")
+        selected = next((name for name in configured if source and name.casefold() == source.casefold()), None)
+        if source and not selected:
+            raise ValueError("立即转存只能选择已经配置的监听来源")
+        if not selected:
+            if len(configured) != 1:
+                raise ValueError("有多个监听来源时请明确选择要使用的来源配置")
+            selected = configured[0]
+        raw = RawMessage(source=selected, msg_id="manual-" + uuid.uuid4().hex,
+                         text=text, extra={"manual_import": True})
+        ctx = PipelineContext(raw=raw)
+        accepted = await self.pipeline.accept(ctx)
+        if not accepted:
+            raise ConflictError("这条消息已在转存队列中")
+        return {"task_id":accepted.task_id, "state":accepted.state.value,
+                "note":"资源已提交给后台；符合规则时自动转存，不确定或识别失败会进入待审批或失败列表。"}
+
     async def test_parse(self, text: str, urls: list[str] | None = None, source: str | None = None,
                          rule: dict | None = None) -> dict[str, Any]:
         """与真实管线一致：合并默认规则 → 解析 → after_parse 扩展 → 确定性置信度 → 决策；不落库。
