@@ -122,6 +122,14 @@ class WrongCopyQuarantineTests(WebCase):
         self.assertEqual(self.store.stored_episode_pairs(self.work, self.cid, "aliyun"), [[1, 246]])
         self.assertEqual(self.store.get_task(self.ctx.task_id).state, TaskState.DONE)
 
+    def test_legacy_non_dict_manifest_remains_readable_in_management(self):
+        self.ctx.ns("storage")["manifest"] = [{"legacy": "not a modern manifest"}]
+        self.store.save_task(self.ctx)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["source_audit"]["available"])
+        self.assertNotIn("quarantine_wrong_source", response.json()["actions"])
+
     def test_quarantine_rejects_multifile_or_unfinished_task(self):
         self.ctx.ns("storage")["manifest"]["files"].append({
             "id": "extra", "name": "248 4K.mp4", "episode": 248})
