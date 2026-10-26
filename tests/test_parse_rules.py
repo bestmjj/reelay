@@ -181,6 +181,28 @@ class TestDraftPreviews(ServiceCase):
             with self.assertRaises(ValueError):
                 self.service.draft_source_rule(bad)
 
+    async def test_aliyun_share_recognition_and_storage_route_preview(self):
+        from reelay.providers.storage import P115Storage
+        from reelay.core.contracts import NeedsManual
+
+        text = "名称：牧神记 (2024) 第106集 4K\n链接：https://www.alipan.com/s/DXVx8d8vce8"
+        # The parser correctly determines the share host independently of AI.
+        same = self.service.draft_source_rule({"bot": "@bot", "parser": "regex", "storage": "aliyun"})
+        result = await self.service.test_parse(text, [], "@bot", rule=same)
+        self.assertEqual(result["parsed"]["raw_fields"]["share_provider"], "aliyun")
+        self.assertEqual(result["parsed"]["share_code"], "DXVx8d8vce8")
+        self.assertEqual(result["routing"], {
+            "share_provider": "aliyun", "target_storage": "aliyun", "compatible": True,
+        })
+        # A source accidentally pointed at 115 must not claim copy readiness.
+        other = self.service.draft_source_rule({"bot": "@bot", "parser": "regex", "storage": "p115"})
+        mismatched = await self.service.test_parse(text, [], "@bot", rule=other)
+        self.assertEqual(mismatched["routing"]["compatible"], False)
+        ctx = message(text=text, urls=())
+        ctx.parsed = _regex_parse(ctx)
+        with self.assertRaisesRegex(NeedsManual, "阿里云盘分享链接"):
+            await P115Storage().prepare(ctx)
+
     def test_naming_preview_uses_the_unsaved_template(self):
         from reelay.core import runtime
         preview = self.pl.reg.action("organizer", "preview_plan")
