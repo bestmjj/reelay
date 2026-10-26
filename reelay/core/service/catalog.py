@@ -15,18 +15,23 @@ _WEB_FIELDS = ("title", "media_type", "year", "tmdbid", "episodes", "episode_pai
 class CatalogMixin(ServiceBase):
     """媒体库查询与统计。"""
 
-    def _groups(self, query: str | None = None, media_type: str | None = None) -> list[dict[str, Any]]:
-        """全部已入库任务按作品汇总（不限条数），最近入库的作品在前。"""
-        return library.group_library(self.store.done_snapshots(query or None, media_type or None),
-                                     self.store.replaced_file_ids())
+    def _groups(self, query: str | None = None, media_type: str | None = None,
+                save_dir_alias: str | None = None) -> list[dict[str, Any]]:
+        """按目录筛选应在作品汇总前进行，避免同名作品跨目录被合并后丢失归属。"""
+        snapshots = self.store.done_snapshots(query or None, media_type or None)
+        if save_dir_alias:
+            snapshots = [item for item in snapshots if item.get("save_dir_alias") == save_dir_alias]
+        return library.group_library(snapshots, self.store.replaced_file_ids())
 
-    def library(self, *, query: str | None = None, media_type: str | None = None) -> dict[str, Any]:
+    def library(self, *, query: str | None = None, media_type: str | None = None,
+                save_dir_alias: str | None = None) -> dict[str, Any]:
         """管理台媒体库：每部作品的季集、体积、海报与整理后的文件。"""
-        groups = [{key: group[key] for key in _WEB_FIELDS} for group in self._groups(query, media_type)]
+        groups = [{key: group[key] for key in _WEB_FIELDS} for group in self._groups(query, media_type, save_dir_alias)]
         return {"groups": groups, "total_done": sum(group["tasks"] for group in groups),
                 "estimated_gb": round(sum(group["bytes"] for group in groups) / 1024 ** 3, 2)}
 
-    def scanned_library(self, *, query: str | None = None, media_type: str | None = None) -> dict[str, Any]:
+    def scanned_library(self, *, query: str | None = None, media_type: str | None = None,
+                        save_dir_alias: str | None = None) -> dict[str, Any]:
         """Separate read-only cloud inventory; never counted as verified Reelay transfers."""
         snapshot = self.store.state_get("library_scan", "snapshot") or {
             "groups": [], "scanned_at": None, "file_count": 0, "folder_count": 0,
@@ -37,6 +42,8 @@ class CatalogMixin(ServiceBase):
             items = [x for x in items if query.casefold() in x["title"].casefold()]
         if media_type:
             items = [x for x in items if x["media_type"] == media_type]
+        if save_dir_alias:
+            items = [x for x in items if x.get("save_dir_alias") == save_dir_alias]
         return {**snapshot, "groups": items,
                 "estimated_gb": round(sum(x["bytes"] for x in items) / 1024 ** 3, 2),
                 "total_done": 0}
