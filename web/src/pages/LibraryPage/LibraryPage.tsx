@@ -229,10 +229,18 @@ export default function LibraryPage() {
           <p>这是只读文件索引，不能证明已完成 Reelay 转存，也不会自动修改重复转存判断。</p>
         </div>
       ) : null}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
+          <FolderTree className="size-4" />保存目录
+        </span>
+        <Select aria-label="按保存目录筛选" value={directory} onValueChange={setDirectory}
+          options={directoryOptions} className="w-full sm:w-48" />
+        <span className="text-xs text-muted-foreground">
+          与媒体类型独立；新增的「动漫电影」等目录会出现在这里，即使暂无影片。
+        </span>
+      </div>
       <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center">
         <Segmented label="媒体类型" size="md" value={type} onChange={setType} options={TYPES} className="shrink-0 self-start" />
-        <Select aria-label="按保存目录筛选" value={directory} onValueChange={setDirectory}
-          options={directoryOptions} className="w-full shrink-0 sm:w-44" />
         <div className="flex flex-1 gap-2">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
