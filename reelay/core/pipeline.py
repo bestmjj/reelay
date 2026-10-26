@@ -459,6 +459,17 @@ class Pipeline:
         provider_name = ns.get("provider") or ctx.source_rule.get("storage", self.cfg["defaults"]["storage"])
         storage = self.reg.get_provider("storage", provider_name)
         ns["provider"] = provider_name
+        if ns.get("manifest") and hasattr(storage, "_assert_manifest_drive"):
+            # Explicitly reject an old backup-disk manifest before looking up
+            # saved shares or episodes; otherwise a prior dedup record could
+            # silently skip a resource-drive transfer during recovery.
+            try:
+                with self.scope(ctx):
+                    await asyncio.to_thread(storage._assert_manifest_drive, ns["manifest"])
+            except NeedsManual as exc:
+                await self._fail(ctx, f"目标网盘不匹配，禁止自动恢复：{exc}",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
         if ns.get("abandon") and ns.get("phase") == "receiving":
             await self._abandon(ctx, storage)
             return
@@ -468,9 +479,21 @@ class Pipeline:
                 self.store.save_task(ctx)
                 return
             self._resolve_directory(ctx)
+            # Namespace Aliyun dedup by the resolved resource-drive identity.
+            # Both backup and resource drive have a root folder named '0'.
+            try:
+                if hasattr(storage, "dedup_cid"):
+                    with self.scope(ctx):
+                        ns["dedup_cid"] = await asyncio.to_thread(storage.dedup_cid, ctx.save_dir_cid)
+                else:
+                    ns["dedup_cid"] = ctx.save_dir_cid
+            except Exception as exc:
+                await self._fail(ctx, f"无法确认网盘目标，停止转存：{exc}", retry_from=TaskState.QUEUED)
+                return
+            dedup_cid = ns["dedup_cid"]
             ctx.state = TaskState.SAVING
             ns["phase"] = "preparing"
-            key = f"{storage.name}:{ctx.save_dir_cid}:{ctx.parsed.share_code}"
+            key = f"{storage.name}:{dedup_cid}:{ctx.parsed.share_code}"
             # 先按消息提示的集数占位，尽早串行化同一集的不同分享；清单确定后再按实际集数占位。
             if not self.store.claim_resource(ctx, key, content_keys=self._content_keys(storage.name, ctx)):
                 ctx.state = TaskState.QUEUED
@@ -478,7 +501,7 @@ class Pipeline:
                 return
             # 剧集分享链接常在追更中原地增加新集：剧集按集去重，其他按分享去重。
             if not self._episodic(ctx) and self.store.saved_share(
-                    ctx.parsed.share_code, ctx.save_dir_cid, provider_name):
+                    ctx.parsed.share_code, dedup_cid, provider_name):
                 ctx.state = TaskState.SKIPPED
                 ctx.log("执行前去重命中，分享已转存到该目录")
                 self.store.save_task(ctx)
@@ -486,11 +509,11 @@ class Pipeline:
             # work 是作品身份（TMDB ID、规范片名与年份）：同名的不同作品不会互相当成已入库
             ns["identity"] = {
                 "provider": provider_name,
-                "cid": ctx.save_dir_cid, "share_code": ctx.parsed.share_code,
+                "cid": dedup_cid, "share_code": ctx.parsed.share_code,
                 "title": ctx.parsed.title, "season": ctx.parsed.season,
                 "episodes": list(ctx.parsed.episodes), "work": works.of(ctx.parsed, ctx.meta.get("tmdb")),
             }
-            ns["stored_episodes"] = (self.store.stored_episode_pairs(ns["identity"]["work"], ctx.save_dir_cid,
+            ns["stored_episodes"] = (self.store.stored_episode_pairs(ns["identity"]["work"], dedup_cid,
                                                                      provider_name) if ctx.parsed.title else [])
             try:
                 with self.scope(ctx):
@@ -723,7 +746,7 @@ class Pipeline:
     @staticmethod
     def _content_keys(storage_name: str, ctx: PipelineContext) -> list[str]:
         title = ctx.parsed.title
-        return [f"{storage_name}:{ctx.save_dir_cid}:episode:{works.claim_key(title, season, ep)}"
+        return [f"{storage_name}:{ctx.ns('storage').get('dedup_cid') or ctx.save_dir_cid}:episode:{works.claim_key(title, season, ep)}"
                 for season, ep in ctx.episode_pairs() if title]
 
     @staticmethod
@@ -752,13 +775,14 @@ class Pipeline:
     async def _recheck_manifest(self, ctx: PipelineContext, storage, provider_name: str) -> bool:
         ns = ctx.ns("storage")
         manifest = ns["manifest"]
+        dedup_cid = ns.get("dedup_cid") or ctx.save_dir_cid
         reason = None
         if not manifest.get("episodes") and self.store.saved_share(
                 ctx.parsed.share_code, ctx.save_dir_cid, provider_name):
             reason = "分享已转存到该目录"
         elif manifest.get("episodes") and ctx.parsed.title:
             work = ns.get("identity", {}).get("work") or works.of(ctx.parsed, ctx.meta.get("tmdb"))
-            stored = {tuple(pair) for pair in self.store.stored_episode_pairs(work, ctx.save_dir_cid, provider_name)}
+            stored = {tuple(pair) for pair in self.store.stored_episode_pairs(work, dedup_cid, provider_name)}
             remaining = [f for f in manifest["files"] if (f.get("season"), f.get("episode")) not in stored]
             if not remaining:
                 reason = "分享内的集数均已由其他任务入库"
