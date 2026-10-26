@@ -137,11 +137,11 @@ class SubscriptionDecision(DefaultDecision):
         if floor is not None and any(ep < floor for ep in episodes):
             ctx.log(f"订阅《{item['title']}》：仅从 E{floor} 起自动接收，旧集不自动放行")
             return decision
-        if episodes:
-            have = works.episodes(runtime.services().stored_series(), works.of(p, ctx.meta.get("tmdb")), season)
-            if episodes <= have:
-                ctx.log(f"订阅《{item['title']}》：消息里的集都已入库，仍交给你确认")
-                return decision
+        # Do not reject a subscriber's episode using the GLOBAL stored-series
+        # list: E106 on 115 does not prove E106 exists on the target Aliyun
+        # account. The storage pipeline checks the actual provider/drive and
+        # existing cloud files immediately before any copy; duplicates are
+        # skipped there, without flooding the manual approval inbox.
         record = ctx.ns("subscription")
         record.update(title=item["title"], season=season, tmdbid=item["tmdbid"])
         # The share itself may contain an entire old season. Restrict
