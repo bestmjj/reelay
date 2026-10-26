@@ -13,6 +13,14 @@ class ActionPayload(BaseModel):
     conflict: Literal["skip", "replace"] | None = None  # 重新整理时处理文件冲突
 
 
+class QuarantineWrongCopyPayload(BaseModel):
+    reason: str = Field(min_length=5, max_length=400)
+
+
+class ResolveWrongCopyPayload(BaseModel):
+    confirmation: str
+
+
 class ShareFolderPayload(BaseModel):
     folder_id: str = Field(min_length=1, max_length=128)
     remember: bool = True
@@ -49,6 +57,18 @@ def router(service) -> APIRouter:
     @api.get("/api/tasks/{task_id}")
     async def task_detail(task_id: str):
         return service.get_task(task_id)
+
+    @api.get("/api/tasks/{task_id}/source-audit")
+    async def transfer_source_audit(task_id: str):
+        return service.transfer_source_audit(task_id)
+
+    @api.post("/api/tasks/{task_id}/quarantine-wrong-copy")
+    async def quarantine_wrong_copy(task_id: str, payload: QuarantineWrongCopyPayload):
+        return service.quarantine_wrong_source(task_id, payload.reason)
+
+    @api.post("/api/tasks/{task_id}/resolve-wrong-copy")
+    async def resolve_wrong_copy(task_id: str, payload: ResolveWrongCopyPayload):
+        return service.resolve_quarantine(task_id, payload.confirmation)
 
     @api.get("/api/tasks/{task_id}/share-folders")
     async def task_share_folders(task_id: str):
