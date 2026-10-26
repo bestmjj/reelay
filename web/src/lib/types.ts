@@ -65,7 +65,7 @@ export interface IDashboard {
  *  dismiss 是忽略失败或待人工的任务，subscribe 是订阅这部剧这一季。 */
 export type TaskActionName =
   | 'approve' | 'reject' | 'retry' | 'reparse' | 'correct' | 'reorganize' | 'resolve_conflict'
-  | 'reconcile' | 'accept_partial' | 'abandon' | 'dismiss' | 'subscribe';
+  | 'reconcile' | 'accept_partial' | 'abandon' | 'dismiss' | 'subscribe' | 'choose_share_folder';
 
 export interface IAlert {
   key: string;
