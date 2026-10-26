@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils';
 /** 选中的目录；path 是从根目录起的路径，如「影视 / 剧集」。 */
 export type PickedDir = Crumb & { path: string };
 
-/** 选择 115 目录的弹窗；打开时才挂载（见 BasicTab），从 initialCid 开始浏览。 */
+/** 选择 网盘目录的弹窗；打开时才挂载（见 BasicTab），从 initialCid 开始浏览。 */
 export default function DirectoryPicker({ open, initialCid = '0', initialName = '根目录', onOpenChange, onSelect }:
   { open: boolean; initialCid?: string; initialName?: string; onOpenChange: (open: boolean) => void; onSelect: (dir: PickedDir) => void }) {
   const dir = useDirListing({
@@ -25,7 +25,7 @@ export default function DirectoryPicker({ open, initialCid = '0', initialName = 
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent className="flex max-h-[85vh] max-w-xl flex-col gap-0 overflow-hidden p-0">
       <DialogHeader className="space-y-1 px-5 pb-3 pr-12 pt-5 text-left">
-        <DialogTitle className="text-base">选择 115 目录</DialogTitle>
+        <DialogTitle className="text-base">选择 网盘目录</DialogTitle>
         <DialogDescription className="text-xs">逐级进入目录后选择当前位置；不会创建、移动或删除网盘内容。</DialogDescription>
       </DialogHeader>
 
