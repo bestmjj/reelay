@@ -13,7 +13,6 @@ from collections import deque
 from typing import Callable
 
 from .media import RESOLUTION_LABELS, episode_of, is_video, resolution_rank, season_of, strip_ext
-from ..plugins.organizer import guess_from_names
 
 MAX_FOLDERS = 80
 MAX_VIDEOS = 2000
@@ -42,6 +41,9 @@ def _target(alias: str, reference: str, config: dict) -> tuple[str, str]:
 
 
 def _best_title(name: str, parents: tuple[str, ...]) -> str:
+    # Import lazily: core catalog queries must not trigger plugin registration.
+    from ..plugins.organizer import guess_from_names
+
     guessed = (guess_from_names([name]).get("title") or "").strip()
     # Episode-only or very generic filenames need their show folder for identity.
     if not guessed or _GENERIC.fullmatch(guessed):
