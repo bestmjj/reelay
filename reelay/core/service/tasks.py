@@ -66,11 +66,72 @@ class TaskOpsMixin(ServiceBase):
                     out.append("resolve_conflict")
         if state in (TaskState.FAILED, TaskState.NEED_MANUAL) and not unknown_transfer and not storage.get("landed"):
             out.append("dismiss")
+        if (state in (TaskState.PENDING_APPROVAL, TaskState.FAILED, TaskState.NEED_MANUAL)
+                and ctx.parsed and ctx.parsed.share_code
+                and not storage.get("manifest") and not storage.get("landed")):
+            out.append("choose_share_folder")
         if state not in _BUSY and not storage.get("manifest") and not storage.get("landed"):
             out.append("reparse")
         if messages.correctable(ctx):
             out.append("correct")
         return out
+
+    def _selectable_share_task(self, task_id: str) -> tuple[PipelineContext, str]:
+        ctx = self._require_context(task_id)
+        if "choose_share_folder" not in self.task_actions(ctx):
+            raise ConflictError("只有尚未发起转存的待审或失败任务可以选择分享版本")
+        provider = ctx.source_rule.get("storage") or self.pipeline.cfg["defaults"].get("storage", "p115")
+        if provider not in ("p115", "aliyun"):
+            raise ValueError("该转存网盘不支持分享版本选择")
+        expected = (ctx.parsed.raw_fields or {}).get("share_provider")
+        if expected == "aliyun" and provider != "aliyun":
+            raise ValueError("分享属于阿里云盘，但转存 Provider 配置不符")
+        if expected == "p115" and provider != "p115":
+            raise ValueError("分享属于 115 网盘，但转存 Provider 配置不符")
+        return ctx, provider
+
+    def share_folders(self, task_id: str) -> dict[str, Any]:
+        """Read-only per-share folder preview; no side-effect or AI selection."""
+        ctx, provider = self._selectable_share_task(task_id)
+        storage = self.pipeline.reg.get_provider("storage", provider)
+        if not storage.ready():
+            raise ConflictError("网盘没有登录，无法读取分享文件列表")
+        with self.pipeline.scope(ctx):
+            folders = storage.share_folder_choices(ctx.parsed)
+        if not folders:
+            raise ValueError("分享中找不到可选择的视频文件夹")
+        key = f"{provider}:{ctx.parsed.share_code}"
+        preference = (self.store.state_get("share_folder_preferences", "items", {}) or {}).get(key)
+        selected = ctx.ns("share_selection").get("folder_id") or (preference or {}).get("folder_id")
+        return {"folders": folders, "selected_folder_id": selected,
+                "saved_preference": bool(preference), "provider": provider}
+
+    def choose_share_folder(self, task_id: str, folder_id: str, *, remember: bool = True) -> dict[str, Any]:
+        """Explicit user selection of a verified share branch, never a drive CID.
+
+        Folder names are informational. The actual transfer filter is an
+        immutable folder ID from a freshly enumerated share listing.
+        """
+        ctx, provider = self._selectable_share_task(task_id)
+        if not folder_id or len(folder_id) > 128:
+            raise ValueError("文件夹 ID 无效")
+        preview = self.share_folders(task_id)
+        folder = next((entry for entry in preview["folders"] if entry["folder_id"] == folder_id), None)
+        if folder is None:
+            raise ConflictError("分享目录已改变或不存在，请重新读取后选择")
+        if folder["count"] <= 0:
+            raise ValueError("这个版本文件夹中没有可转存视频")
+        previous = ctx.state
+        ctx.ns("share_selection").update(folder_id=folder_id, path=folder["path"],
+                                         provider=provider, share_code=ctx.parsed.share_code)
+        ctx.log(f"人工选择分享版本「{folder['path']}」，只从所选文件夹取文件；其他版本不参与转存")
+        self._update(ctx, expected=previous)
+        if remember:
+            key = f"{provider}:{ctx.parsed.share_code}"
+            choices = self.store.state_get("share_folder_preferences", "items", {}) or {}
+            choices[key] = {"folder_id": folder_id, "path": folder["path"]}
+            self.store.state_set("share_folder_preferences", "items", choices)
+        return self.share_folders(task_id)
 
     async def bulk(self, action: str, task_ids: list[str], *, save_dir_alias: str | None = None) -> list[dict[str, Any]]:
         """逐条批准 / 忽略 / 重试 / 重新识别，一条失败不影响其余（管理台、控制 Bot 与 MCP 共用）。
