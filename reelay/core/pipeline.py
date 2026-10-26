@@ -425,7 +425,7 @@ class Pipeline:
         if alias not in self.save_dirs:
             raise ValueError(f"目标目录别名不存在：{alias}")
         cid = str(self.save_dirs[alias])
-        if not cid.isdecimal():
+        if not (cid.isdecimal() or ((ctx.source_rule.get("storage") or self.cfg["defaults"]["storage"]) == "aliyun" and cid.isascii() and cid.replace("_", "").replace("-", "").isalnum())):
             raise ValueError(f"目标目录 CID 无效：{alias}")
         ctx.save_dir_alias, ctx.save_dir_cid = alias, cid
 
@@ -779,7 +779,7 @@ class Pipeline:
         ns = ctx.ns("storage")
         if not exc.permanent:
             ns["phase"] = "ready"
-            await self._fail(ctx, f"115 拒绝转存：{exc}，稍后重试", retry_from=TaskState.QUEUED)
+            await self._fail(ctx, f"网盘拒绝转存：{exc}，稍后重试", retry_from=TaskState.QUEUED)
             return
         if hasattr(storage, "discard"):
             try:
