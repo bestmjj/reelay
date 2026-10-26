@@ -60,8 +60,12 @@ class SourceMixin(ServiceBase):
             "decision", ctx.source_rule.get("decision", cfg["defaults"]["decision"]))
         with self.pipeline.scope(ctx):
             decision = await decider.decide(ctx)
+        share_provider = (ctx.parsed.raw_fields.get("share_provider") if ctx.parsed else None)
+        target_storage = ctx.source_rule.get("storage") or cfg["defaults"]["storage"]
         return {"parsed": ctx.parsed.__dict__ if ctx.parsed else None,
                 "decision": getattr(decision, "value", str(decision)),
+                "routing": {"share_provider": share_provider, "target_storage": target_storage,
+                            "compatible": share_provider in (None, target_storage)},
                 "confidence": ctx.meta.get("confidence"), "trail": ctx.trail}
 
     async def draft_source(self, bot: str, samples: list[str]) -> dict[str, Any]:
