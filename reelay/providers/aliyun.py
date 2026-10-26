@@ -51,20 +51,17 @@ def _item(data: dict) -> dict:
 
 
 def _resource_drive_id(payload: dict) -> str:
-    """Choose the non-backup (resource/data) drive; never silently use backup.
+    """Use only resource_drive_id; never infer it from default_drive_id.
 
-    Some older accounts only expose default_drive_id. Accept that legacy ID
-    only when it is not explicitly identified as the backup drive.
+    Modern accounts may set default_drive_id to the *backup* drive, even when
+    backup_drive_id is omitted. A successful credential refresh therefore does
+    not prove the default drive is safe for media storage.
     """
     resource = payload.get("resource_drive_id")
     if isinstance(resource, str) and resource.strip():
-        return resource
-    default = payload.get("default_drive_id")
-    backup = payload.get("backup_drive_id")
-    if isinstance(default, str) and default.strip() and (not backup or default != backup):
-        return default
+        return resource.strip()
     raise ValueError(
-        "阿里云盘未返回资源库（数据盘）ID，拒绝自动使用备份盘；请核实账号盘位"
+        "阿里云盘未返回资源库（数据盘）ID，拒绝自动使用备份盘；请确认账号存在资源库"
     )
 
 
