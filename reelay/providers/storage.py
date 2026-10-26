@@ -69,42 +69,85 @@ def _movie_choice_problem(videos: list[dict], chosen: str, parsed) -> str | None
     return None
 
 
-def share_folder_choices(video_items: list[dict]) -> list[dict]:
-    """Group a read-only share inventory by its immutable top-level folder ID.
+# A virtual choice for ONLY video files located directly in the share root.
+# Selecting the root must never include unrelated nested movie folders.
+SHARE_ROOT_DIRECT = "__share_root_direct__"
 
-    Paths are display-only: we never use folder names to authorize a transfer.
+
+def _share_file_ancestors(item: dict) -> list[str]:
+    """Immutable source folder ancestry, outermost to immediate parent."""
+    ids = item.get("share_ancestor_ids")
+    if isinstance(ids, list):
+        return [str(value) for value in ids]
+    parent = str(item.get("share_folder_id") or "root")
+    return [] if parent == "root" else [parent]
+
+
+def share_folder_choices(video_items: list[dict]) -> list[dict]:
+    """Complete folder tree instead of grouping everything under top-level wrapper.
+
+    Folder rows with count=0 are visible but not selectable. Every folder can
+    include its descendants, while the virtual root-direct choice contains
+    only files directly in the share root. The provider must fully paginate
+    every traversed directory or raise, never return a partial successful list.
     """
     buckets: dict[str, dict] = {}
-    for item in video_items:
-        if not is_video(item.get("name", "")) or is_extra(item.get("name", "")):
-            continue
-        branch = str(item.get("share_folder_id") or "root")
-        path = str(item.get("share_path") or "")
-        entry = buckets.setdefault(branch, {
-            "folder_id": branch, "path": path or "分享根目录", "count": 0,
+
+    def add(cid: str, path: str) -> dict:
+        entry = buckets.setdefault(cid, {
+            "folder_id": cid, "path": path or "分享根目录（仅当前层）",
+            "count": 0, "direct_count": 0,
             "episodes": set(), "unrecognized": 0,
         })
-        entry["count"] += 1
-        season, episode = episode_of(item["name"])
-        season = season if season is not None else season_of(path) or 1
-        if episode is None:
-            entry["unrecognized"] += 1
-        else:
-            entry["episodes"].add((season, episode))
+        if path and entry["path"] != path:
+            raise NeedsManual("分享文件夹 ID 的目录路径不一致，不能安全选择")
+        return entry
+
+    for item in video_items:
+        if item.get("is_dir"):
+            folder_id = str(item.get("id") or "")
+            if folder_id:
+                add(folder_id, str(item.get("share_path") or item.get("name") or ""))
+            continue
+        name = item.get("name", "")
+        if not is_video(name) or is_extra(name):
+            continue
+        ancestors = _share_file_ancestors(item)
+        segments = [p for p in str(item.get("share_path") or "").split("/") if p]
+        if ancestors and len(ancestors) != len(segments):
+            # Mock/legacy clients may only supply top folder ID and a full
+            # display path. Use the full path to display that exact choice.
+            segments = [str(item.get("share_path") or "")]
+        ids = ancestors if ancestors else [SHARE_ROOT_DIRECT]
+        season, ep = episode_of(name)
+        if season is None:
+            season = season_of(item.get("share_path") or "") or 1
+        for i, cid in enumerate(ids):
+            path = "/".join(segments[:i + 1]) if ancestors else ""
+            entry = add(cid, path)
+            entry["count"] += 1
+            if i == len(ids) - 1:
+                entry["direct_count"] += 1
+            if ep is None:
+                entry["unrecognized"] += 1
+            else:
+                entry["episodes"].add((season, ep))
     result = []
     for entry in buckets.values():
-        result.append({**entry, "episodes": [list(pair) for pair in sorted(entry["episodes"])]})
+        result.append({**entry,
+                       "episodes": [list(pair) for pair in sorted(entry["episodes"])],
+                       "selectable": entry["count"] > 0})
     return sorted(result, key=lambda entry: entry["path"].casefold())
 
 
 def _overlapping_share_versions(video_items: list[dict], parsed) -> list[str]:
-    """Find versions of the same episode in DIFFERENT top-level folders."""
+    """Identify same season/episode in distinct actual source folders."""
     candidates = [x for x in video_items if is_video(x.get("name", "")) and not is_extra(x.get("name", ""))]
     folders = share_folder_choices(candidates)
     if len(folders) <= 1:
         return []
     if parsed.media_type == "movie" and not parsed.episodes:
-        return [x["path"] for x in folders]
+        return list(dict.fromkeys(x.get("share_path") or "分享根目录" for x in candidates))
     seen: dict[tuple[int, int], str] = {}
     overlap: set[str] = set()
     for item in candidates:
@@ -112,13 +155,17 @@ def _overlapping_share_versions(video_items: list[dict], parsed) -> list[str]:
         if ep is None:
             continue
         season = season if season is not None else season_of(item.get("share_path") or "") or parsed.season or 1
-        top = str(item.get("share_folder_id") or "root")
+        # Only the immediate source folder can establish a version boundary.
+        parent = str(item.get("share_folder_id") or "root")
         old = seen.get((season, ep))
-        if old is not None and old != top:
-            overlap.update((old, top))
+        if old is not None and old != parent:
+            overlap.update((old, parent))
         else:
-            seen[(season, ep)] = top
-    return [entry["path"] for entry in folders if entry["folder_id"] in overlap]
+            seen[(season, ep)] = parent
+    return list(dict.fromkeys(
+        item.get("share_path") or "分享根目录"
+        for item in candidates if str(item.get("share_folder_id") or "root") in overlap
+    ))
 
 
 def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: str = 'share',
@@ -143,17 +190,37 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         chosen = next((choice for choice in candidates if choice["folder_id"] == str(share_folder_id)), None)
         if chosen is None:
             raise NeedsManual("选中的分享版本文件夹已不存在或没有视频，请重新选择；禁止自动切换到其他版本")
-        if (share_folder_path and
-                chosen["path"].split("/", 1)[0] != share_folder_path.split("/", 1)[0]):
+        if share_folder_path and chosen["path"] != share_folder_path:
             raise NeedsManual("选中的分享版本文件夹名称已改变，请重新确认，禁止自动使用另一种 HDR 版本")
         video_items = [x for x in video_items
-                       if str(x.get("share_folder_id") or "root") == str(share_folder_id)]
+                       if (str(share_folder_id) in _share_file_ancestors(x)
+                           if str(share_folder_id) != SHARE_ROOT_DIRECT
+                           else not _share_file_ancestors(x))]
+        # A wrapper directory containing *both* HDR/DV versions is not a
+        # choice of version. Require selecting a more specific child folder.
+        if _overlapping_share_versions(video_items, parsed):
+            raise NeedsManual("选中的文件夹内部还有同集不同版本，请选择更具体的版本子文件夹")
     else:
         multiple = _overlapping_share_versions(video_items, parsed)
         if multiple:
             raise NeedsManual("分享包含多个版本文件夹（" + "、".join(multiple[:4])
                               + "），同一集有不同来源；请在任务详情选择一个分享版本")
-    videos = [x for x in video_items if not is_extra(x.get('name', ''))]
+    # A share containing a correctly labelled E247 at the root AND an
+    # unrelated video named 4K.mp4 in another folder must never let AI
+    # invent E247 for that unrelated file. Require an explicit source folder.
+    if share_folder_id is None:
+        candidates = [x for x in video_items if is_video(x.get("name", ""))
+                      and not is_extra(x.get("name", ""))]
+        identified = [x for x in candidates if episode_of(x.get("name", ""))[1] is not None]
+        unknown = [x for x in candidates if episode_of(x.get("name", ""))[1] is None]
+        if episodic and identified and unknown and any(
+                str(a.get("share_folder_id") or "root")
+                != str(b.get("share_folder_id") or "root")
+                for a in identified for b in unknown):
+            raise NeedsManual("分享不同目录混有明确集号与无集号视频，"
+                              "请先选择目标文件夹，禁止 AI 猜测集号后误转存")
+    videos = [x for x in video_items if is_video(x.get("name", ""))
+              and not is_extra(x.get('name', ''))]
     if not videos and not episodic:
         # 原盘、合集的文件名常列出附带内容（如「花絮中字」）：分享里总有正片，按文件名全像花絮时改按大小判断
         videos = [x for x in video_items if type(x.get('size')) is int and x['size'] >= MOVIE_MIN_SIZE]
@@ -191,6 +258,10 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         if file_season is None:
             file_season = folder_season
         if name in hints.get('episodes', {}):
+            if ep is None:
+                raise NeedsManual(
+                    f"文件「{name}」没有可核验的集号，"
+                    "AI 不能根据消息集号将其冒认成目标视频，请选择正确的分享文件夹")
             hint_season, hint_ep = hints['episodes'][name]
             if ep is not None and ep != hint_ep:
                 raise NeedsManual(f'方案的集号与文件名不一致：{name}')
@@ -464,7 +535,8 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
             return self._select(ctx, listing)
         except NeedsManual as exc:
             if str(exc).startswith(("分享包含多个版本文件夹", "选中的分享版本文件夹",
-                                    "选中版本缺少")):
+                                    "选中版本缺少", "分享不同目录混有",
+                                    "选中的文件夹内部还有")):
                 raise  # Folder selection must be explicit; AI cannot bypass it.
             if self._client is None or not runtime.get('ai.assist', True):
                 raise
