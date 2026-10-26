@@ -221,87 +221,91 @@ class TelegramUserbotSource:
     async def discover_subscriptions(self, emit: EmitFn, active: list[dict],
                                      load: Callable[[str, str, dict], dict],
                                      save: Callable[[str, str, dict], None]) -> dict:
-        """Proactively query missing recent posts for subscribed shows.
+        """Search only the subscribed titles in the existing authorized sources.
 
-        Telethon's built-in server-side 'search' only accesses channels this
-        personal Telegram session can already read; no external scraper. The
-        regular pipeline still enforces TMDB, subscription, rules and dedup.
-        Every query has a persisted per-source/per-show cooldown to avoid
-        repeatedly searching after daemon restarts or encountering FloodWait.
+        Cooldowns, global FloodWait and per-subscription search state are stored
+        in SQLite by the caller. Oldest-unchecked targets run first, so adding
+        several channels won't starve later subscriptions indefinitely.
         """
         if not self._authorized or not self._client or not self._client.is_connected():
             return {"status": "disconnected", "queries": 0, "candidates": 0}
-        queries, candidates, failed = 0, 0, 0
         now = time.time()
+        global_state = load(discovery.NAMESPACE, "__global__", {}) or {}
+        if now < float(global_state.get("next_at") or 0):
+            return {"status": "rate_limited", "queries": 0, "candidates": 0}
+        pending = []
+        failed = 0
         for target in list(self._targets):
-            if queries >= discovery.MAX_QUERIES_PER_CYCLE:
-                break
             try:
                 entity = await self._client.get_entity(
                     int(target) if target.lstrip("-").isdigit() else target)
-            except Exception as exc:  # noqa: BLE001 - misconfigured source, other sources can continue
-                log.warning("主动追剧：无法访问已配置来源 %s (%s)", target, type(exc).__name__)
+            except Exception as exc:  # noqa: BLE001 - one inaccessible channel doesn't block others
                 failed += 1
+                log.warning("主动追剧：无法访问来源 %s (%s)", target, type(exc).__name__)
                 continue
             source = _entity_name(entity)
             for sub in active:
-                if queries >= discovery.MAX_QUERIES_PER_CYCLE or not self._authorized:
-                    break
                 if not sub.get("auto") or sub.get("finished") or not sub.get("title"):
                     continue
                 key = discovery.state_key(target, sub)
                 state = load(discovery.NAMESPACE, key, {}) or {}
-                if not discovery.due(state, now):
-                    continue
-                queries += 1
-                count = 0
-                earliest = discovery.cutoff(state, now)
-                try:
-                    async for msg in self._client.iter_messages(
-                            entity, search=sub["title"], limit=discovery.SEARCH_LIMIT):
-                        date = getattr(msg, "date", None)
-                        if date is None:
-                            continue
-                        if date.timestamp() < earliest:
-                            break
-                        if count >= discovery.MAX_CANDIDATES_PER_SHOW:
-                            break
-                        if getattr(msg, "action", None):
-                            continue
-                        text = getattr(msg, "raw_text", None) or ""
-                        if not discovery.contains_title(text, sub["title"]):
-                            continue
-                        urls = _extract_urls(msg)
-                        # No share link => no actionable new episode; avoids
-                        # flooding approval with discussion/announcement posts.
-                        from ..core.parse_rules import parse_share_url
-                        if not parse_share_url(text, urls)[0]:
-                            continue
-                        await emit(RawMessage(
-                            source=source, msg_id=str(msg.id), text=text, urls=urls,
-                            extra={"backfill": True, "discovery": True}))
-                        count += 1
-                    save(discovery.NAMESPACE, key, {
-                        "source": source, "checked_at": time.time(), "next_at": 0,
-                        "matches": count, "emitted": count, "error": None,
-                    })
-                    candidates += count
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - preserve cursor on any incomplete search
-                    failed += 1
-                    flood = getattr(exc, "seconds", None)
-                    wait = min(max(int(flood), 60), 86400) if isinstance(flood, (int, float)) else 300
-                    save(discovery.NAMESPACE, key, {
-                        **state, "source": source, "next_at": time.time() + wait,
-                        "error": f"Telegram {type(exc).__name__}，稍后自动重试",
-                    })
-                    log.warning("主动追剧：%s 《%s》搜索未完成（%s），延迟 %ds",
-                                source, sub["title"], type(exc).__name__, wait)
-                    if isinstance(flood, (int, float)):
-                        return {"status": "rate_limited", "queries": queries,
-                                "candidates": candidates, "failed": failed}
-                await asyncio.sleep(discovery.QUERY_DELAY_SEC)
+                if discovery.due(state, now):
+                    pending.append((float(state.get("checked_at") or 0), key, source, entity, sub, state))
+        pending.sort(key=lambda row: row[0])
+        queries, candidates = 0, 0
+        for _, key, source, entity, sub, state in pending[:discovery.MAX_QUERIES_PER_CYCLE]:
+            if not self._authorized or not self._client.is_connected():
+                break
+            queries += 1
+            count = 0
+            earliest = discovery.cutoff(state, now)
+            try:
+                async for msg in self._client.iter_messages(
+                        entity, search=sub["title"], limit=discovery.SEARCH_LIMIT):
+                    date = getattr(msg, "date", None)
+                    if date is None:
+                        continue
+                    if date.timestamp() < earliest:
+                        break
+                    if count >= discovery.MAX_CANDIDATES_PER_SHOW:
+                        break
+                    if getattr(msg, "action", None):
+                        continue
+                    text = getattr(msg, "raw_text", None) or ""
+                    if not discovery.contains_title(text, sub["title"]):
+                        continue
+                    urls = _extract_urls(msg)
+                    from ..core.parse_rules import parse_share_url
+                    if not parse_share_url(text, urls)[0]:
+                        continue
+                    # Don't bypass existing message, content and share dedup.
+                    await emit(RawMessage(
+                        source=source, msg_id=str(msg.id), text=text, urls=urls,
+                        extra={"backfill": True, "discovery": True}))
+                    count += 1
+                save(discovery.NAMESPACE, key, {
+                    "source": source, "checked_at": time.time(), "next_at": 0,
+                    "matches": count, "emitted": count, "error": None,
+                })
+                candidates += count
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - unknown outcome must not advance this cursor
+                failed += 1
+                seconds = getattr(exc, "seconds", None)
+                flood = isinstance(seconds, (int, float))
+                wait = min(max(int(seconds), 60), 86400) if flood else 300
+                save(discovery.NAMESPACE, key, {
+                    **state, "source": source, "next_at": time.time() + wait,
+                    "error": f"Telegram {type(exc).__name__}，稍后自动重试",
+                })
+                log.warning("主动追剧：%s 《%s》检索失败（%s），延迟 %ds",
+                            source, sub["title"], type(exc).__name__, wait)
+                if flood:
+                    save(discovery.NAMESPACE, "__global__", {"next_at": time.time() + wait})
+                    return {"status": "rate_limited", "queries": queries,
+                            "candidates": candidates, "failed": failed}
+            await asyncio.sleep(discovery.QUERY_DELAY_SEC)
         return {"status": "partial" if failed else "ok", "queries": queries,
                 "candidates": candidates, "failed": failed}
 
