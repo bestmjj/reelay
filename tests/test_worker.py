@@ -62,6 +62,30 @@ class TestWorkerBackoffAndAuthPause(PipelineCase):
         self.assertIsNone(worker.storage_paused)
         self.assertEqual(self.store.active_alerts(), [])
 
+    async def test_aliyun_source_does_not_require_115_credentials(self):
+        # Default provider stays 115 for backward compatibility; an explicit
+        # Aliyun source must not be blocked by a missing 115 cookie.
+        from reelay.core import auth115
+        cfg = {"save_dirs": {"默认": "0"},
+               "sources": [{"bot": "@shareAliyun", "storage": "aliyun"}]}
+        worker = Worker(self.pipeline(cfg=cfg), self.store)
+        self.assertEqual(worker._used_storages(), {"aliyun"})
+        credentials = auth115.CredentialStore()
+        with patch.object(auth115, "get_store", lambda: credentials):
+            await worker.check_auth()
+        self.assertIsNone(worker.storage_paused)
+        self.assertEqual(self.store.active_alerts(), [])
+
+    async def test_115_pause_only_blocks_115_tasks(self):
+        worker = self.worker("not used")
+        worker.pause_storage("115 cookie 未配置")
+        aliyun = self.queued()
+        aliyun.source_rule = {"storage": "aliyun"}
+        self.store.save_task(aliyun)
+        self.assertFalse(worker._blocked_for(aliyun))
+        p115 = self.queued()
+        self.assertTrue(worker._blocked_for(p115))
+
     async def test_deterministic_failures_are_not_auto_retried(self):
         worker = self.worker("x")
         ctx = self.queued()
