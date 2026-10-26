@@ -82,6 +82,13 @@ function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart }: {
             {item.aired ? ` · TMDB 已播 ${item.aired} 集` : ''}
           </>}
         </p>
+        {!finished && item.observed?.length ? (
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            网盘索引可能已有 {item.observed.length} 集（{compactEpisodes(item.observed)}）。
+            这些不是 Reelay 已转存记录，转存前会重新核验真实文件。
+            {!item.scan_complete ? ' 扫描尚未完整。' : ''}
+          </p>
+        ) : null}
         {!finished && item.start_episode !== null ? (
           <p className="mt-0.5 text-xs text-primary">仅从 E{item.start_episode} 起自动转存（含本集）</p>
         ) : null}
