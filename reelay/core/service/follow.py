@@ -47,7 +47,8 @@ class FollowMixin(ServiceBase):
         deciders = self.pipeline.reg.providers.get("decision", {})
         inactive = [s["bot"] for s in cfg["sources"]
                     if not getattr(deciders.get({**cfg["defaults"], **s}.get("decision")), "releases_subscriptions", False)]
-        return {"items": items, "suggestions": self.subscription_suggestions(subs), "inactive": inactive}
+        return {"items": items, "suggestions": self.subscription_suggestions(subs),
+                "inactive": inactive, "save_dirs": cfg["save_dirs"]}
 
     def find_subscription(self, item: dict[str, Any]) -> dict[str, Any]:
         """按 id，或片名、季与 tmdbid 找到一条订阅；没有时抛 NotFoundError。"""
@@ -175,6 +176,8 @@ class FollowMixin(ServiceBase):
     async def add_subscription(self, item: dict[str, Any]) -> dict[str, Any]:
         """新增订阅；同时返回待审批里属于这部剧这一季的任务，供用户一并批准。"""
         entry = subscriptions.normalize(item)
+        if entry["save_to"] and entry["save_to"] not in self.get_config()["save_dirs"]:
+            raise ValueError(f"订阅指定的保存目录「{entry['save_to']}」不存在")
         record = self.store.add_subscription(subscriptions.key(entry), entry)
         if record is None:
             raise ConflictError(f"已经订阅过《{entry['title']}》第 {entry['season']} 季")
@@ -208,6 +211,18 @@ class FollowMixin(ServiceBase):
             except Exception:  # noqa: BLE001 - 总集数只用于缺集提醒，拿不到不影响订阅
                 pass
         return await self.add_subscription(item)
+
+    def set_subscription_destination(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Set or clear a per-season folder alias without changing existing queued tasks."""
+        found = self.find_subscription(item)
+        alias = item.get("save_to")
+        if alias is not None and (type(alias) is not str or not alias.strip() or alias != alias.strip()):
+            raise ValueError("保存目录必须是已有的目录别名，或 null（按来源自动保存）")
+        if alias and alias not in self.get_config()["save_dirs"]:
+            raise ValueError(f"保存目录「{alias}」不存在")
+        if not self.store.set_subscription_destination(found["id"], alias):
+            raise NotFoundError("这条订阅已经不存在")
+        return self.store.subscription(found["id"])
 
     def reopen_subscription(self, item: dict[str, Any]) -> None:
         """已完结的订阅继续订阅：恢复自动放行与缺集巡检（如出了特别篇、补了集）。"""
