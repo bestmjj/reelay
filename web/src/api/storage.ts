@@ -82,7 +82,7 @@ export const storageApi = {
     put<{ ok: boolean; status: IAuthAliyunStatus }>('authaliyun/token', { refresh_token }),
   authAliyunClearToken: () => del<{ ok: boolean; status: IAuthAliyunStatus }>('authaliyun/token'),
   authAliyunQrStart: () => post<IAliyunQrStart>('authaliyun/qr'),
-  authAliyunQrStatus: (uid: string) => get<IAliyunQrStatus>(`authaliyun/qr${query({ uid })}`),
+  authAliyunQrStatus: (uid: string) => post<IAliyunQrStatus>('authaliyun/qr/status', { uid }),
   authAliyunQrImageUrl: (uid: string) => apiUrl(`authaliyun/qr/image${query({ uid })}`),
   authAliyunQrCancel: (uid: string) => del<{ ok: boolean }>(`authaliyun/qr${query({ uid })}`),
 };
