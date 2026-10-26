@@ -22,7 +22,7 @@ export interface ITitleGroup {
   files: string[];
   updated_at: number;
   /** 只读扫描的文件不代表 Reelay 已完成转存。 */
-  origin?: 'scanned';
+  origin?: 'verified' | 'scanned' | 'combined';
   provider?: 'p115' | 'aliyun';
   file_count?: number;
 }
@@ -50,5 +50,8 @@ export const libraryApi = {
     get<ILibraryResp>(`library${query({ q, media_type: mediaType, save_dir_alias: saveDirAlias })}`),
   scanned: (q?: string, mediaType?: string, saveDirAlias?: string) =>
     get<ILibraryScanResp>(`library/scan${query({ q, media_type: mediaType, save_dir_alias: saveDirAlias })}`),
+  /** Single UI listing; legacy transfer and scan endpoints remain independent. */
+  overview: (q?: string, mediaType?: string, saveDirAlias?: string) =>
+    get<ILibraryScanResp>(`library/overview${query({ q, media_type: mediaType, save_dir_alias: saveDirAlias })}`),
   scan: () => post<ILibraryScanResp>('library/scan'),
 };
