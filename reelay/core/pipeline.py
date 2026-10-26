@@ -521,6 +521,17 @@ class Pipeline:
                     await self._fail(ctx, "当前更新早于订阅起始集号，禁止自动补收历史合集",
                                      retry_from=TaskState.QUEUED, auto_retry=False)
                     return
+            if ctx.parsed.title:
+                held = self.store.blocked_episode_pairs(
+                    works.of(ctx.parsed, ctx.meta.get("tmdb")), provider_name)
+                ns["blocked_episodes"] = held
+                blocked = set(map(tuple, held)) & set(ctx.episode_pairs())
+                if blocked:
+                    episodes = "、".join(f"E{ep:03d}" for _, ep in sorted(blocked))
+                    await self._fail(
+                        ctx, f"{episodes} 的历史入库被人工标记为错片；请核验云盘原文件并解除隔离后再转存",
+                        retry_from=TaskState.QUEUED, auto_retry=False)
+                    return
             if not await self.run_hooks("before_save", ctx):
                 ctx.state = TaskState.SKIPPED
                 self.store.save_task(ctx)
@@ -652,6 +663,7 @@ class Pipeline:
             finally:
                 ns.pop("stored_episodes", None)
                 ns.pop("stored_variety_parts", None)
+                ns.pop("blocked_episodes", None)
             self._adopt_manifest(ctx, manifest)
             ns["manifest"] = manifest
             ns["phase"] = "ready"
