@@ -1,6 +1,6 @@
 import {
   ArrowRight, Check, ChevronRight, CircleAlert, Copy, File, FileVideo, Folder,
-  FolderOpen, FolderPlus, Hash, House, Pencil, RefreshCw,
+  FolderInput, FolderOpen, FolderPlus, Hash, House, Pencil, RefreshCw,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
@@ -68,9 +68,11 @@ export default function StoragePage() {
   const [provider, setProvider] = useState<CloudProvider>(() =>
     localStorage.getItem(STORAGE_KEY) === 'aliyun' ? 'aliyun' : 'p115');
   const dir = useDirListing(undefined, provider, true);
+  const destination = useDirListing(undefined, provider);
   const [manualCid, setManualCid] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [edit, setEdit] = useState<Edit | null>(null);
+  const [moving, setMoving] = useState<Edit | null>(null);
   const [name, setName] = useState('');
   const [confirmExt, setConfirmExt] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -100,6 +102,7 @@ export default function StoragePage() {
     setProvider(selected);
     setManualCid('');
     setEdit(null);
+    setMoving(null);
     dir.open('0', []);
   };
 
@@ -135,6 +138,47 @@ export default function StoragePage() {
     setName(item.name);
     setConfirmExt(false);
     setEdit({ kind: 'rename', provider, cid: current, driveId: dir.driveId, item });
+  };
+
+  const startMove = (item: IDirItem) => {
+    if (!readyToWrite || item.is_dir) return;
+    setMoving({ kind: 'rename', provider, cid: current, driveId: dir.driveId, item });
+    destination.open(current, path);
+  };
+
+  const executeMove = async () => {
+    if (!moving || !moving.item || !destination.ready || saving) return;
+    if (moving.cid === destination.cid) {
+      toast.error('目标目录不能与来源相同');
+      return;
+    }
+    if (moving.provider === 'aliyun' && destination.driveId !== moving.driveId) {
+      toast.error('目标资源库与原网盘不一致，请重新选择');
+      return;
+    }
+    setSaving(true);
+    try {
+      await storageApi.moveFile({
+        provider: moving.provider,
+        cid: moving.cid,
+        fid: moving.item.id,
+        name: moving.item.name,
+        drive_id: moving.driveId,
+        destination_cid: destination.cid,
+      });
+      toast.success('文件已移动；请重新扫描「网盘已有文件」媒体库索引');
+      setMoving(null);
+      dir.reload();
+    } catch (e) {
+      toast.error(errorMessage(e, '移动文件失败'));
+      if (e instanceof ApiError && e.status === 502) {
+        setMoving(null);
+        dir.reload();
+        destination.reload();
+      }
+    } finally {
+      setSaving(false);
+    }
   };
 
   const extChanged = edit?.kind === 'rename' && edit.item?.is_dir === false &&
@@ -185,7 +229,7 @@ export default function StoragePage() {
   return (
     <Page
       title="网盘目录"
-      description="可选择 115 或阿里云盘资源库，浏览文件夹和文件。支持新建文件夹、重命名；不提供删除、移动或覆盖。"
+      description="分别管理 115 与阿里云盘的文件：新建目录、重命名、同网盘移动普通文件。禁止删除、跨盘移动及覆盖。" 
       actions={
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" className="bg-card" disabled={busy || saving} onClick={dir.reload}>
@@ -290,6 +334,14 @@ export default function StoragePage() {
                     className="grid size-9 shrink-0 place-items-center rounded-md text-muted-foreground transition hover:bg-card hover:text-foreground disabled:opacity-40">
                     <Pencil className="size-4" />
                   </button>
+                  {!folder ? (
+                    <button type="button" aria-label={'移动「' + item.name + '」到其他目录'}
+                      title="移动文件（同网盘，不删除）" disabled={!readyToWrite || saving}
+                      onClick={() => startMove(item)}
+                      className="grid size-9 shrink-0 place-items-center rounded-md text-muted-foreground transition hover:bg-card hover:text-foreground disabled:opacity-40">
+                      <FolderInput className="size-4" />
+                    </button>
+                  ) : null}
                   <button type="button" aria-label={'复制「' + item.name + '」的 ID'}
                     title="复制文件或目录 ID" onClick={() => copy(item.id)}
                     className="mr-1 grid size-9 shrink-0 place-items-center rounded-md text-muted-foreground transition hover:bg-card hover:text-foreground">
@@ -327,10 +379,61 @@ export default function StoragePage() {
         <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
           此处修改只作用于当前选择的网盘。保存目录别名仍在
           <Link to="/config" className="mx-0.5 font-medium text-primary hover:underline">设置</Link>
-          中配置。重命名已被任务引用的文件或目录，可能影响进行中的整理和恢复任务；
-          「网盘已有文件」媒体库索引需在改名后重新手动扫描。
+          中配置。重命名或移动已被任务引用的文件，可能影响正在运行的整理和恢复任务；
+          更改文件之后，需要到「媒体库」重新扫描已有文件，才能更新索引。
         </p>
       </div>
+
+      <Dialog open={moving !== null} onOpenChange={(open) => { if (!open && !saving) setMoving(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>移动文件 · {moving?.item?.name}</DialogTitle>
+            <DialogDescription>
+              只允许在同一个网盘内部移动普通文件。不会删除原文件、覆盖已有文件或跨网盘复制。
+              有同名文件时会拒绝；不要移动正在转存的资源。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
+            <div className="flex items-center gap-2 border-b border-border/70 pb-2 text-sm">
+              <Button variant="ghost" size="sm" disabled={destination.loading}
+                onClick={() => destination.open('0', [])}><House className="size-4" />根目录</Button>
+              {destination.path.map((crumb, i) => (
+                <button type="button" key={crumb.id} disabled={destination.loading}
+                  onClick={() => destination.open(crumb.id, destination.path.slice(0, i + 1))}
+                  className="max-w-28 truncate text-xs text-primary hover:underline" title={crumb.name}>
+                  / {crumb.name}
+                </button>
+              ))}
+            </div>
+            {destination.error ? <p role="alert" className="text-sm text-destructive">{destination.error}</p>
+              : destination.loading ? <Skeleton className="h-20" />
+                : destination.items.length ? destination.items.map((folder) => (
+                  <button type="button" key={folder.id} disabled={saving}
+                    className="flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-muted"
+                    onClick={() => destination.open(folder.id, [...destination.path, { id: folder.id, name: folder.name }])}>
+                    <Folder className="size-4 text-primary" />{folder.name}<ChevronRight className="ml-auto size-4" />
+                  </button>
+                )) : <p className="p-3 text-xs text-muted-foreground">当前目录没有子文件夹。</p>}
+            {destination.next !== null ? (
+              <Button size="sm" variant="outline" disabled={destination.loadingMore}
+                onClick={() => void destination.loadMore()}>加载更多文件夹</Button>
+            ) : null}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            目标目录：{destination.path.map((x) => x.name).join(' / ') || '根目录'}。
+            只能选择与来源不同的子目录，建议先在目标目录创建好分类。
+          </p>
+          <DialogFooter>
+            <Button variant="outline" disabled={saving} onClick={() => setMoving(null)}>取消</Button>
+            <Button disabled={saving || !destination.ready || Boolean(destination.error) ||
+              destination.cid === moving?.cid || destination.cid === '0' ||
+              (moving?.provider === 'aliyun' && destination.driveId !== moving.driveId)}
+              onClick={() => void executeMove()}>
+              <FolderInput />{saving ? '正在核验' : '确认移动文件'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={edit !== null} onOpenChange={(open) => { if (!open && !saving) setEdit(null); }}>
         <DialogContent showCloseButton={!saving}>
