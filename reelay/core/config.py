@@ -293,6 +293,19 @@ def _validate_services(cfg: dict) -> None:
     validate_proxy(cfg["proxy"])
 
 
+def directory_matches_storage(reference: str, storage: str) -> bool:
+    """A folder alias is provider-bound. Legacy numeric CIDs always belong to 115.
+
+    Unknown third-party providers keep their own validation rules.
+    """
+    ref = str(reference)
+    if storage == "aliyun":
+        return ref.startswith("aliyun:")
+    if storage == "p115":
+        return ref.isdecimal()
+    return True
+
+
 def _validate_rule(rule: dict, dirs: dict, label: str) -> None:
     if type(rule.get("approval_mode")) is not str or rule["approval_mode"] not in {"manual", "auto"}:
         raise ValueError(f"{label}.approval_mode 只能是 manual（人工确认）或 auto（AI 处理）")
