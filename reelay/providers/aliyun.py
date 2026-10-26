@@ -342,7 +342,7 @@ class AliyunStorage(ShareStorage):
                 if len(found) != 1:
                     raise
                 stage = found[0]["id"]
-        return {"to_cid": parent, "staging_cid": stage, **selection}
+        return {"to_cid": parent, "staging_cid": stage, "drive_id": self.client.drive_id, **selection}
 
     async def prepare(self, ctx: PipelineContext) -> dict:
         if not self.ready():
@@ -354,6 +354,8 @@ class AliyunStorage(ShareStorage):
         return await run_blocking(self._stage, ctx, selection)
 
     def _actual(self, manifest: dict) -> list[dict]:
+        if manifest.get("drive_id") and manifest["drive_id"] != self.client.drive_id:
+            raise NeedsManual("网盘账号发生变化，不能在新账号上恢复旧任务，请重新登录原账号")
         return self.client.children(manifest["staging_cid"])
 
     def _verify(self, manifest: dict) -> dict:
@@ -429,21 +431,32 @@ class AliyunStorage(ShareStorage):
         await run_blocking(self._remove_stage, manifest, must_be_empty=False)
 
     def browse(self, cid: str, offset: int = 0, limit: int = 100) -> dict:
+        """List opaque Aliyun IDs, with complete root-to-folder breadcrumbs."""
         try:
             cid = _id(cid)
             files = self.client.children(cid)
             folders = sorted((x for x in files if x["is_dir"]), key=lambda x: x["name"])
-            path = [{"id": "root", "name": "根目录"}]
-            if cid != "root":
-                # dir_path also validates that the directory is reachable.
-                parts = self.dir_path(cid).strip("/").split("/")
-                if parts:
-                    path.extend({"id": cid, "name": parts[-1]} for _ in [0])
-            items = [{"id": x["id"], "name": x["name"], "pid": cid}
+            ancestors = []
+            current = cid
+            visited = set()
+            while current != "root":
+                if current in visited or len(ancestors) >= 32:
+                    raise StorageBrowseError("invalid_path", "目录层级异常，请核对云盘路径", 502)
+                visited.add(current)
+                node = self.client.attr(current)
+                if not node["is_dir"]:
+                    raise StorageBrowseError("not_directory", "目标文件不是目录", 404)
+                ancestors.append({"id": node["id"], "name": node["name"]})
+                current = node["parent_id"]
+            path = [{"id": "0", "name": "根目录"}, *reversed(ancestors)]
+            items = [{"id": x["id"], "name": x["name"], "pid": "0" if cid == "root" else cid}
                      for x in folders[offset:offset + limit]]
             next_offset = offset + limit if offset + limit < len(folders) else None
-            return {"items": items, "cid": cid, "path": path, "next_offset": next_offset,
+            return {"items": items, "cid": "0" if cid == "root" else cid,
+                    "path": path, "next_offset": next_offset,
                     "total_entries": len(folders), "via": "aliyun"}
+        except StorageBrowseError:
+            raise
         except AliyunAPIError as exc:
             status = 409 if exc.status == 401 else 503
             raise StorageBrowseError("aliyun_unavailable", str(exc), status) from None
