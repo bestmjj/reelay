@@ -8,6 +8,7 @@ from unittest.mock import patch
 from reelay.core import secret_store
 from reelay.core.contracts import NeedsManual, ParsedResource, PipelineContext, RawMessage, TransferUncertain
 from reelay.core.parse_rules import parse_share_url, share_provider
+from reelay.core.pipeline import Pipeline
 from reelay.providers.aliyun import AliyunClient, AliyunStorage, _resource_drive_id
 
 
@@ -50,6 +51,25 @@ class FakeClient:
 
 
 class AliyunTests(unittest.TestCase):
+    def test_dedup_keys_distinguish_backup_root_from_resource_root(self):
+        storage = AliyunStorage()
+        storage.client = FakeClient()
+        current = context()
+        current.save_dir_cid = "0"
+        current.parsed.media_type = "tv"
+        current.parsed.season = 1
+        current.parsed.episodes = [2]
+        resource_cid = storage.dedup_cid("0")
+        current.ns("storage")["dedup_cid"] = resource_cid
+        resource_keys = Pipeline._content_keys("aliyun", current)
+        self.assertTrue(resource_keys)
+        self.assertIn(resource_cid, resource_keys[0])
+        current.ns("storage").pop("dedup_cid")
+        legacy_backup_keys = Pipeline._content_keys("aliyun", current)
+        self.assertNotEqual(resource_keys, legacy_backup_keys)
+        storage.client.drive_id = "different-resource-drive-id"
+        self.assertNotEqual(resource_cid, storage.dedup_cid("0"))
+
     def test_resource_drive_selected_over_default_backup(self):
         response = {"resource_drive_id": "resource-drive-id-123",
                     "default_drive_id": "backup-drive-id-456",
