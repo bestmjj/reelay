@@ -155,6 +155,11 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
           </p>
         ) : null}
 
+        <p className="mt-3 text-xs leading-5 text-muted-foreground">
+          保存目录只规定今后转存到哪里；不会自动导入该目录里原有的视频。
+          如果要在媒体库看到现有文件，请到 <Link to="/library" className="font-medium text-primary hover:underline">媒体库 → 网盘已有文件</Link> 手动执行只读扫描。
+        </p>
+
         <div className="mt-4 rounded-lg border border-dashed border-border p-3 sm:p-4">
           <p className="mb-2.5 text-[13px] font-medium">添加目录</p>
           <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_auto]">
