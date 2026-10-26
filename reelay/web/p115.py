@@ -107,11 +107,16 @@ def router(service) -> APIRouter:
         return {"ok": True}
 
     @api.get("/api/storage/dirs")
-    async def storage_dirs(cid: str = Query(default="0", pattern=r"^[A-Za-z0-9_-]{1,128}$"), offset: int = Query(default=0, ge=0),
-                           limit: int = Query(default=100, ge=1, le=1000)):
+    async def storage_dirs(cid: str = Query(default="0", pattern=r"^[A-Za-z0-9_-]{1,128}$"),
+                           provider: str | None = Query(default=None, pattern=r"^[a-z0-9_-]+$"),
+                           offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=1000)):
         """选目录：兼容 115 数字 CID 与阿里云盘不透明文件 ID；错误不伪装成空目录。"""
         cfg = service.pipeline.cfg
-        storage = service.pipeline.reg.get_provider("storage", cfg["defaults"]["storage"])
+        storage_name = provider or cfg["defaults"]["storage"]
+        try:
+            storage = service.pipeline.reg.get_provider("storage", storage_name)
+        except KeyError:
+            raise HTTPException(status_code=422, detail="未知的存储网盘") from None
         if not hasattr(storage, "browse"):
             raise HTTPException(status_code=409, detail=f"存储 {storage.name} 不支持浏览目录")
         try:
