@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from . import secret_store
-from ..providers.aliyun import AliyunAPIError, AliyunClient, TOKEN_API, _resource_drive_id
+from ..providers.aliyun import AliyunAPIError, AliyunClient, TOKEN_API
 
 PASSPORT = "https://passport.aliyundrive.com/newlogin/qrcode/"
 QR_TTL = 300
@@ -99,7 +99,7 @@ class AliyunAuth:
         result = AliyunClient._send(TOKEN_API, {
             "grant_type": "refresh_token", "refresh_token": token})
         rotated = result.get("refresh_token") or token
-        drive = _resource_drive_id(result)
+        drive = AliyunClient.resource_drive(result)
         if not isinstance(result.get("access_token"), str) or not result["access_token"]:
             raise ValueError("阿里云盘没有返回 Access Token")
         if not isinstance(rotated, str) or len(rotated) < 16 or not isinstance(drive, str) or not drive:
