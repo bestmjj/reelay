@@ -489,12 +489,17 @@ class AliyunStorage(ShareStorage):
         manifest = ctx.ns("storage")["manifest"]
         await run_blocking(self._remove_stage, manifest, must_be_empty=False)
 
-    def browse(self, cid: str, offset: int = 0, limit: int = 100) -> dict:
-        """List opaque Aliyun IDs, with complete root-to-folder breadcrumbs."""
+    def browse(self, cid: str, offset: int = 0, limit: int = 100, *, include_files: bool = False) -> dict:
+        """Read resource-library entries. Directory pickers exclude files by default."""
         try:
             cid = _id(cid)
+            disk = self.client.drive_id
             files = self.client.children(cid)
-            folders = sorted((x for x in files if x["is_dir"]), key=lambda x: x["name"])
+            # Reject a credential/account switch during a single directory query.
+            if disk != self.client.drive_id:
+                raise StorageBrowseError("drive_changed", "阿里云盘资源库发生变化，请刷新目录", 409)
+            entries = sorted((x for x in files if include_files or x["is_dir"]),
+                             key=lambda x: (not x["is_dir"], x["name"].casefold()))
             ancestors = []
             current = cid
             visited = set()
@@ -508,12 +513,13 @@ class AliyunStorage(ShareStorage):
                 ancestors.append({"id": node["id"], "name": node["name"]})
                 current = node["parent_id"]
             path = [{"id": "0", "name": "根目录"}, *reversed(ancestors)]
-            items = [{"id": x["id"], "name": x["name"], "pid": "0" if cid == "root" else cid}
-                     for x in folders[offset:offset + limit]]
-            next_offset = offset + limit if offset + limit < len(folders) else None
+            items = [{"id": x["id"], "name": x["name"], "pid": "0" if cid == "root" else cid,
+                      "is_dir": x["is_dir"], "size": None if x["is_dir"] else x["size"]}
+                     for x in entries[offset:offset + limit]]
+            next_offset = offset + limit if offset + limit < len(entries) else None
             return {"items": items, "cid": "0" if cid == "root" else cid,
                     "path": path, "next_offset": next_offset,
-                    "total_entries": len(folders), "via": "aliyun"}
+                    "total_entries": len(entries), "via": "aliyun", "drive_id": disk}
         except StorageBrowseError:
             raise
         except AliyunAPIError as exc:
