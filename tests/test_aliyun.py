@@ -63,7 +63,10 @@ class AliyunTests(unittest.TestCase):
         current.ns("storage")["dedup_cid"] = resource_cid
         resource_keys = Pipeline._content_keys("aliyun", current)
         self.assertTrue(resource_keys)
-        self.assertIn(resource_cid, resource_keys[0])
+        # Claim keys intentionally dedup across folders on one physical
+        # resource drive, not by each target folder suffix.
+        self.assertIn(resource_cid.rsplit("_", 1)[0], resource_keys[0])
+        self.assertNotIn(resource_cid + ":", resource_keys[0])
         current.ns("storage").pop("dedup_cid")
         legacy_backup_keys = Pipeline._content_keys("aliyun", current)
         self.assertNotEqual(resource_keys, legacy_backup_keys)
@@ -198,7 +201,7 @@ class AliyunTests(unittest.TestCase):
         with secret_store.override(aliyun_refresh_token="old-refresh-token-123456"):
             with patch.object(client, "_send", side_effect=[
                 {"access_token": "access1", "refresh_token": "rotated-refresh-token-123456",
-                 "default_drive_id": "drive123"},
+                 "resource_drive_id": "drive123", "default_drive_id": "backup123"},
                 AliyunAPIError(401, "AccessTokenInvalid"),
             ]) as sent:
                 with self.assertRaises(AliyunAPIError):
