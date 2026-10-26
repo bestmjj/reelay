@@ -11,6 +11,61 @@ from . import tmdb, works
 MAX_CHECKS = 12
 
 
+def record_key(record: dict) -> str:
+    """Immutable cloud file identity. The same file ID in 115 and Aliyun differs."""
+    return ":".join(str(record.get(k) or "") for k in ("provider", "drive_id", "id"))
+
+
+def same_observed_file(before: dict, current: dict) -> bool:
+    """Reject stale identity bindings after renames/moves, metadata or cloud changes."""
+    keys = ("provider", "drive_id", "id", "parent_id", "name", "size", "sha1")
+    return all(before.get(k) == current.get(k) for k in keys)
+
+
+def apply_associations(records: list[dict], confirmed: dict) -> list[dict]:
+    """Overlay user-confirmed work identity without modifying scan or transfer ledgers.
+
+    Association is an explicit mapping from an observed *physical file* to a
+    TMDB show. A changed physical identity invalidates the mapping automatically;
+    the final copy-skip gate additionally reads the live file from the cloud.
+    """
+    result = []
+    for record in records:
+        bound = confirmed.get(record_key(record))
+        if isinstance(bound, dict) and same_observed_file(bound, record):
+            result.append({**record, "tmdbid": bound["tmdbid"],
+                           "title": bound["title"], "year": bound.get("year")})
+        else:
+            result.append(record)
+    return result
+
+
+def candidates_for_subscription(records: list[dict], sub: dict, *,
+                                limit: int = 50) -> list[dict]:
+    """Conservative show/season candidates that a human may explicitly adopt."""
+    wanted = tmdb.normalize(sub.get("title") or "")
+    if not wanted:
+        return []
+    found = []
+    for record in records:
+        if (record.get("season") != sub.get("season")
+                or record.get("media_type") not in ("tv", "anime")
+                or type(record.get("episode")) is not int):
+            continue
+        rid, sid = record.get("tmdbid"), sub.get("tmdbid")
+        if rid and sid and int(rid) != int(sid):
+            continue
+        if rid and sid and int(rid) == int(sid):
+            matched = True
+        else:
+            matched = tmdb.normalize(record.get("title") or "") == wanted
+        if matched:
+            found.append(record)
+        if len(found) > limit:
+            break
+    return found
+
+
 def candidates(records: list[dict], parsed, tmdb_meta: dict | None,
                *, provider: str, drive_id: str) -> tuple[list[dict], list[dict]]:
     """(strong identity matches, ambiguous matches) for explicitly named episodes."""
