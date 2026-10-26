@@ -46,8 +46,9 @@ export interface ILibraryScanResp extends ILibraryResp {
 
 export const libraryApi = {
   /** 按全部已入库任务汇总，不限条数；排序在前端做。 */
-  list: (q?: string, mediaType?: string) => get<ILibraryResp>(`library${query({ q, media_type: mediaType })}`),
-  scanned: (q?: string, mediaType?: string) =>
-    get<ILibraryScanResp>(`library/scan${query({ q, media_type: mediaType })}`),
+  list: (q?: string, mediaType?: string, saveDirAlias?: string) =>
+    get<ILibraryResp>(`library${query({ q, media_type: mediaType, save_dir_alias: saveDirAlias })}`),
+  scanned: (q?: string, mediaType?: string, saveDirAlias?: string) =>
+    get<ILibraryScanResp>(`library/scan${query({ q, media_type: mediaType, save_dir_alias: saveDirAlias })}`),
   scan: () => post<ILibraryScanResp>('library/scan'),
 };
