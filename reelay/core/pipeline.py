@@ -308,6 +308,11 @@ class Pipeline:
     async def accept(self, ctx: PipelineContext) -> PipelineContext | None:
         """快速接收新消息并落为 RECEIVED；返回 None 表示消息级重复。"""
         ctx.source_rule = self.rule_for(ctx.raw.source)
+        if ctx.raw.extra.get("manual_import") is True:
+            # A direct admin Web action applies only to this single task;
+            # never turn all Telegram listener messages into auto-approval.
+            ctx.source_rule["approval_mode"] = "auto"
+            ctx.log("用户手动提交资源：仅本任务按自动模式处理，仍执行安全过滤及转存核验")
         self.stamp_config(ctx)
         await self.emit("on_message", ctx, persist=False)
         ctx.state = TaskState.RECEIVED
