@@ -98,7 +98,7 @@ class WrongCopyQuarantineTests(WebCase):
         self.assertIn("resolve_quarantine", task["actions"])
         self.assertNotIn("quarantine_wrong_source", task["actions"])
         self.assertEqual(self.client.post(self.url + "/quarantine-wrong-copy",
-                                          json={"reason": "重复隔离"}).status_code, 409)
+                                          json={"reason": "该任务已经隔离，不能再次隔离"}).status_code, 409)
         selected = ParsedResource(is_media=True, media_type="tv", title="吞噬星空",
                                    season=1, episodes=[247])
         with self.assertRaisesRegex(NeedsManual, "错片"):
