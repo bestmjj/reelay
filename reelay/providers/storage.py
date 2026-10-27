@@ -212,7 +212,8 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
                         share_folder_id: str | None = None, share_folder_path: str | None = None,
                         required_latest: int | None = None, blocked_episodes=(),
                         share_file_id: str | None = None, share_file_name: str | None = None,
-                        share_file_path: str | None = None, share_file_size: int | None = None) -> dict:
+                        share_file_path: str | None = None, share_file_size: int | None = None,
+                        only_episodes=()) -> dict:
     """确定本次转存的文件。分享清单是集数的事实来源，消息/LLM 给出的集数只作提示。
 
     返回 ``{'files', 'episodes', 'season', 'pairs'}``：每个文件带自己的季与集，``pairs`` 为
@@ -226,8 +227,19 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
     """
     hints = hints or {}
     episodic = parsed.media_type in ('tv', 'anime') or bool(parsed.episodes)
+    if only_episodes:
+        if parsed.media_type not in ("tv", "anime") or not parsed.title:
+            raise NeedsManual("人工指定补集仅支持已确认作品身份的剧集或动漫")
+        if any(type(ep) is not int or not 1 <= ep <= 2000 for ep in only_episodes):
+            raise NeedsManual("人工补集集号必须是 1～2000 的整数")
+        if len(set(only_episodes)) > 100:
+            raise NeedsManual("一次最多人工指定 100 集")
+        # The task's selection is intentionally narrower than the original
+        # Telegram message, which may describe an outdated/latest-only ep.
+        scope = "message"
     if share_file_id:
-        if not episodic or len(parsed.episodes) != 1:
+        requested_single = list(only_episodes) if only_episodes else parsed.episodes
+        if not episodic or len(requested_single) != 1:
             raise NeedsManual("精确选择源文件仅适用于已确认的单集任务")
         selected = [item for item in video_items
                     if not item.get("is_dir") and str(item.get("id") or "") == str(share_file_id)]
@@ -241,7 +253,7 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
             raise NeedsManual("分享源文件名称、路径或大小已变化，必须重新确认，绝不自动替换")
         file_season, file_ep = episode_of(item["name"])
         folder_season = season_of(item.get("share_path") or "")
-        if file_ep != parsed.episodes[0] or (file_season and file_season != (parsed.season or 1))                 or (folder_season and folder_season != (parsed.season or 1)):
+        if file_ep != requested_single[0] or (file_season and file_season != (parsed.season or 1))                 or (folder_season and folder_season != (parsed.season or 1)):
             raise NeedsManual("选择的文件名无法核验为消息指定的集数，不能冒认或更名")
         video_items = selected
         share_folder_id = None
@@ -264,11 +276,13 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
     # conflicting season labels, or episodes quarantined as incorrect.
     stored_pairs = {(int(season), int(ep)) for season, ep in stored}
     blocked_pairs = {(int(season), int(ep)) for season, ep in blocked_episodes}
-    requested = set(parsed.episodes) if scope == "message" and parsed.episodes else set()
+    requested = set(only_episodes or parsed.episodes) if scope == "message" else set()
     source_names = {item.get("name", "") for item in video_items}
     seen_stored: set[tuple[int, int]] = set()
     has_variety = any(variety_episode(item.get("name", ""))
                       for item in video_items if is_video(item.get("name", "")))
+    if only_episodes and has_variety:
+        raise NeedsManual("综艺具有上/下/加更等独立版本，不支持普通剧集的指定补集模式")
     if episodic and not has_variety and (stored_pairs or requested):
         remaining = []
         for item in video_items:
@@ -299,9 +313,18 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
             if seen_stored:
                 label = "、".join(f"S{season:02d}E{ep:03d}"
                                  for season, ep in sorted(seen_stored)[:8])
-                raise AlreadyStored(f"分享中可核验的季集均已入库（{label}），无需选择 DoVi/HDR 版本")
+                if len({season for season, _ in seen_stored}) > 1:
+                    detail = f"分享内 {len({season for season, _ in seen_stored})} 季共 {len(seen_stored)} 集均已入库"
+                else:
+                    season = next(iter(seen_stored))[0]
+                    detail = f"分享内第 {season} 季的 {len(seen_stored)} 集均已入库"
+                raise AlreadyStored(f"{detail}（{label}），无需选择 DoVi/HDR 版本")
             if requested:
                 raise NeedsManual(f"分享内未找到消息声明的集数 {sorted(requested)}")
+
+    # A message requesting E11+E12 should not fail when E11 is already
+    # stored and E12 is the only gap. Do not re-require stored episodes.
+    missing_request = requested - {ep for _, ep in seen_stored}
 
     # Version conflicts now concern only NOT-YET-STORED episode files.
     # Choosing a wrapper is still unsafe if any missing episode appears
@@ -402,25 +425,24 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         bare = [item.get('name', '') for item, s, _ in detected if s is None]
         if bare:
             raise NeedsManual(f'分享包含多季 {sorted(marked)}，但有文件名不带季号：{"、".join(bare[:5])}')
-        if scope == 'message' and parsed.episodes:
-            raise NeedsManual(f'分享包含多季 {sorted(marked)}，消息只写了集数，需先指定季号')
+        if scope == 'message' and requested:
+            raise NeedsManual(f'分享包含多季 {sorted(marked)}，指定补集未确定季号，请先指定季号')
         season, picked = None, detected
     withheld = {(int(s), int(ep)) for s, ep in blocked_episodes}
     affected = sorted(withheld & {(s, ep) for _, s, ep in picked})
     if affected:
         blocked_label = "、".join(f"S{s:02d}E{ep:03d}" for s, ep in affected[:5])
         raise NeedsManual(f"目标 {blocked_label} 曾被标记为错片，需人工解除隔离后才允许重新转存")
-    if scope == 'message' and parsed.episodes:
+    if scope == 'message' and requested:
         # A subscription progress post can point at an entire historical
         # pack. Once the one requested episode has been positively located,
         # unrelated old episodes (including duplicate releases) must not
         # veto its selection. Still fail closed on unnumbered files above,
         # or ambiguous/multiple versions of the REQUESTED episode below.
-        requested = set(parsed.episodes)
-        missing = requested - {ep for _, _, ep in picked}
+        missing = missing_request - {ep for _, _, ep in picked}
         if missing:
-            raise NeedsManual(f'分享内未找到消息声明的集数 {sorted(missing)}')
-        picked = [(item, s, ep) for item, s, ep in picked if ep in requested]
+            raise NeedsManual(f'分享内未找到本次需要补的集数 {sorted(missing)}')
+        picked = [(item, s, ep) for item, s, ep in picked if ep in missing_request]
     if required_latest is not None and required_latest not in {ep for _, _, ep in picked}:
         raise NeedsManual(f"选中版本缺少消息明确更新的 E{required_latest:02d}，"
                           "不从其他版本补集，也不自动转存旧集")
@@ -474,8 +496,9 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         by_pair[(s, ep)] = kept[0]
     if not by_pair:
         raise NeedsManual(f'分享内没有第 {season} 季的视频')
-    if scope == 'message' and parsed.episodes:
-        by_pair = {(season, ep): by_pair[(season, ep)] for ep in parsed.episodes}
+    if scope == 'message' and requested:
+        by_pair = {pair: item for pair, item in by_pair.items()
+                   if pair[1] in missing_request}
     wanted = sorted(set(by_pair) - {(s, ep) for s, ep in stored})
     if not wanted:
         raise AlreadyStored(f'分享内第 {season} 季的 {len(by_pair)} 集均已入库' if season is not None
@@ -643,13 +666,15 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
 
     @staticmethod
     def _select(ctx: PipelineContext, listing: list[dict], hints: dict | None = None) -> dict:
+        only = ctx.ns('share_selection').get('only_episodes') or []
         return _select_video_items(listing, ctx.parsed,
                                    stored=ctx.ns('storage').get('stored_episodes') or [],
-                                   scope=ctx.source_rule.get('episodes_from', 'share'), hints=hints,
+                                   scope='message' if only else ctx.source_rule.get('episodes_from', 'share'),
+                                   only_episodes=only, hints=hints,
                                    stored_variety_parts=ctx.ns('storage').get('stored_variety_parts') or [],
                                    share_folder_id=ctx.ns('share_selection').get('folder_id'),
                                    share_folder_path=ctx.ns('share_selection').get('path'),
-                                   required_latest=_announced_latest(ctx),
+                                   required_latest=None if only else _announced_latest(ctx),
                                    blocked_episodes=ctx.ns('storage').get('blocked_episodes') or [],
                                    share_file_id=ctx.ns('share_selection').get('file_id'),
                                    share_file_name=ctx.ns('share_selection').get('file_name'),
