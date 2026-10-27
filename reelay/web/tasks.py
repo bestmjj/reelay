@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 
 class ActionPayload(BaseModel):
     save_dir_alias: str | None = None
+    existing_folder_id: str | None = Field(default=None, min_length=1, max_length=128)
+    existing_drive_id: str | None = Field(default=None, min_length=1, max_length=128)
     conflict: Literal["skip", "replace"] | None = None  # 重新整理时处理文件冲突
 
 
@@ -89,7 +91,12 @@ def router(service) -> APIRouter:
 
     @api.post("/api/tasks/{task_id}/approve")
     async def approve(task_id: str, payload: ActionPayload | None = None):
-        await service.approve(task_id, save_dir_alias=payload.save_dir_alias if payload else None)
+        await service.approve(
+            task_id,
+            save_dir_alias=payload.save_dir_alias if payload else None,
+            existing_folder_id=payload.existing_folder_id if payload else None,
+            existing_drive_id=payload.existing_drive_id if payload else None,
+        )
         return {"ok": True}
 
     @api.post("/api/tasks/{task_id}/reject")
