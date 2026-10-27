@@ -32,6 +32,25 @@ function parseEpisodes(text: string): number[] {
   return [...new Set(text.split(/[,，\s]+/).map((v) => Number(v)).filter((v) => Number.isInteger(v) && v > 0))];
 }
 
+function parseSelectedEpisodes(text: string): number[] {
+  if (!text.trim()) return [];
+  const out = new Set<number>();
+  for (const token of text.split(/[,，、\s]+/).filter(Boolean)) {
+    const match = /^E?(\d{1,4})(?:-E?(\d{1,4}))?$/i.exec(token);
+    if (!match) throw new Error('集数格式不正确，请输入 11, 13-15 或 E11 E13');
+    const start = Number(match[1]);
+    const end = match[2] ? Number(match[2]) : start;
+    if (start < 1 || end > 2000 || end < start || end - start > 99) {
+      throw new Error('集数必须在 1～2000，范围不能倒序，单次最多 100 集');
+    }
+    for (let ep = start; ep <= end; ep += 1) {
+      out.add(ep);
+      if (out.size > 100) throw new Error('一次最多指定 100 集');
+    }
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
 function Section({ title, icon: Icon, children }: { title: string; icon?: typeof FolderTree; children: React.ReactNode }) {
   return (
     <section className="space-y-2.5">
@@ -56,7 +75,7 @@ interface TaskMeta {
   confidence?: { score?: number; caps?: string[] };
   organize?: { plan?: Array<{ target_dir: string; target_name: string }>; error?: string; pending_conflict?: IOrganizeConflict };
   storage?: { partial?: ITransferPartial };
-  share_selection?: { folder_id?: string; path?: string; file_id?: string;
+  share_selection?: { folder_id?: string; path?: string; file_id?: string; only_episodes?: number[];
     file_name?: string; file_path?: string; file_size?: number };
 }
 
@@ -66,6 +85,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const [shown, setShown] = useState<ITaskDetail | null>(null);
   const [draft, setDraft] = useState<Partial<IParsedResource>>({});
   const [episodesText, setEpisodesText] = useState('');
+  const [onlyEpisodesText, setOnlyEpisodesText] = useState('');
   const [targetDir, setTargetDir] = useState('');
   const [existingPickerOpen, setExistingPickerOpen] = useState(false);
   const [existingFolder, setExistingFolder] = useState<PickedDir | null>(null);
@@ -82,6 +102,9 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     setShown(detail);
     setDraft(detail?.context.parsed ?? {});
     setEpisodesText((detail?.context.parsed?.episodes ?? []).join(', '));
+    const selection = detail?.context.meta?.share_selection;
+    setOnlyEpisodesText(Array.isArray(selection?.only_episodes)
+      ? selection.only_episodes.join(', ') : '');
     setTargetDir('');  // 空值 = 审批时按自动分类、重新整理时保持当前目录
     setExistingFolder(null);
     setExistingPickerOpen(false);
@@ -216,6 +239,48 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     }
   };
 
+  const reopenDuplicate = async () => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const next = await taskApi.reopenDuplicate(detail.task_id);
+      loaded.mutate(() => next);
+      toast.success('已恢复到待确认，可指定本次要补齐的集数');
+      onChanged?.();
+    } catch (err) {
+      toast.error(errorMessage(err, '重新检查失败'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveSelectedEpisodes = async () => {
+    if (!detail) return;
+    let episodes: number[];
+    try {
+      episodes = parseSelectedEpisodes(onlyEpisodesText);
+    } catch (err) {
+      toast.error(errorMessage(err, '集号无效'));
+      return;
+    }
+    setBusy(true);
+    try {
+      const next = await taskApi.selectEpisodes(detail.task_id, episodes);
+      loaded.mutate(() => next);
+      setShareFolders(null); // previously loaded source choices may target a different episode
+      setShareFileId('');
+      setShareFolderId('');
+      toast.success(episodes.length
+        ? '已锁定本次补集范围；已入库的集仍自动跳过，请再确认分享版本'
+        : '已恢复自动识别分享集数和原有去重规则');
+      onChanged?.();
+    } catch (err) {
+      toast.error(errorMessage(err, '指定补集失败'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const subscribe = async () => {
     if (!detail) return;
     setBusy(true);
@@ -267,6 +332,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         {can('correct') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void saveParsed()}>保存修改</Button> : null}
         {can('reparse') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reparse')}><RotateCcw />重新识别</Button> : null}
         {can('retry') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('retry')}><RefreshCw />重试</Button> : null}
+        {can('reopen_duplicate') ? (
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => void reopenDuplicate()}>
+            <RefreshCw />手动检查缺集
+          </Button>
+        ) : null}
         {can('reconcile') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reconcile')}><ShieldCheck />核验转存</Button> : null}
         {can('accept_partial') ? (
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('accept_partial')}>
@@ -412,6 +482,35 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                   </p>
                 </div>
               ) : null}
+            </Section>
+          ) : null}
+
+          {can('select_episodes') ? (
+            <Section title="本次只补指定集数（可选）">
+              <p className="text-xs leading-5 text-muted-foreground">
+                默认会读取完整分享，按季、集自动跳过已有记录，只补缺集。
+                你可以指定本次只考虑哪些集，例如 11, 13-15。
+                已经核验入库的集仍会去重，不会重复复制、洗版或覆盖。
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input aria-label="本次指定补集" className="min-w-48 flex-1"
+                  placeholder="留空＝自动；如 11, 13-15"
+                  value={onlyEpisodesText} onChange={(e) => setOnlyEpisodesText(e.target.value)} />
+                <Button variant="outline" size="sm" disabled={busy}
+                  onClick={() => void saveSelectedEpisodes()}>保存本次补集范围</Button>
+              </div>
+              {meta.share_selection?.only_episodes?.length ? (
+                <p className="text-xs text-primary">
+                  已设置：仅处理第 {meta.share_selection.only_episodes.join('、')} 集；
+                  现在先读取分享清单，再选择需要的版本或源文件。
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">当前：自动补齐分享中尚未入库的剧集</p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                修改补集范围后，旧的源文件和版本选择会失效，避免误用。
+                若云盘文件已删除但仍显示已入库，请先核验并修正旧记录，不能借指定集数强行覆盖。
+              </p>
             </Section>
           ) : null}
 
