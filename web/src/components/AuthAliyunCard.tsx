@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, CircleAlert, Cloud, KeyRound, Loader2, QrCode, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Panel } from '@/components/app/Panel';
@@ -25,6 +25,23 @@ export default function AuthAliyunCard() {
   const [saving, setSaving] = useState(false);
   const [pinging, setPinging] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const automaticProbe = useRef(false);
+
+  // A new web process does not retain the in-memory auth result. If neither
+  // local memory nor a recent database observation exists, verify once without
+  // forcing users to click "检测并刷新" on every visit. No endless retry loop:
+  // after a transient error the button remains available for manual retry.
+  useEffect(() => {
+    if (status?.configured === false) { automaticProbe.current = false; return; }
+    if (!status?.configured || status.state !== 'unknown' || loaded.loading
+        || qr || saving || clearing || automaticProbe.current) return;
+    automaticProbe.current = true;
+    setPinging(true);
+    void storageApi.authAliyunPing().then(
+      (result) => mutate(() => result),
+      () => reload(),
+    ).finally(() => setPinging(false));
+  }, [status?.configured, status?.state, loaded.loading, qr, saving, clearing, mutate, reload]);
 
   const start = async () => {
     setStarting(true);
@@ -154,11 +171,18 @@ export default function AuthAliyunCard() {
           {status?.configured ? (
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
               已保存登录信息{status.drive_id ? ' · 资源库 ID ' + status.drive_id : ''}
-              {status.checked_at ? <span title={fullTime(status.checked_at)}> · 上次验证 {relativeTime(status.checked_at)}</span> : ' · 尚未检测有效性'}
+              {status.checked_at
+                ? <span title={fullTime(status.checked_at)}> · 上次检测 {relativeTime(status.checked_at)}</span>
+                : pinging ? ' · 正在自动检查有效性…' : ' · 尚未检测有效性'}
             </p>
           ) : (
             <p className="mt-1 text-xs leading-5 text-muted-foreground">尚未登录。请用阿里云盘 App 扫码。</p>
           )}
+          {status?.last_observation && status.state === 'active' ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              最近验证成功（读取历史检测结果）；后续云盘操作仍会实时验证登录。
+            </p>
+          ) : null}
           {status?.error ? <p className="mt-2 text-xs text-destructive">{status.error}</p> : null}
         </div>
       </div>
@@ -169,9 +193,9 @@ export default function AuthAliyunCard() {
           {status?.configured ? '重新扫码登录' : '扫码登录阿里云盘'}
         </Button>
         <Button size="sm" variant="outline" disabled={busy || !status?.configured} onClick={() => void ping()}>
-          {pinging ? <Loader2 className="animate-spin" /> : <RefreshCw />}检测并刷新
+          {pinging ? <Loader2 className="animate-spin" /> : <RefreshCw />}{pinging ? '自动检测中' : '重新检测'}
         </Button>
-        <Button size="sm" variant="ghost" onClick={reload}>刷新状态</Button>
+        <Button size="sm" variant="ghost" onClick={reload}>同步状态显示</Button>
         {status?.configured ? (
           <Button size="sm" variant="ghost" disabled={busy}
             className="text-destructive hover:bg-destructive/10 hover:text-destructive"
@@ -227,7 +251,8 @@ export default function AuthAliyunCard() {
         </div>
       </details>
       <p className="text-xs leading-5 text-muted-foreground">
-        与 115 不同，阿里云盘只需要这一处登录。切换默认存储为 Aliyun 后，保存目录必须选择阿里云盘资源库里的文件夹；备份盘目录不可用于资源库转存。
+        阿里云盘只需登录一次。Reelay 会自动续期访问令牌，并恢复最近检测结果；首次没有记录时会自动核验。
+        “同步状态显示”只读取记录，“重新检测”才请求阿里云盘。切换默认存储为 Aliyun 后，保存目录必须选择资源库里的文件夹；备份盘不可用于资源库转存。
       </p>
     </Panel>
   );
