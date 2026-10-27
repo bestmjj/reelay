@@ -20,6 +20,7 @@ import { useAsync } from '@/hooks/useAsync';
 import { compactEpisodes, relativeTime } from '@/lib/format';
 import { MEDIA_TYPE_LABELS } from '@/lib/status';
 import { announceSubscription } from '@/lib/subscriptions';
+import { filterSubscriptionItems, pageSubscriptionItems, type SubscriptionSort, type SubscriptionStatusFilter } from '@/lib/subscriptionView';
 import { cn, errorMessage } from '@/lib/utils';
 
 function CandidateCard({ candidate, wanted, onSubscribe, busy }: {
@@ -62,12 +63,12 @@ function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart, onEx
 }) {
   const finished = item.finished;
   return (
-    <div className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+    <div className="flex flex-wrap items-start gap-x-3 gap-y-2 py-3 first:pt-0 last:pb-0">
       <span className={cn('grid size-9 shrink-0 place-items-center rounded-lg',
         finished ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary')}>
         {finished ? <Flag className="size-4" /> : <BellRing className="size-4" />}
       </span>
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-[1_1_16rem]">
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="truncate text-sm font-medium">《{item.title}》第 {item.season} 季</span>
           <ToneBadge tone="neutral">{item.category}</ToneBadge>
@@ -75,19 +76,25 @@ function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart, onEx
             : item.auto ? <ToneBadge tone="success">新集自动转存</ToneBadge> : <ToneBadge tone="neutral">只提醒缺集</ToneBadge>}
           {!item.tmdbid ? <ToneBadge tone="warning" className="max-sm:hidden">按片名匹配</ToneBadge> : null}
         </div>
-        <p className="mt-0.5 truncate text-xs text-muted-foreground">
-          {finished ? `${finished.episodes} 集全部入库，${finished.date} 自动结束订阅` : <>
-            已入库 {item.have.length}{item.total ? ` / ${item.total}` : ''} 集
+        <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+          {finished ? `已结束订阅 · ${finished.episodes} 集登记完成（${finished.date}）` : <>
+            Reelay 已登记 {item.have.length}{item.total ? `/${item.total}` : ''} 集
             {item.have.length ? `（${compactEpisodes(item.have)}）` : ''}
-            {item.missing.length ? ` · 缺 ${compactEpisodes(item.missing)}` : ''}
+            {item.missing.length ? ` · 尚未登记 ${item.missing.length} 集（${compactEpisodes(item.missing)}）` : ''}
+            {item.missing_truncated ? ' · 集数范围过大，仅展示前 5000 集' : ''}
             {item.aired ? ` · TMDB 已播 ${item.aired} 集` : ''}
           </>}
         </p>
+        {!finished && item.quarantined?.length ? (
+          <p className="mt-0.5 text-xs font-medium text-destructive" role="alert">
+            错片隔离中：{compactEpisodes(item.quarantined)}。请先核对已入库任务，再解除隔离并重新接收。
+          </p>
+        ) : null}
         {!finished && item.observed?.length ? (
           <p className="mt-0.5 text-xs text-muted-foreground">
-            网盘索引可能已有 {item.observed.length} 集（{compactEpisodes(item.observed)}）。
-            这些不是 Reelay 已转存记录，转存前会重新核验真实文件。
-            {!item.scan_complete ? ' 扫描尚未完整。' : ''}
+            网盘索引发现 {item.observed.length} 集候选（{compactEpisodes(item.observed)}），尚未确认属于该作品。
+            这些不能算作 Reelay 已转存，转存前仍需核验文件。
+            {!item.scan_complete ? ' 网盘扫描未完成，不能据此判断哪些集确实不存在。' : ''}
           </p>
         ) : null}
         {!finished && item.start_episode !== null ? (
@@ -104,6 +111,7 @@ function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart, onEx
           </p>
         ) : null}
       </div>
+      <div className="flex w-full flex-wrap items-center justify-end gap-2 pl-12 sm:w-auto sm:pl-0">
       <Button size="sm" variant="outline" disabled={busy} onClick={onExisting} title="预览并确认云盘已有文件，不移动、不删除、不转存">
         关联旧集
       </Button>
@@ -124,6 +132,7 @@ function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart, onEx
         className="size-9 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive sm:size-8">
         <Trash2 />
       </Button>
+      </div>
     </div>
   );
 }
@@ -138,6 +147,11 @@ export default function SubscriptionsPage() {
   const [searching, setSearching] = useState(false);
   const [busy, setBusy] = useState(false);
   const [category, setCategory] = useState('');  // 空 = 全部类型
+  const [listQuery, setListQuery] = useState('');
+  const [listStatus, setListStatus] = useState<SubscriptionStatusFilter>('all');
+  const [listSort, setListSort] = useState<SubscriptionSort>('recent');
+  const [listPageSize, setListPageSize] = useState(10);
+  const [listPage, setListPage] = useState(1);
   const [testItem, setTestItem] = useState<ISubscription | null>(null);
   const [testText, setTestText] = useState('');
   const [testResult, setTestResult] = useState<ISubscriptionSimulation | null>(null);
@@ -216,9 +230,12 @@ export default function SubscriptionsPage() {
   const restore = (item: IIgnoredWork) => run(() => subscriptionApi.unignoreWork(item), `已恢复接收《${item.title}》`, '恢复失败');
 
   const categories = [...new Set((data?.items ?? []).map((i) => i.category))];
-  const shown = (data?.items ?? []).filter((i) => !category || i.category === category);
-  const active = shown.filter((i) => !i.finished);
-  const finished = shown.filter((i) => i.finished);
+  const shown = filterSubscriptionItems(data?.items ?? [], {
+    query: listQuery, category, status: listStatus, sort: listSort,
+  });
+  const paged = pageSubscriptionItems(shown, listPage, listPageSize);
+  const active = paged.items.filter((i) => !i.finished);
+  const finished = paged.items.filter((i) => i.finished);
   const row = (item: ISubscription) => (
     <SubscriptionRow key={`${item.tmdbid ?? item.title}-${item.season}`} item={item} busy={busy}
       onRemove={() => void remove(item)} onReopen={() => void reopen(item)}
