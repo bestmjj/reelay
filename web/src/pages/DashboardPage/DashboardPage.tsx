@@ -116,7 +116,7 @@ export default function DashboardPage() {
     try {
       const { items } = await dashboardApi.failedDeliveries();
       if (items.some((item) => item.error === 'UserIsBotError')
-        && !window.confirm('部分通知因 Telegram 不允许 Bot 给 Bot 发消息而失败。\\n请先确认「设置 → Telegram」中的 owner_id 是你自己的用户数字 ID，并检查「识别后转发」没有指向另一个 Bot。\\n已经修复目标后，再点击确定重发；否则会再次失败。')) {
+        && !window.confirm('部分通知因 Telegram 不允许 Bot 给 Bot 发消息而失败。\n请先确认「设置 → Telegram」中的 owner_id 是你自己的用户数字 ID，并检查「识别后转发」没有指向另一个 Bot。\n已经修复目标后，再点击确定重发；否则会再次失败。')) {
         return;
       }
       let accepted = 0;
