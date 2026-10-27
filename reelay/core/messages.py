@@ -213,14 +213,26 @@ def _saved_location(ctx: PipelineContext, root: str) -> tuple[str, list[str]]:
         while size < min(len(common), len(parts)) and common[size] == parts[size]:
             size += 1
         common = common[:size]
+    if root == "/":
+        # Root is an absolute physical directory. Do not accidentally
+        # transform "/国产动漫/..." into the relative "国产动漫/...".
+        return "/" + "/".join(common) if common else "/", names
     return "/".join(filter(None, [root.rstrip("/"), *common])) or root, names
 
 
-def saved_message(ctx: PipelineContext, root: str) -> str:
-    """入库通知。root 是保存目录在网盘里的路径（未知时为目录别名）。"""
-    folder, names = _saved_location(ctx, root)
+def saved_message(ctx: PipelineContext, root: str | None) -> str:
+    """入库通知：仅将查到的物理路径称作位置，未知时说明未核验。"""
+    folder, names = _saved_location(ctx, root or "")
     lines = ["✅ <b>已入库</b>", "", *_headline(ctx), "", *_facts(ctx), ""]
-    lines += _field("📂", "位置", f"<code>{esc(folder)}</code>")
+    if root and root.startswith("/"):
+        lines += _field("📂", "位置", f"<code>{esc(folder)}</code>")
+    else:
+        # The organizer has checked the placed file's ID/name/parent, but a
+        # relative plan is NOT sufficient evidence of the absolute cloud path.
+        alias = ctx.save_dir_alias or "默认"
+        lines += _field("📂", "位置", f"实际路径暂无法核验（目录别名：{esc(alias)}）")
+        if folder:
+            lines += _field("📁", "整理子目录", f"<code>{esc(folder)}</code>")
     if len(names) == 1:
         lines += _field("📄", "文件", esc(names[0]))
     elif names:
