@@ -49,7 +49,7 @@ class PermalinkSubmissionTests(WebCase):
         pipeline = self.app.state.pipeline
         parser = pipeline.reg.get_provider("parser", "regex")
         decider = pipeline.reg.get_provider("decision", "subscription")
-        for episodes, expected in (([100], TaskState.QUEUED),
+        for episodes, expected in (([100], TaskState.PENDING_APPROVAL),
                                    (list(range(1, 101)), TaskState.PENDING_APPROVAL),
                                    ([], TaskState.PENDING_APPROVAL)):
             with self.subTest(episode_count=len(episodes)):
@@ -67,10 +67,28 @@ class PermalinkSubmissionTests(WebCase):
                         patch.object(decider, "decide", new_callable=AsyncMock, return_value=Decision.SAVE):
                     asyncio.run(pipeline.process_received(ctx))
                 self.assertEqual(ctx.state, expected)
+                self.assertTrue(ctx.raw.extra["manual_review"])
+                self.assertEqual(ctx.source_rule["approval_mode"], "manual")
                 if len(episodes) == 1:
                     self.assertEqual(ctx.source_rule.get("episodes_from"), "message")
                 else:
                     self.assertTrue(any("禁止盲目转存整季" in line for line in ctx.trail))
+
+    def test_ali_url_and_root_247_instruction_are_not_a_fake_title(self):
+        from reelay.core.parse_rules import regex_fields
+        from reelay.providers.parser import _regex_parse
+        text = "https://www.alipan.com/s/gsQB8YFoLZQ 选择分享根目录中的 247"
+        self.assertIsNone(regex_fields(text)["title"])
+        response = self.client.post("/api/resources/submit", json={"text": text})
+        self.assertEqual(response.status_code, 200, response.text)
+        ctx = self.app.state.store.get_task(response.json()["task_id"])
+        self.assertTrue(ctx.raw.extra["manual_review"])
+        self.assertTrue(ctx.raw.extra["manual_unlabeled"])
+        self.assertEqual(ctx.source_rule["approval_mode"], "manual")
+        parsed = _regex_parse(ctx)
+        self.assertIsNone(parsed.title)
+        self.assertEqual(parsed.raw_fields["share_provider"], "aliyun")
+        self.assertEqual(parsed.share_code, "gsQB8YFoLZQ")
 
     def test_unknown_and_private_channels_are_rejected_without_fetch(self):
         service = self.app.state.service
