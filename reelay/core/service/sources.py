@@ -48,7 +48,7 @@ class SourceMixin(ServiceBase):
         import re
         from urllib.parse import urlsplit
         from ..contracts import RawMessage
-        from ..parse_rules import parse_share_url
+        from ..parse_rules import parse_share_url, regex_fields
 
         text = ai.text_field(text, limit=12000, label="资源消息")
         configured = [rule["bot"] for rule in self.get_config().get("sources", [])]
@@ -95,16 +95,21 @@ class SourceMixin(ServiceBase):
         msg_id = "manual-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
         # A share link by itself carries no verified title/season/episode.
         # Parsers may mistakenly interpret its URL as a movie title.
-        bare_share = bool(re.fullmatch(r"https?://\S+", text.strip(), re.I))
+        unlabeled = not bool(regex_fields(text).get("title"))
         raw = RawMessage(source=selected, msg_id=msg_id,
                          text=text, urls=urls,
-                         extra={"manual_import": True, "manual_unlabeled": bare_share})
+                         extra={"manual_import": True, "manual_unlabeled": unlabeled,
+                                # A direct paste may select an exact source file;
+                                # never auto-copy before the user has verified it.
+                                "manual_review": telegram_id is None})
         ctx = PipelineContext(raw=raw)
         accepted = await self.pipeline.accept(ctx)
         if not accepted:
             raise ConflictError("这条消息已在转存队列中")
         return {"task_id":accepted.task_id, "state":accepted.state.value,
-                "note":"资源已提交给后台；符合规则时自动转存，不确定或识别失败会进入待审批或失败列表。"}
+                "note":("资源已提交；直接粘贴的分享需先人工确认片名、集数和源文件，"
+                        "不会仅凭一个链接自动转存。" if telegram_id is None
+                        else "原频道消息已提交给后台；仍会经过分享清单与去重安全检查。")}
 
     async def test_parse(self, text: str, urls: list[str] | None = None, source: str | None = None,
                          rule: dict | None = None) -> dict[str, Any]:
