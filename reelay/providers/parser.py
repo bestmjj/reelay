@@ -213,8 +213,20 @@ class LLMParser(ai.UsesAI):
                 else:
                     runtime.observe("llm", "failed", exc.category)
                 return self._fallback(ctx, exc.category)
-            runtime.observe("llm", "connected")
             self._cache.put(key, data)
+
+        # A schema-valid response with unknown identity is not an API failure.
+        # Keep its other metadata, but force review rather than inventing a title.
+        missing = ([field for field in ("title", "media_type")
+                    if not (data.get(field) or "").strip()]
+                   if data["is_media"] and not data["is_ad"] else [])
+        if missing:
+            ctx.ns("parse").update(incomplete=True, missing_fields=missing)
+        # Only observe actual requests; a cached result does not prove current
+        # connectivity. Incomplete metadata is a warning, not a failed API call.
+        if not ctx.ns("parse").get("cache"):
+            runtime.observe("llm", "incomplete" if missing else "connected",
+                            "missing_title_or_type" if missing else "")
         if examples:
             ctx.ns("parse")["examples"] = len(examples)
 
