@@ -12,11 +12,18 @@ export interface ISubscription {
   auto: boolean;
   /** Smallest episode number eligible for future auto-transfer, inclusive. */
   start_episode: number | null;
+  /** Verified Reelay transfer ledger only, not necessarily all cloud media. */
   have: number[];
+  /** Historical titles tied to the same TMDB ID; for client-side search. */
+  aliases?: string[];
+  /** Quarantined wrong-source episodes must never count as successfully transferred. */
+  quarantined?: number[];
   /** Scan observations only; never count as a completed Reelay transfer. */
   observed?: number[];
   scan_complete?: boolean;
+  /** Unrecorded by Reelay; not proof that a file is missing from the drive. */
   missing: number[];
+  missing_truncated?: boolean;
   aired: number | null;
   /** 电视剧 / 动漫 / 综艺 / 纪录片 / 少儿（按 TMDB 题材）。 */
   category: string;
