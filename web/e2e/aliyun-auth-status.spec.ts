@@ -33,7 +33,7 @@ test('unknown saved Aliyun session automatically checks ONCE, no repeated click 
   await page.goto(`${ROOT}/config?tab=connections`);
   await expect(page.getByText('阿里云盘连接', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '重新检测' })).toBeVisible();
-  expect(pings).toBe(1);
+  await expect.poll(() => pings).toBe(1);
 
   // Re-reading the status must be read-only. This used to display unknown
   // after other processes rotated the token.
