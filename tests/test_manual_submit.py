@@ -14,7 +14,7 @@ from tests.fakes import WebCase
 
 class PermalinkSubmissionTests(WebCase):
     CONFIG = {
-        "save_dirs": {"默认": "aliyun:movie_root"},
+        "save_dirs": {"默认": "aliyun:movie_root", "动漫": "aliyun:anime_root"},
         "defaults": {"parser": "regex", "storage": "aliyun", "save_to": "默认",
                      "approval_mode": "manual"},
         "sources": [{"bot": "@shareAliyun", "storage": "aliyun", "parser": "regex",
@@ -177,6 +177,34 @@ class PermalinkSubmissionTests(WebCase):
         response = self.client.post(f"/api/tasks/{task_id}/approve", json={})
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(db.get_task(task_id).state, TaskState.PENDING_APPROVAL)
+
+        # Simulate the read-only share inventory; verify that selecting the
+        # true 247 video and a deliberate Aliyun destination makes the task
+        # QUEUED without initiating any remote cloud copy.
+        storage = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        files = [{
+            "file_id": "good247", "name": "247 4K.mp4", "path": "",
+            "size": 1620000000, "selectable": True,
+        }, {
+            "file_id": "wrong4k", "name": "4K.mp4", "path": "洛DA",
+            "size": 4040000000, "selectable": False,
+        }]
+        with patch.object(storage, "ready", return_value=True), \
+                patch.object(storage, "share_source_inventory",
+                             return_value={"files": files, "folders": []}):
+            chosen = self.client.post(f"/api/tasks/{task_id}/share-file",
+                                      json={"file_id": "good247"})
+        self.assertEqual(chosen.status_code, 200, chosen.text)
+        self.assertEqual(chosen.json()["selected_file_id"], "good247")
+        response = self.client.post(f"/api/tasks/{task_id}/approve", json={
+            "save_dir_alias": "动漫",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        queued = db.get_task(task_id)
+        self.assertEqual(queued.state, TaskState.QUEUED)
+        self.assertEqual(queued.save_dir_alias, "动漫")
+        self.assertEqual(queued.ns("share_selection")["file_id"], "good247")
+        self.assertFalse(queued.ns("storage").get("landed"))
 
     def test_link_only_manual_import_still_obeys_keyword_prefilter(self):
         from reelay.core.contracts import TaskState
