@@ -417,7 +417,10 @@ class ManualE247FileChoiceAPITests(WebCase):
 
         with patch.object(storage, "client", SimpleNamespace(drive_id="resource-drive-e247")), \
                 patch.object(storage, "dir_path", return_value=actual) as directory, \
-                patch.object(storage, "library", return_value=SimpleNamespace(get_attr=attrs)):
+                patch.object(storage, "library", return_value=SimpleNamespace(
+                    get_attr=attrs, iterdir=lambda fid: [
+                        {"id": "old-246", "name": "吞噬星空 - S01E246.mp4", "is_dir": False},
+                    ])):
             no_drive = self.client.post(url + "/approve", json={
                 "existing_folder_id": folder,
             })
@@ -431,6 +434,17 @@ class ManualE247FileChoiceAPITests(WebCase):
                     "existing_folder_id": folder, "existing_drive_id": "resource-drive-e247",
                 })
             self.assertEqual(wrong_work.status_code, 409, wrong_work.text)
+            # A show root containing only season subfolders is not the
+            # final directory where the earlier episode videos live.
+            with patch.object(storage, "library", return_value=SimpleNamespace(
+                    get_attr=attrs, iterdir=lambda fid: [
+                        {"id": "child-season", "name": "Season 01", "is_dir": True},
+                    ])):
+                wrong_leaf = self.client.post(url + "/approve", json={
+                    "existing_folder_id": folder, "existing_drive_id": "resource-drive-e247",
+                })
+            self.assertEqual(wrong_leaf.status_code, 409, wrong_leaf.text)
+            self.assertIn("没有已有视频", wrong_leaf.text)
             self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state,
                              TaskState.PENDING_APPROVAL)
 
