@@ -308,6 +308,28 @@ class TestDelivery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([kind for kind, _, _ in calls], ["photo", "text", "text", "text"])
         self.assertEqual(calls[0][1:], ("https://x/p.jpg", "卡片"))
 
+    async def test_bot_to_bot_photo_rejection_does_not_try_text_again(self):
+        class UserIsBotError(Exception):
+            pass
+
+        class RejectedPeer:
+            photo_attempts = 0
+            text_attempts = 0
+            def is_connected(self):
+                return True
+            async def send_file(self, *args, **kwargs):
+                self.photo_attempts += 1
+                raise UserIsBotError("Bots cannot send messages to other bots")
+            async def send_message(self, *args, **kwargs):
+                self.text_attempts += 1
+
+        peer = RejectedPeer()
+        bot = ControlBot.__new__(ControlBot)
+        bot._client, bot._owner, bot._Button = peer, "1", None
+        with self.assertRaises(UserIsBotError):
+            await bot.send("卡片", html=True, photo="https://example.org/photo.png")
+        self.assertEqual((peer.photo_attempts, peer.text_attempts), (1, 0))
+
     def test_button_rows_and_links(self):
         bot = ControlBot.__new__(ControlBot)
         bot._Button = types.SimpleNamespace(inline=lambda label, data: ("inline", label, data),
