@@ -59,7 +59,15 @@ class DefaultDecision:
             ctx.log(f"过滤：{verdict[1]}")
             return Decision.SKIP
 
-        # 2) 低置信度转人工
+        # 2) Never approve without a trustworthy identity, regardless of a
+        # custom confidence threshold (including 0) or subscription policy.
+        # A valid LLM JSON result is allowed to omit title/type; that means
+        # "needs human metadata", not "safe to save".
+        if not p.title or not p.title.strip() or p.media_type not in ("movie", "tv", "anime"):
+            ctx.log("识别信息不足：缺少可靠片名或影视类型，需人工确认")
+            return Decision.ASK
+
+        # 3) 低置信度转人工
         if ctx.meta.get("parse", {}).get("fallback"):
             ctx.log("LLM 降级结果只允许人工确认")
             return Decision.ASK
