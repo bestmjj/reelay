@@ -21,6 +21,26 @@ log = logging.getLogger("reelay.service")
 # 订阅时从 TMDB 取到的题材（{tmdbid: [题材 ID]}），订阅列表按它显示类型，不必每次都查 TMDB
 GENRES = ("subscriptions", "genres")
 
+# Subscription rows are real-time ledger views. The episode tracker report is
+# updated only on its daily run and must not cause an episode already in the
+# current verified ledger to be presented as still missing.
+MAX_VISIBLE_EPISODES = 5000
+
+
+def subscription_unrecorded(have: list[int], total: int | None, report: dict) -> tuple[list[int], bool]:
+    """Unrecorded is NOT proof of absence in the cloud or current unavailability.
+
+    The API continues returning integer episodes to support the old client.
+    Bound potentially enormous user-supplied totals to prevent accidental
+    CPU/memory spikes; expose truncation rather than pretending completeness.
+    """
+    verified = {int(ep) for ep in have if type(ep) is int and ep > 0}
+    previous = {int(ep) for ep in report.get("missing", []) if type(ep) is int and ep > 0}
+    upper = max(int(total or 0), int(report.get("aired") or 0),
+                max(verified, default=0), max(previous, default=0))
+    limited = min(upper, MAX_VISIBLE_EPISODES)
+    return [ep for ep in range(1, limited + 1) if ep not in verified], upper > limited
+
 
 class FollowMixin(ServiceBase):
     """追剧订阅与不再接收。"""
@@ -39,6 +59,10 @@ class FollowMixin(ServiceBase):
             existing_media.scan_observations(self.store),
             self.store.state_get("media_associations", "confirmed", {}) or {})
         report = (self.pipeline.query("episode_report") or {}).get("series", {})
+        # A wrong-source quarantine withdraws the original task's episode
+        # ledger claim. Do not display that episode as safely received.
+        quarantines = [self.store.disputed_transfer(task_id)
+                       for task_id in self.store.disputed_task_ids()]
         items = []
         destinations = self.store.state_get("subscription_destinations", "items", {}) or {}
         discovery_state = self.store.state_items(discovery.NAMESPACE)
@@ -51,10 +75,19 @@ class FollowMixin(ServiceBase):
                       if key.rsplit(":", 1)[-1] == str(item["id"])]
             latest = max(checks, key=lambda check: float(check.get("checked_at") or 0), default=None)
             observed = existing_media.observed_for_subscription(observed_files, item)
+            missing, missing_truncated = subscription_unrecorded(have, item.get("total"), entry)
+            work = works.identity(item["title"], tmdbid=item["tmdbid"])
+            quarantined = sorted({int(ep) for dispute in quarantines if dispute and dispute.get("active")
+                                  and works.same(dispute["work"], work)
+                                  for season, ep in dispute.get("pairs", [])
+                                  if int(season) == item["season"]})
             items.append({**item, "have": have, "observed": observed,
+                          "aliases": sorted(titles - {item["title"]}),
+                          "quarantined": quarantined,
                           "destination": destinations.get(str(item["id"])),
                           "scan_complete": bool(scan.get("complete")),
-                          "missing": entry.get("missing", []), "aired": entry.get("aired"),
+                          "missing": missing, "missing_truncated": missing_truncated,
+                          "aired": entry.get("aired"),
                           "category": self._tv_category(item, sorted(titles)), "discovery": latest})
         # 转存方式按来源设置，defaults 只是兜底，只报告实际在监听的来源
         deciders = self.pipeline.reg.providers.get("decision", {})
