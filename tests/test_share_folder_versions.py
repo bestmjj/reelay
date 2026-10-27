@@ -96,6 +96,55 @@ class FolderChoiceTests(unittest.TestCase):
             _select_video_items(files, self.parsed, scope="share",
                                 stored=[[1, 13], [1, 14]])
 
+    def test_manual_subset_overrides_old_telegram_announcement(self):
+        # Telegram announced E14, but the operator deliberately asks for
+        # E13 and E15. A stored E13 stays excluded, only new E15 is copied.
+        listing = [*two_versions(), {
+            "id": "dovi-folder-15", "name": "小城良方.S01E15.2160p.mkv",
+            "size": 255, "is_dir": False,
+            "share_folder_id": "dovi-folder", "share_path": "Season 1 (DoVi)",
+        }]
+        result = _select_video_items(
+            listing, self.parsed, scope="message", stored=[[1, 13]],
+            only_episodes=[13, 15], required_latest=None,
+        )
+        self.assertEqual(result["pairs"], [[1, 15]])
+        self.assertEqual([f["id"] for f in result["files"]], ["dovi-folder-15"])
+
+    def test_manual_subset_cannot_force_an_existing_episode_to_be_copied(self):
+        listing = [*two_versions(), {
+            "id": "dovi-folder-15", "name": "小城良方.S01E15.2160p.mkv",
+            "size": 255, "is_dir": False,
+            "share_folder_id": "dovi-folder", "share_path": "Season 1 (DoVi)",
+        }]
+        with self.assertRaisesRegex(AlreadyStored, "均已入库"):
+            _select_video_items(listing, self.parsed, scope="share",
+                                only_episodes=[13], stored=[[1, 13]])
+
+    def test_manual_subset_only_ambiguous_new_episode_needs_review(self):
+        listing = [*two_versions(), *[
+            {"id": f"{branch}-15", "name": "小城良方.S01E15.2160p.mkv",
+             "size": 255, "is_dir": False, "share_folder_id": branch,
+             "share_path": folder}
+            for branch, folder in (("dovi-folder", "Season 1 (DoVi)"),
+                                   ("hdr-folder", "Season 1 (HDR.Vivid)"))
+        ]]
+        with self.assertRaisesRegex(NeedsManual, "缺失集 S01E015"):
+            _select_video_items(listing, self.parsed, scope="share",
+                                stored=[[1, 13], [1, 14]], only_episodes=[13, 15])
+        selected = _select_video_items(
+            listing, self.parsed, scope="share",
+            stored=[[1, 13], [1, 14]], only_episodes=[13, 15],
+            share_folder_id="dovi-folder",
+        )
+        self.assertEqual([f["id"] for f in selected["files"]], ["dovi-folder-15"])
+
+    def test_manual_subset_never_evades_quarantine(self):
+        with self.assertRaisesRegex(NeedsManual, "曾被标记为错片"):
+            _select_video_items(two_versions(), self.parsed,
+                                stored=[[1, 13], [1, 14]], only_episodes=[14],
+                                blocked_episodes=[[1, 14]])
+
     def test_dovi_or_hdr_choice_selects_exact_episodes_not_both(self):
         listing = two_versions()
         folders = share_folder_choices(listing)
