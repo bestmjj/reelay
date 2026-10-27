@@ -361,6 +361,15 @@ class Pipeline:
             self.store.save_task(ctx, error=str(exc))
             return
 
+        if ctx.raw.extra.get("manual_unlabeled") and ctx.raw.extra.get("manual_import"):
+            # A link plus "选择根目录里的247" is not evidence of title.
+            # Clear it before metadata/TMDB hooks get a chance to match a
+            # hallucinated work. The user will provide a trustworthy title.
+            ctx.parsed.title = None
+            ctx.parsed.media_type = None
+            ctx.parsed.year = None
+            ctx.ns("tmdb").clear()
+            ctx.log("人工分享没有可靠片名：跳过自动 TMDB 搜索，等待用户填写真实作品")
         ctx.state = TaskState.PARSED
         ctx.log(
             f"解析完成 is_media={ctx.parsed.is_media} is_ad={ctx.parsed.is_ad} "
