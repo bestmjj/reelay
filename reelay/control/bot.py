@@ -447,8 +447,12 @@ class ControlBot:
             try:
                 await self._client.send_file(target, photo, caption=text, buttons=self._buttons(buttons), parse_mode=mode)
                 return
-            except Exception as exc:  # noqa: BLE001 - 海报只是锦上添花，发不出就发文字
-                log.warning("海报发送失败，改发文字：%s", exc)
+            except Exception as exc:  # noqa: BLE001 - image fallback is only for image-specific failures
+                if type(exc).__name__ == "UserIsBotError":
+                    # The peer itself rejects bot messages; a text fallback
+                    # cannot work and would generate a second bad request.
+                    raise
+                log.warning("海报发送失败，改发文字：%s", type(exc).__name__)
         await self._client.send_message(target, text, buttons=self._buttons(buttons), parse_mode=mode)
 
     async def run_forever(self) -> None:
