@@ -55,7 +55,8 @@ interface TaskMeta {
   confidence?: { score?: number; caps?: string[] };
   organize?: { plan?: Array<{ target_dir: string; target_name: string }>; error?: string; pending_conflict?: IOrganizeConflict };
   storage?: { partial?: ITransferPartial };
-  share_selection?: { folder_id?: string; path?: string };
+  share_selection?: { folder_id?: string; path?: string; file_id?: string;
+    file_name?: string; file_path?: string; file_size?: number };
 }
 
 export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDetailSheetProps) {
@@ -69,6 +70,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const [choosing, setChoosing] = useState(false);
   const [shareFolders, setShareFolders] = useState<IShareFolderPreview | null>(null);
   const [shareFolderId, setShareFolderId] = useState('');
+  const [shareFileId, setShareFileId] = useState('');
   const [rememberShareFolder, setRememberShareFolder] = useState(true);
   const [shareFolderBusy, setShareFolderBusy] = useState(false);
   const [wrongCopyReason, setWrongCopyReason] = useState('');
@@ -82,6 +84,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     if (detail?.task_id !== shown?.task_id) {
       setShareFolders(null);
       setShareFolderId('');
+      setShareFileId('');
       setRememberShareFolder(true);
       setWrongCopyReason('');
     }
@@ -159,6 +162,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       const preview = await taskApi.shareFolders(detail.task_id);
       setShareFolders(preview);
       setShareFolderId(preview.selected_folder_id ?? '');
+      setShareFileId(preview.selected_file_id ?? '');
     } catch (err) {
       toast.error(errorMessage(err, '读取分享版本失败'));
     } finally {
@@ -175,11 +179,30 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       );
       setShareFolders(preview);
       setShareFolderId(preview.selected_folder_id ?? '');
-      toast.success('已选定分享版本；失败任务可点击「重试」，待审批任务可点击「确认转存」');
+      setShareFileId('');
+      toast.success('已选定分享来源文件夹；可在安全核验后转存指定集');
       loaded.reload();
       onChanged?.();
     } catch (err) {
       toast.error(errorMessage(err, '确认分享版本失败'));
+    } finally {
+      setShareFolderBusy(false);
+    }
+  };
+
+  const chooseShareFile = async () => {
+    if (!detail || !shareFileId) return;
+    setShareFolderBusy(true);
+    try {
+      const preview = await taskApi.chooseShareFile(detail.task_id, shareFileId);
+      setShareFolders(preview);
+      setShareFileId(preview.selected_file_id ?? '');
+      setShareFolderId('');
+      toast.success('已固定精确源视频文件 ID；转存前会重新核验名称、路径和大小');
+      loaded.reload();
+      onChanged?.();
+    } catch (err) {
+      toast.error(errorMessage(err, '选择源文件失败'));
     } finally {
       setShareFolderBusy(false);
     }
@@ -382,17 +405,48 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
           ) : null}
 
           {can('choose_share_folder') ? (
-            <Section title="选择分享版本" icon={FolderTree}>
+            <Section title="选择分享源文件或文件夹" icon={FolderTree}>
               <p className="text-xs leading-5 text-muted-foreground">
-                分享内存在 HDR.Vivid / DoVi 等不同版本时，只选择一个文件夹。
-                两者是 HDR 格式，不代表分辨率不同；不会自动混用、覆盖或重新转存已有文件。
+                想只转存 E247：先保存识别结果中的季与集号，再读取分享并选中精确的
+                「247 4K.mp4」源视频。文件夹选择适合单一版本目录；两种方式互斥。
+                这里选择的是分享来源，不会改变下方「保存到」的目标目录。
               </p>
               <Button variant="outline" size="sm" disabled={shareFolderBusy || busy}
                 onClick={() => void browseShareFolders()}>
                 <FolderTree />{shareFolders ? '刷新分享文件夹' : '读取分享文件夹'}
               </Button>
+              {shareFolders?.files?.length ? (
+                <div className="space-y-2 rounded-lg border p-3">
+                  <p className="text-sm font-semibold">精确选择单集源视频（推荐）</p>
+                  <Select aria-label="精确选择分享源文件" value={shareFileId}
+                    onValueChange={setShareFileId}
+                    options={shareFolders.files.map((file) => ({
+                      value: file.file_id,
+                      label: `${file.path || '分享根目录'}/${file.name}${typeof file.size === 'number'
+                        ? ` · ${(file.size / (1024 ** 3)).toFixed(2)} GiB` : ''}${file.selectable
+                        ? '' : ' · 无法核验为目标集数'}`,
+                      disabled: !file.selectable,
+                    }))}
+                    placeholder="选取真正的目标集（无集号的 4K.mp4 不能选）" />
+                  {shareFileId ? (
+                    <p className="text-xs text-muted-foreground">
+                      文件确认：
+                      {shareFolders.files.find((file) => file.file_id === shareFileId)?.path || '分享根目录'}/
+                      {shareFolders.files.find((file) => file.file_id === shareFileId)?.name}。
+                      正式复制前会重新读取网盘核对源文件 ID、路径、名称和字节大小。
+                    </p>
+                  ) : null}
+                  <Button size="sm" disabled={shareFolderBusy || busy || !shareFileId}
+                    onClick={() => void chooseShareFile()}>确认只转存这个源文件</Button>
+                </div>
+              ) : shareFolders ? (
+                <p className="text-xs text-muted-foreground">
+                  未发现可精确选择的单集文件。请先确认片名、类型、季和唯一集号，点击保存修改后再刷新。
+                </p>
+              ) : null}
               {shareFolders ? (
                 <div className="space-y-2 rounded-lg border p-3">
+                  <p className="text-sm font-semibold">按整个来源文件夹选择（慎用于多个视频）</p>
                   <Select value={shareFolderId} onValueChange={setShareFolderId}
                     aria-label="分享版本"
                     options={shareFolders.folders.map((folder) => ({
@@ -431,9 +485,15 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                     onClick={() => void chooseShareFolder()}>确认这个版本</Button>
                 </div>
               ) : null}
-              {meta.share_selection?.path ? (
+              {meta.share_selection?.file_id ? (
+                <p className="text-xs font-medium text-primary">
+                  已锁定单集源文件：{meta.share_selection.file_path || '分享根目录'}/
+                  {meta.share_selection.file_name}（文件 ID 校验）。
+                </p>
+              ) : meta.share_selection?.folder_id ? (
                 <p className="text-xs text-muted-foreground">
-                  已选择：{meta.share_selection.path}。不会修改已经开始转存的任务。
+                  已选择来源目录：{meta.share_selection.path || '分享根目录（仅当前层）'}。
+                  不会修改已经开始转存的任务。
                 </p>
               ) : null}
             </Section>
