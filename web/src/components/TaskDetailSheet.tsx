@@ -1,9 +1,10 @@
-import { AlertTriangle, BellPlus, Check, EyeOff, FolderTree, RefreshCw, RotateCcw, ShieldCheck, Trash2, X } from 'lucide-react';
+import { AlertTriangle, BellPlus, Check, EyeOff, FolderSearch, FolderTree, RefreshCw, RotateCcw, ShieldCheck, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { inboxApi, type ISaveDirs } from '@/api/inbox';
 import { subscriptionApi } from '@/api/subscriptions';
 import { taskApi, type IShareFolderPreview } from '@/api/tasks';
+import DirectoryPicker, { type PickedDir } from '@/components/DirectoryPicker';
 import { ErrorState } from '@/components/app/ErrorState';
 import { Field } from '@/components/app/Field';
 import { MediaCover } from '@/components/app/MediaCover';
@@ -66,6 +67,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const [draft, setDraft] = useState<Partial<IParsedResource>>({});
   const [episodesText, setEpisodesText] = useState('');
   const [targetDir, setTargetDir] = useState('');
+  const [existingPickerOpen, setExistingPickerOpen] = useState(false);
+  const [existingFolder, setExistingFolder] = useState<PickedDir | null>(null);
   const [busy, setBusy] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [shareFolders, setShareFolders] = useState<IShareFolderPreview | null>(null);
@@ -80,6 +83,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     setDraft(detail?.context.parsed ?? {});
     setEpisodesText((detail?.context.parsed?.episodes ?? []).join(', '));
     setTargetDir('');  // 空值 = 审批时按自动分类、重新整理时保持当前目录
+    setExistingFolder(null);
+    setExistingPickerOpen(false);
     setChoosing(false);
     if (detail?.task_id !== shown?.task_id) {
       setShareFolders(null);
@@ -109,7 +114,10 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     if (!detail) return;
     setBusy(true);
     try {
-      await taskApi.act(detail.task_id, ACTION_ENDPOINT[action], actionBody(action, { dir: targetDir, conflict }));
+      const body = action === 'approve' && existingFolder
+        ? { existing_folder_id: existingFolder.id, existing_drive_id: existingFolder.driveId }
+        : actionBody(action, { dir: targetDir, conflict });
+      await taskApi.act(detail.task_id, ACTION_ENDPOINT[action], body);
       finish(conflict ? CONFLICT_DONE[conflict] : ACTION_DONE[action]);
     } catch (err) {
       toast.error(errorMessage(err, '操作失败'));
@@ -279,7 +287,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       <div className="flex gap-2">
         {can('dismiss') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('dismiss')} className="text-destructive"><EyeOff />忽略</Button> : null}
         {can('reject') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reject')} className="text-destructive"><X />忽略</Button> : null}
-        {can('approve') ? <Button size="sm" disabled={busy || (requireExplicitTarget && !targetDir)}
+        {can('approve') ? <Button size="sm" disabled={busy || (requireExplicitTarget && !targetDir && !existingFolder)}
               onClick={() => void run('approve')}><Check />确认转存</Button> : null}
       </div>
     </div>
@@ -511,9 +519,42 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             </Section>
           ) : null}
 
+          {can('approve') && detail.context.source_rule.storage === 'aliyun'
+            && detail.context.raw.extra?.manual_import === true && parsed?.media_type
+            && parsed.episodes?.length === 1 && meta.share_selection?.file_id ? (
+            <Section title="保存到已有剧集目录（推荐）" icon={FolderSearch}>
+              <p className="text-xs leading-5 text-muted-foreground">
+                请进入阿里云盘资源库，选中 E01～E246 实际所在的最终文件夹。
+                如果原来的视频直接放在「吞噬星空」，就选这个文件夹；
+                如果位于「Season 01」，请进入该季文件夹再选择。
+                本次只将 E247 放进你选中的目录，不会再创建同名作品或季目录。
+              </p>
+              <Button variant="outline" size="sm" onClick={() => setExistingPickerOpen(true)}>
+                <FolderSearch />{existingFolder ? '重新选择已有目录' : '浏览阿里云盘已有目录'}
+              </Button>
+              {existingFolder ? (
+                <div className="rounded-md border border-primary/40 bg-primary/5 p-2 text-xs">
+                  <p className="font-medium">已选最终目标：/{existingFolder.path.replaceAll(' / ', '/')}</p>
+                  <p className="mt-1 text-muted-foreground">与原有剧集放在同一个文件夹；仅重命名 E247 文件，不额外建立作品目录。</p>
+                  {!existingFolder.driveId ? <p className="text-destructive">资源库 ID 未能核验，请重新打开目录选择器。</p> : null}
+                </div>
+              ) : null}
+              {existingPickerOpen ? (
+                <DirectoryPicker open initialProvider="aliyun" fixedProvider="aliyun"
+                  onOpenChange={setExistingPickerOpen}
+                  onSelect={(dir) => {
+                    if (!dir.driveId) { toast.error('无法读取阿里云盘资源库 ID，请重新打开目录'); return; }
+                    setExistingFolder(dir);
+                    setTargetDir('');
+                  }} />
+              ) : null}
+            </Section>
+          ) : null}
+
           {needDirs && dirs?.dirs.length && !conflict ? (
             <Section title="保存到">
-              <Select value={targetDir} onValueChange={setTargetDir}
+              {existingFolder ? <p className="mb-2 text-xs text-primary">已选择上面的已有剧集目录，本次不会使用下面的自动分类。</p> : null}
+              <Select value={targetDir} onValueChange={(v) => { setTargetDir(v); setExistingFolder(null); }}
                 options={dirs.dirs.map((d) => ({ value: d, label: dirs.paths[d] ? `${d}（${dirs.paths[d]}）` : d }))}
                 placeholder={detail.state === 'pending_approval' ? `自动 · ${detail.auto_path ?? detail.auto_dir ?? '按分类'}`
                   : `保持当前目录「${detail.context.save_dir_alias ?? '默认'}」`}
