@@ -63,6 +63,10 @@ class Pipeline:
         # 启动补拉期间推迟日报（见 hold_daily）；消息源完成补拉后由主进程置为 True
         self.sources_ready = True
         self._daily_hold_until: float | None = None
+        # Aggregate bursty notification failures, but keep per-message errors
+        # in the durable Outbox for review/retry. Log each error class/event
+        # at most once per minute to avoid hundreds of identical warnings.
+        self._delivery_warning_at: dict[tuple[str, str, str], float] = {}
 
     def notify_targets(self) -> list[str]:
         return list(self.cfg.get("providers", {}).get("notify", ["console"]))
@@ -255,6 +259,7 @@ class Pipeline:
 
     async def dispatch_deliveries(self) -> int:
         rows = self.store.claim_deliveries()
+        errors: dict[tuple[str, str, str], int] = {}
 
         async def deliver(row: dict) -> None:
             try:
@@ -296,14 +301,36 @@ class Pipeline:
                     await asyncio.wait_for(callback, timeout=30)
             except Exception as exc:
                 category = type(exc).__name__
+                # Bots cannot send Telegram messages to another bot. Retrying
+                # the exact same target cannot help and can flood the worker.
+                # Preserve the delivery as FAILED for manual replay after the
+                # owner ID / forwarding destination is corrected.
+                terminal = category == "UserIsBotError"
                 seconds = getattr(exc, "seconds", None)
                 delay = min(seconds, 86400) if type(seconds) in (int, float) and math.isfinite(seconds) and seconds > 0 else None
-                self.store.finish_delivery(row["id"], error=category, retry_after=delay)
-                log.warning("旁路投递失败 %s/%s，独立退避重试：%s", row["kind"], row["target"], category)
+                self.store.finish_delivery(row["id"], error=category,
+                                           retry_after=delay, terminal=terminal)
+                key = (row["target"], row["event"], category)
+                errors[key] = errors.get(key, 0) + 1
             else:
                 self.store.finish_delivery(row["id"])
 
         await asyncio.gather(*(deliver(row) for row in rows))
+        now = time.monotonic()
+        for (target, event, category), count in errors.items():
+            key = (target, event, category)
+            if now - self._delivery_warning_at.get(key, -1e6) < 60:
+                continue
+            self._delivery_warning_at[key] = now
+            if category == "UserIsBotError":
+                hint = ("检查 Telegram owner_id 是否填成 Bot ID"
+                        if event != "identified" else "检查识别后转发 forward.target 是否指向另一个 Bot")
+                log.error("Telegram 拒绝通知 %s/%s：%s，本批 %d 条标记为失败且停止自动重试；%s。"
+                          "原通知保留，可修正目标后在管理台手动重发",
+                          target, event, category, count, hint)
+            else:
+                log.warning("旁路投递失败 %s/%s：%s（本批 %d 条，按退避策略重试）",
+                            target, event, category, count)
         return len(rows)
 
     # ------------------------------------------------------------------ #
