@@ -115,6 +115,10 @@ export default function DashboardPage() {
     setRetrying(true);
     try {
       const { items } = await dashboardApi.failedDeliveries();
+      if (items.some((item) => item.error === 'UserIsBotError')
+        && !window.confirm('部分通知因 Telegram 不允许 Bot 给 Bot 发消息而失败。\\n请先确认「设置 → Telegram」中的 owner_id 是你自己的用户数字 ID，并检查「识别后转发」没有指向另一个 Bot。\\n已经修复目标后，再点击确定重发；否则会再次失败。')) {
+        return;
+      }
       let accepted = 0;
       for (const item of items) {
         try { await dashboardApi.retryDelivery(item.id); accepted += 1; } catch { /* 已被其他管理端重试 */ }
@@ -277,6 +281,13 @@ export default function DashboardPage() {
             {failedDeliveries > 0 ? (
               <div className="mt-3 space-y-2 text-xs" role="status">
                 <p className="text-destructive">存在历史发送失败记录；这不等于当前控制 Bot 已断开。</p>
+                {(d?.failed_deliveries ?? []).some((item) => item.error === 'UserIsBotError') ? (
+                  <p className="text-destructive">
+                    Telegram 拒绝 Bot 向另一个 Bot 发送消息：普通通知请检查「设置 → Telegram」的 owner_id
+                    是否为你的个人用户数字 ID；如果失败事件是 identified，请检查「识别后转发」的目标。
+                    修正接收目标后再点「重发失败」。
+                  </p>
+                ) : null}
                 {(d?.failed_deliveries ?? []).map((item) => (
                   <div key={item.id} className="rounded-md border border-border/80 bg-background/60 px-2.5 py-2">
                     <div className="flex flex-wrap justify-between gap-1">
