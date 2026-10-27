@@ -30,7 +30,7 @@ test('unknown saved Aliyun session automatically checks ONCE, no repeated click 
     return route.fulfill({ json: current });
   });
 
-  await page.goto(`${ROOT}/settings?tab=connections`);
+  await page.goto(`${ROOT}/config?tab=connections`);
   await expect(page.getByText('阿里云盘连接', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '重新检测' })).toBeVisible();
   expect(pings).toBe(1);
@@ -52,7 +52,7 @@ test('recent persisted success is shown without a needless refresh-token exchang
     pings++;
     return route.fulfill({ json: verified });
   });
-  await page.goto(`${ROOT}/settings?tab=connections`);
+  await page.goto(`${ROOT}/config?tab=connections`);
   await expect(page.getByText(/最近验证成功（读取历史检测结果）/)).toBeVisible();
   expect(pings).toBe(0);
   await page.getByRole('button', { name: '重新检测' }).click();
