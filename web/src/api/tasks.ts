@@ -17,8 +17,20 @@ export interface IShareFolderChoice {
   samples?: Array<{ name: string; path: string; size: number | null }>;
 }
 
+export interface IShareFileChoice {
+  file_id: string;
+  name: string;
+  path: string;
+  size: number | null;
+  episode: number | null;
+  selectable: boolean;
+}
+
 export interface IShareFolderPreview {
   folders: IShareFolderChoice[];
+  /** Exact source file options are shown only after a unique episode is known. */
+  files: IShareFileChoice[];
+  selected_file_id: string | null;
   selected_folder_id: string | null;
   saved_preference: boolean;
   provider: string;
@@ -51,6 +63,8 @@ export const taskApi = {
     get<IShareFolderPreview>(`tasks/${taskId}/share-folders`),
   chooseShareFolder: (taskId: string, folderId: string, remember = true) =>
     post<IShareFolderPreview>(`tasks/${taskId}/share-folder`, { folder_id: folderId, remember }),
+  chooseShareFile: (taskId: string, fileId: string) =>
+    post<IShareFolderPreview>(`tasks/${taskId}/share-file`, { file_id: fileId }),
   act: (taskId: string, endpoint: TaskEndpoint, body?: unknown) =>
     post<{ ok: boolean }>(`tasks/${taskId}/${endpoint}`, body),
   /** 修正识别结果，返回更新后的详情。 */
