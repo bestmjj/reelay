@@ -12,7 +12,7 @@ from reelay.core.config import normalize_config
 from reelay.core.parse_rules import parse_115_url, regex_fields
 from reelay.core.service import ConflictError
 from reelay.main import _serve_fetch
-from reelay.providers.parser import _regex_parse
+from reelay.providers.parser import _regex_parse, sanitize_llm_title
 
 from tests.fakes import FakeAI, SHARE, ServiceCase, media, message
 
@@ -75,6 +75,15 @@ class TestGenericRules(unittest.TestCase):
             with self.subTest(text=text):
                 f = regex_fields(text)
                 self.assertEqual((f["title"], f["year"], f["season"], f["episodes"], f["resolution"]), expected)
+
+    def test_aliyun_url_and_manual_source_instruction_are_never_titles(self):
+        text = "https://www.alipan.com/s/gsQB8YFoLZQ 选择分享根目录中的 247"
+        self.assertIsNone(regex_fields(text)["title"])
+        self.assertEqual(regex_fields("片名：吞噬星空 (2020) 第247集")["title"], "吞噬星空")
+        self.assertIsNone(sanitize_llm_title(text))
+        self.assertIsNone(sanitize_llm_title("选择分享根目录中的 247"))
+        self.assertIsNone(sanitize_llm_title("www.alipan.com/s/gsQB8YFoLZQ"))
+        self.assertEqual(sanitize_llm_title("吞噬星空"), "吞噬星空")
 
     def test_numbers_on_other_lines_are_not_episodes_or_sizes(self):
         f = regex_fields("片名：繁花\n年份：2023\n集数：第5集\n清晰度：4K")
