@@ -197,11 +197,34 @@ _TITLE_END_RE = re.compile(
 AD_KEYWORDS = ("招商", "广告", "投稿", "点击进群", "更多资源关注", "推广")
 
 
+# Manual one-off submissions frequently contain only a share link and
+# instructions ("选择分享根目录中的 247"). Neither is evidence of a title.
+# This also protects regex fallback when an LLM request failed.
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s]+", re.I)
+_SOURCE_INSTRUCTION_RE = re.compile(
+    r"^(?:请|帮我|麻烦|我要|我想|仅|只|直接)?(?:选择分享|选择文件|选择根目录|"
+    r"从分享|从根目录|转存|只转存|保存到|下载|只要第|只要|获取分享|"
+    r"分享根目录|阿里云盘分享|文件夹里|链接是|点击链接|指定第)"
+)
+
+
 def _title_line(text: str) -> str:
-    """片名所在的行：写明「名称：」「片名：」的行优先，否则第一个不全是话题标签与符号的行；去掉开头的 emoji 与符号。"""
-    lines = [re.sub(r"^[^\w【《(（\[]+", "", line).strip() for line in (text or "").splitlines()
-             if re.sub(r"#\S+|[^\w]", "", line)]
-    return next((line for line in lines if _LABEL_RE.match(line)), lines[0] if lines else "")
+    """Find a real-looking title line, never a URL or operator instructions."""
+    lines = []
+    for raw in (text or "").splitlines():
+        without_link = _URL_IN_TEXT_RE.sub(" ", raw)
+        line = re.sub(r"^[^\w【《(（\[]+", "", without_link).strip()
+        if not re.sub(r"#\S+|[^\w]", "", line):
+            continue
+        if _LABEL_RE.match(line):
+            return line
+        if _SOURCE_INSTRUCTION_RE.match(line):
+            continue
+        # "247 4K.mp4" is a source filename, not the identity of a show.
+        if re.match(r"^(?:第\s*)?\d{1,4}\s*(?:[集话]|[._ -]+(?:4k|\d{3,4}p))", line, re.I):
+            continue
+        lines.append(line)
+    return lines[0] if lines else ""
 
 
 def _title(line: str) -> str | None:
