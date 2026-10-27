@@ -107,6 +107,9 @@ class SubscriptionDecision(DefaultDecision):
     @staticmethod
     def promote(ctx: PipelineContext, decision: Decision) -> Decision:
         p, rule = ctx.parsed, ctx.source_rule or {}
+        if (not p or not p.title or not p.title.strip()
+                or p.media_type not in ("movie", "tv", "anime")):
+            return decision
         if decision != Decision.ASK or ctx.meta.get("parse", {}).get("fallback"):
             return decision
         if p.confidence < rule.get("confidence_threshold", CONFIDENCE_ASK_THRESHOLD):
