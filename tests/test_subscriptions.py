@@ -9,9 +9,10 @@ from reelay.control import manage
 from reelay.core import messages, secret_store, subscriptions
 from reelay.core.contracts import Decision, TaskState
 from reelay.core.service import ConflictError
+from reelay.core.service.follow import subscription_unrecorded
 from reelay.providers.decision import LLMDecision, SubscriptionDecision
 
-from tests.fakes import FakeAI, ServiceCase, bot_for, tv_ctx
+from tests.fakes import FakeAI, ServiceCase, bot_for, done_task, tv_ctx
 
 
 class TestSubscriptionDecision(ServiceCase):
@@ -220,6 +221,56 @@ class TestSubscriptionService(ServiceCase):
         self.parser._client = None
         result = await self.service.resolve_subscription("我在追《繁花》")
         self.assertEqual((result["query"]["title"], result["candidates"]), ("繁花", []))
+
+
+class TestSubscriptionLiveProgress(ServiceCase):
+    async def test_stale_daily_report_never_counts_live_verified_e106_as_unrecorded(self):
+        self.subscribe({"title": "牧神记", "season": 1, "tmdbid": 236534, "total": 110})
+        done_task(self.store, "106", title="牧神记", episodes=(106,), tmdbid=236534)
+        stale = {"series": {"牧神记|S01": {
+            "missing": list(range(1, 111)), "aired": 110,
+        }}}
+        with patch.object(self.pl, "query", return_value=stale):
+            first = self.service.list_subscriptions()["items"][0]
+        self.assertEqual(first["have"], [106])
+        self.assertNotIn(106, first["missing"])
+        self.assertEqual(len(first["missing"]), 109)
+        self.assertEqual(first["missing"][:2], [1, 2])
+        self.assertEqual(first["missing"][-1], 110)
+        # A subsequently completed new episode updates the list immediately;
+        # it must not wait until the next daily tracker run.
+        done_task(self.store, "107", title="牧神记", episodes=(107,), tmdbid=236534)
+        with patch.object(self.pl, "query", return_value=stale):
+            refreshed = self.service.list_subscriptions()["items"][0]
+        self.assertEqual(refreshed["have"], [106, 107])
+        self.assertNotIn(107, refreshed["missing"])
+        self.assertEqual(len(refreshed["missing"]), 108)
+
+    async def test_wrong_e247_quarantine_is_not_counted_as_registered(self):
+        self.subscribe({"title": "吞噬星空", "season": 1, "tmdbid": 101172, "total": 260})
+        wrong = done_task(self.store, "247", title="吞噬星空",
+                          episodes=(247,), tmdbid=101172)
+        wrong.ns("storage")["manifest"] = {
+            "pairs": [[1, 247]],
+            "files": [{"id": "wrong-4k-file", "name": "4K.mp4",
+                       "size": 4040000000, "share_path": "洛DA/4K.mp4"}],
+        }
+        self.store.save_task(wrong)
+        before = self.service.list_subscriptions()["items"][0]
+        self.assertIn(247, before["have"])
+        self.store.quarantine_transfer(wrong, reason="E247 错误选择了旁支目录下的 4K.mp4 文件")
+        after = self.service.list_subscriptions()["items"][0]
+        self.assertEqual(after["quarantined"], [247])
+        self.assertNotIn(247, after["have"])
+        self.assertIn(247, after["missing"])
+        self.assertEqual(after["observed"], [])
+        self.assertFalse(after["missing_truncated"])
+
+    def test_very_large_declared_season_is_bounded_and_explicit(self):
+        missing, truncated = subscription_unrecorded([106], 10 ** 9, {})
+        self.assertTrue(truncated)
+        self.assertEqual(len(missing), 4999)
+        self.assertNotIn(106, missing)
 
 
 class TestSubscriptionSuggestions(ServiceCase):
