@@ -256,15 +256,70 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
                        if (str(share_folder_id) in _share_file_ancestors(x)
                            if str(share_folder_id) != SHARE_ROOT_DIRECT
                            else not _share_file_ancestors(x))]
-        # A wrapper directory containing *both* HDR/DV versions is not a
-        # choice of version. Require selecting a more specific child folder.
-        if _overlapping_share_versions(video_items, parsed):
-            raise NeedsManual("选中的文件夹内部还有同集不同版本，请选择更具体的版本子文件夹")
-    else:
-        multiple = _overlapping_share_versions(video_items, parsed)
-        if multiple:
-            raise NeedsManual("分享包含多个版本文件夹（" + "、".join(multiple[:4])
-                              + "），同一集有不同来源；请在任务详情选择一个分享版本")
+    # Resolve known episode identities BEFORE deciding whether two source
+    # folders conflict. Old DoVi/HDR duplicates are irrelevant if that episode
+    # was already verified on the destination drive. Only missing episodes
+    # require a source-version choice. Never use this shortcut for variety
+    # editions (upper/lower/bonus are independent content), unnumbered files,
+    # conflicting season labels, or episodes quarantined as incorrect.
+    stored_pairs = {(int(season), int(ep)) for season, ep in stored}
+    blocked_pairs = {(int(season), int(ep)) for season, ep in blocked_episodes}
+    requested = set(parsed.episodes) if scope == "message" and parsed.episodes else set()
+    source_names = {item.get("name", "") for item in video_items}
+    seen_stored: set[tuple[int, int]] = set()
+    has_variety = any(variety_episode(item.get("name", ""))
+                      for item in video_items if is_video(item.get("name", "")))
+    if episodic and not has_variety and (stored_pairs or requested):
+        remaining = []
+        for item in video_items:
+            name = item.get("name", "")
+            if not is_video(name) or is_extra(name):
+                remaining.append(item)
+                continue
+            file_season, ep = episode_of(name)
+            folder_season = season_of(item.get("share_path") or "")
+            if ep is None or (file_season is not None and folder_season is not None
+                              and file_season != folder_season):
+                remaining.append(item)  # cannot infer or silently suppress it
+                continue
+            season = file_season or folder_season or parsed.season or 1
+            pair = (season, ep)
+            if requested and ep not in requested:
+                continue  # unrelated known historical episode in a latest-only share
+            if pair in blocked_pairs:
+                raise NeedsManual(f"目标 S{season:02d}E{ep:03d} 曾被标记为错片，"
+                                  "需人工解除隔离后才允许重新转存")
+            if pair in stored_pairs:
+                seen_stored.add(pair)
+                continue
+            remaining.append(item)
+        video_items = remaining
+        if not any(is_video(item.get("name", "")) and not is_extra(item.get("name", ""))
+                   for item in video_items):
+            if seen_stored:
+                label = "、".join(f"S{season:02d}E{ep:03d}"
+                                 for season, ep in sorted(seen_stored)[:8])
+                raise AlreadyStored(f"分享中可核验的季集均已入库（{label}），无需选择 DoVi/HDR 版本")
+            if requested:
+                raise NeedsManual(f"分享内未找到消息声明的集数 {sorted(requested)}")
+
+    # Version conflicts now concern only NOT-YET-STORED episode files.
+    # Choosing a wrapper is still unsafe if any missing episode appears
+    # in several child version folders.
+    multiple = _overlapping_share_versions(video_items, parsed)
+    if multiple:
+        missing = set()
+        for item in video_items:
+            file_season, ep = episode_of(item.get("name", ""))
+            if ep is not None:
+                missing.add((file_season or season_of(item.get("share_path") or "")
+                             or parsed.season or 1, ep))
+        label = "、".join(f"S{season:02d}E{ep:03d}"
+                         for season, ep in sorted(missing)[:10])
+        if share_folder_id is not None:
+            raise NeedsManual(f"所选目录仍包含缺失集 {label} 的多个版本，请选择更具体的版本子文件夹")
+        raise NeedsManual("缺失集 " + label + " 存在多个分享版本文件夹（"
+                          + "、".join(multiple[:4]) + "），请只为缺失集选择一个版本")
     # A share containing a correctly labelled E247 at the root AND an
     # unrelated video named 4K.mp4 in another folder must never let AI
     # invent E247 for that unrelated file. Require an explicit source folder.
@@ -286,7 +341,9 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         videos = [x for x in video_items if type(x.get('size')) is int and x['size'] >= MOVIE_MIN_SIZE]
     if not videos:
         raise NeedsManual('分享内未找到正片视频文件')
-    names = {x.get('name', '') for x in videos}
+    # Hints may still name an existing (filtered) episode: validate against
+    # the original share choice, never let an LLM invent a non-existent file.
+    names = source_names
     for name in [*hints.get('episodes', {}), *hints.get('drop', []), *filter(None, [hints.get('movie_file')])]:
         if name not in names:
             raise NeedsManual(f'方案引用了分享里没有的正片文件：{name}')
