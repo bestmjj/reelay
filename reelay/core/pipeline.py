@@ -180,6 +180,9 @@ class Pipeline:
 
     def target_preview(self, ctx: PipelineContext) -> str:
         """不手动改目录时任务将存入的位置（含二级分类），供审批卡片与管理台展示。"""
+        existing = ctx.meta.get("library", {}).get("direct_existing") or {}
+        if existing.get("path"):
+            return existing["path"]
         with self.scope(ctx):
             for hook in self.reg.hooks_for("before_save", self.task_config(ctx)):
                 if hasattr(hook, "preview"):
@@ -536,6 +539,27 @@ class Pipeline:
             raise ValueError(f"目录「{alias}」不是有效的 115 目录，请在设置中重新选择")
         if provider == "aliyun" and not (cid.isascii() and cid.replace("_", "").replace("-", "").isalnum()):
             raise ValueError(f"目录「{alias}」不是有效的阿里云盘目录 ID")
+        existing = ctx.meta.get("library", {}).get("direct_existing") or {}
+        if existing:
+            if provider != "aliyun" or existing.get("provider") != "aliyun":
+                raise ValueError("已有剧集目录仅允许用于阿里云盘任务")
+            if (not ctx.parsed or ctx.parsed.title != existing.get("title")
+                    or len(ctx.episode_pairs()) != 1
+                    or not ctx.ns("share_selection").get("file_id")):
+                raise ValueError("作品、季集或选定源文件发生变化，不能沿用原来的剧集目录")
+            storage = self.reg.get_provider("storage", "aliyun")
+            try:
+                if str(storage.client.drive_id) != existing.get("drive_id"):
+                    raise ValueError("阿里云盘资源库已变化")
+                attr = storage.library().get_attr(existing["id"])
+                path = storage.dir_path(existing["id"])
+                if (not attr.get("is_dir") or str(attr.get("id")) != existing["id"]
+                        or path != existing["path"]):
+                    raise ValueError("已有剧集目录被移动、更名或删除")
+            except Exception:
+                raise ValueError("已有剧集目录无法再次核验，请检查资源库、路径后重新确认") from None
+            cid = existing["id"]
+            ctx.log(f"再次核验已有剧集目标目录：{existing['path']}")
         ctx.save_dir_alias, ctx.save_dir_cid = alias, cid
 
     def _skip_duplicate(self, ctx: PipelineContext, reason: str) -> None:
