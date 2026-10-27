@@ -38,7 +38,9 @@ class TaskOpsMixin(ServiceBase):
         elif ctx.ns("library").pop("pinned", None):
             ctx.save_dir_alias = None  # 撤销此前手动指定的目录，重新按分类
         ctx.state = TaskState.QUEUED
-        ctx.log("管理端批准转存")
+        ctx.ns("task")["user_approved"] = True
+        ctx.ns("task").pop("skip", None)
+        ctx.log("管理端批准并加入队列；只有网盘复制完成并核验后才算已入库，去重可能跳过")
         self._update(ctx, expected=TaskState.PENDING_APPROVAL)
         self._record(ctx, "approve", {"save_dir_alias": save_dir_alias or None, "target": target}, advice)
         try:
@@ -220,6 +222,7 @@ class TaskOpsMixin(ServiceBase):
             raise ConflictError("文件已经转存，不能直接忽略；请重新整理或删除转存文件")
         previous = ctx.state
         ctx.state = TaskState.SKIPPED
+        ctx.ns("task")["skip"] = {"kind": "user", "reason": "用户在管理端主动忽略失败或待人工任务"}
         ctx.log("管理端忽略了这条任务，不再处理")
         self._update(ctx, expected=previous)
 
