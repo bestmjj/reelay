@@ -196,6 +196,9 @@ class PermalinkSubmissionTests(WebCase):
                                       json={"file_id": "good247"})
         self.assertEqual(chosen.status_code, 200, chosen.text)
         self.assertEqual(chosen.json()["selected_file_id"], "good247")
+        no_target = self.client.post(f"/api/tasks/{task_id}/approve", json={})
+        self.assertEqual(no_target.status_code, 409, no_target.text)
+        self.assertIn("目标保存目录", no_target.text)
         # An Aliyun transfer may not target an unrelated 115 directory.
         wrong = self.client.post(f"/api/tasks/{task_id}/approve", json={
             "save_dir_alias": "115剧集",
