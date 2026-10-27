@@ -34,7 +34,8 @@ class SubscriptionSimulationWebTests(WebCase):
         self.assertEqual(body["state"], "received")
         ctx = store.get_task(body["task_id"])
         self.assertTrue(ctx.raw.extra["manual_import"])
-        self.assertEqual(ctx.source_rule["approval_mode"], "auto")
+        self.assertEqual(ctx.source_rule["approval_mode"], "manual")
+        self.assertTrue(ctx.raw.extra["manual_review"])
         self.assertEqual(pipeline.rule_for("@shareAliyun")["approval_mode"], "manual")
         # Historical Telegram permalinks are supported, but the test instance
         # has no live listener. Fail safely without silently using another post.
