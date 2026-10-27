@@ -94,7 +94,7 @@ jobs:
       - name: Exercise actual subscriptions page
         working-directory: web
         run: |
-          npx playwright test e2e/subscriptions.spec.ts e2e/subscriptions-list.spec.ts e2e/aliyun-auth-status.spec.ts --browser=chromium --workers=1 --reporter=line
+          npx playwright test e2e/subscriptions.spec.ts e2e/subscriptions-list.spec.ts e2e/aliyun-auth-status.spec.ts e2e/manual-e247.spec.ts --browser=chromium --workers=1 --reporter=line
       - uses: actions/upload-artifact@v4
         if: always()
         with:
