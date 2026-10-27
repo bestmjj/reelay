@@ -350,6 +350,14 @@ class LibraryRouter(_MediaLibrary):
 
     async def run(self, ctx: PipelineContext) -> bool:
         ns = ctx.ns("library")
+        if ns.get("direct_existing"):
+            ns.pop("relative_category", None)
+            ns.pop("category_path", None)
+            note = "手动指定现有剧集目录，跳过自动分类及新作品目录创建"
+            if ns.get("note") != note:
+                ctx.log(note)
+            ns["note"] = note
+            return True
         target = route(ctx.parsed, ctx.source_rule, current=ctx.save_dir_alias, pinned=ns.get("pinned"),
                        preferred=ns.get("preferred"))
         if target["alias"]:
@@ -395,6 +403,12 @@ class Organizer(_MediaLibrary):
         mapping = {f["name"]: (f.get("season"), f["episode"]) for f in manifest.get("files", [])
                    if f.get("name") and type(f.get("episode")) is int}
         ns["plan"] = build_plan(ctx.parsed, landed, relative_category, mapping)
+        if ctx.ns("library").get("direct_existing"):
+            # The operator selected the *leaf directory holding earlier episodes*.
+            # Keep the validated episode file name, but never nest another
+            # <title>/Season XX tree beneath that existing final directory.
+            for item in ns["plan"]:
+                item["target_dir"] = ""
         ns["base_cid"] = ctx.save_dir_cid
         ns["relative_category"] = relative_category
         ns.pop("error", None)
