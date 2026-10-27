@@ -43,13 +43,16 @@ class TaskOpsMixin(ServiceBase):
                         or ctx.ns("share_selection").get("folder_id")):
                     raise ConflictError("请先读取分享列表，选择正确的源文件或源文件夹，再确认转存")
         advice = self.advice_action(ctx)
-        target = self.pipeline.target_preview(ctx)
         if save_dir_alias:
-            self._validate_alias(save_dir_alias)
+            provider = (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
+                        or self.pipeline.cfg["defaults"].get("storage", "p115"))
+            self._validate_alias(save_dir_alias, provider=provider)
             ctx.save_dir_alias = save_dir_alias
             ctx.ns("library")["pinned"] = save_dir_alias
         elif ctx.ns("library").pop("pinned", None):
             ctx.save_dir_alias = None  # 撤销此前手动指定的目录，重新按分类
+        # Preview and approval audit must reflect the manually pinned target.
+        target = self.pipeline.target_preview(ctx)
         ctx.state = TaskState.QUEUED
         ctx.ns("task")["user_approved"] = True
         ctx.ns("task").pop("skip", None)
@@ -331,7 +334,9 @@ class TaskOpsMixin(ServiceBase):
             if save_dir_alias and save_dir_alias != ctx.save_dir_alias:
                 raise ConflictError("处理冲突时不能同时更换保存目录")
         if save_dir_alias and save_dir_alias != ctx.save_dir_alias:
-            self._validate_alias(save_dir_alias)
+            provider = (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
+                        or self.pipeline.cfg["defaults"].get("storage", "p115"))
+            self._validate_alias(save_dir_alias, provider=provider)
             ctx.save_dir_alias = save_dir_alias
             ctx.save_dir_cid = self.pipeline.cfg["save_dirs"][save_dir_alias]
             ctx.meta.pop("library", None)  # 改到其他目录后不再套用分类子目录
