@@ -319,7 +319,7 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         if share_folder_id is not None:
             raise NeedsManual(f"所选目录仍包含缺失集 {label} 的多个版本，请选择更具体的版本子文件夹")
         raise NeedsManual("缺失集 " + label + " 存在多个分享版本文件夹（"
-                          + "、".join(multiple[:4]) + "），请只为缺失集选择一个版本")
+                          + "、".join(multiple[:4]) + "），请为缺失集选择一个分享版本")
     # A share containing a correctly labelled E247 at the root AND an
     # unrelated video named 4K.mp4 in another folder must never let AI
     # invent E247 for that unrelated file. Require an explicit source folder.
