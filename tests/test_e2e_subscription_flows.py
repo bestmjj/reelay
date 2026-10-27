@@ -65,7 +65,7 @@ class SubscriptionFlowE2E(WebCase):
         self.assertEqual(ctx.state, TaskState.PENDING_APPROVAL)
         self.assertTrue(any("人工补齐" in step for step in ctx.trail))
 
-    def test_known_single_episode_queues_without_expanding_old_pack(self):
+    def test_known_single_episode_requires_source_review_without_expanding_old_pack(self):
         result = self.client.post("/api/resources/submit", json={
             "text": "牧神记 第106集 https://www.alipan.com/s/abc123",
             "source": "@shareAliyun"})
