@@ -282,7 +282,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               mediaType={parsed?.media_type} className="w-20 shrink-0" quality="w185" />
             <div className="min-w-0 space-y-2">
               <div className="flex flex-wrap items-center gap-2">
-                <StatusBadge state={detail.state} />
+                <StatusBadge state={detail.state} skipKind={detail.skip_kind} />
                 {parsed?.year ? <span className="text-sm text-muted-foreground">{parsed.year}</span> : null}
               </div>
               <MediaMeta mediaType={parsed?.media_type} season={parsed?.season} episodes={parsed?.episodes}
@@ -300,6 +300,21 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               </div>
             </div>
           </div>
+
+          {detail.state === 'skipped' && detail.skip_reason ? (
+            <div className="rounded-lg border bg-muted/40 p-3 text-sm leading-6">
+              <p className="font-semibold">
+                {detail.skip_kind === 'duplicate' ? '安全去重：没有进行新的转存' : '任务跳过原因'}
+              </p>
+              <p className="mt-1 break-words text-muted-foreground">{detail.skip_reason}</p>
+              {detail.skip_kind === 'duplicate' ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  去重依据是已有入库记录，不能证明所选 DoVi/HDR.Vivid 与库内版本完全相同。
+                  如认为已有文件有误，请先核验原文件或使用错片隔离，切勿直接重复提交。
+                </p>
+              ) : null}
+            </div>
+          ) : null}
 
           {detail.error || organizeError || detail.explanation ? (
             <div className="flex gap-2.5 rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">
