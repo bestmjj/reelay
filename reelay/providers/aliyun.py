@@ -367,12 +367,16 @@ class AliyunStorage(ShareStorage):
         walk("root", 0, (), ())
         return out
 
-    def share_folder_choices(self, parsed) -> list[dict]:
-        """Show the complete share directory tree, including empty branches."""
+    def share_source_inventory(self, parsed) -> dict:
+        """Read-only full share source list; protect explicit per-file choices."""
         from types import SimpleNamespace
-        from .storage import share_folder_choices
-        return share_folder_choices(
-            self._share_files(SimpleNamespace(parsed=parsed), include_dirs=True))
+        from .storage import share_folder_choices, share_video_choices
+        listing = self._share_files(SimpleNamespace(parsed=parsed), include_dirs=True)
+        return {"folders": share_folder_choices(listing),
+                "files": share_video_choices(listing, parsed)}
+
+    def share_folder_choices(self, parsed) -> list[dict]:
+        return self.share_source_inventory(parsed)["folders"]
 
     def inspect_share(self, parsed, *, describe: bool) -> dict:
         from types import SimpleNamespace
