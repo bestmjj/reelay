@@ -117,6 +117,8 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_regex_can_auto_save_and_clears_old_fallback(self):
         ctx = context()
+        # Explicit episode marker yields a trustworthy media type for auto mode.
+        ctx.raw.text = "剧 第3集 4K https://115.com/s/actual?password=abcd"
         ctx.source_rule = {"approval_mode": "auto"}
         ctx.ns("parse")["fallback"] = True
         ctx.parsed = await RegexParser().parse(ctx)
@@ -357,6 +359,7 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
                "plugins": {"organizer": {"enabled": False}}, "providers": {"notify": []}}
         pipeline = Pipeline(reg, self.store(), cfg)
         ctx = context()
+        ctx.raw.text = "剧 第3集 4K https://115.com/s/actual?password=abcd"
         await pipeline.process_new(ctx)
         with self.assertRaises(asyncio.CancelledError):
             await pipeline.execute_save(ctx)
@@ -571,6 +574,7 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
         pipeline = Pipeline(reg, self.store(), cfg)
         service = ManagementService(pipeline.store, pipeline, config_path=str(Path(self.temp.name) / "config.yaml"))
         ctx = context()
+        ctx.raw.text = "剧 第3集 4K https://115.com/s/actual?password=abcd"
         await pipeline.process_new(ctx)
         self.assertTrue(pipeline.store.get_task(ctx.task_id).ns("parse")["fallback"])
         await service.save_config({"defaults": {"parser": "regex", "approval_mode": "auto"}, "providers": {"notify": ["test"]}})
