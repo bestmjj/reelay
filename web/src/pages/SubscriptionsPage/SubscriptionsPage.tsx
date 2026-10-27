@@ -460,22 +460,63 @@ export default function SubscriptionsPage() {
               : <div className="space-y-3">{[0, 1].map((i) => <Skeleton key={i} className="h-12" />)}</div>)
               : data.items.length ? (
                 <div className="space-y-4">
-                  {categories.length > 1 ? (
-                    <Segmented label="类型" size="md" value={category} onChange={setCategory}
-                      options={['', ...categories].map((c) => ({
-                        value: c,
-                        label: <>{c || '全部'}<span className="text-xs tabular-nums text-muted-foreground">
-                          {data.items.filter((i) => !c || i.category === c).length}</span></>,
-                      }))} />
-                  ) : null}
-                  {active.length ? <div className="divide-y divide-border/70">{active.map(row)}</div>
-                    : <p className="text-sm text-muted-foreground">这个类型没有在追的剧。</p>}
-                  {finished.length ? (
-                    <div>
-                      <p className="mb-1 text-xs font-medium text-muted-foreground">已完结 · 播完且全部入库后自动结束</p>
-                      <div className="divide-y divide-border/70">{finished.map(row)}</div>
+                  <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_10rem]">
+                    <Input aria-label="搜索已订阅片名" value={listQuery}
+                      onChange={(e) => { setListQuery(e.target.value); setListPage(1); }}
+                      placeholder="搜索片名、别名或 TMDB ID" />
+                    <Select aria-label="订阅状态筛选" value={listStatus}
+                      onValueChange={(value) => { setListStatus(value as SubscriptionStatusFilter); setListPage(1); }}
+                      options={[
+                        { value: 'all', label: '全部状态' },
+                        { value: 'active', label: '正在追更' },
+                        { value: 'finished', label: '已完结' },
+                      ]} />
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    {categories.length > 1 ? (
+                      <Segmented label="类型" size="md" value={category}
+                        onChange={(value) => { setCategory(value); setListPage(1); }}
+                        options={['', ...categories].map((value) => ({
+                          value,
+                          label: <>{value || '全部'}<span className="text-xs tabular-nums text-muted-foreground">
+                            {data.items.filter((item) => !value || item.category === value).length}</span></>,
+                        }))} />
+                    ) : null}
+                    <Select aria-label="订阅排序" value={listSort}
+                      className="w-40"
+                      onValueChange={(value) => { setListSort(value as SubscriptionSort); setListPage(1); }}
+                      options={[
+                        { value: 'recent', label: '最近检索' },
+                        { value: 'name', label: '片名排序' },
+                        { value: 'unrecorded', label: '未登记集数最多' },
+                      ]} />
+                  </div>
+                  {paged.total ? (
+                    <>
+                      {active.length ? <div className="divide-y divide-border/70">{active.map(row)}</div> : null}
+                      {finished.length ? (
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-muted-foreground">已完结 · 自动结束追更</p>
+                          <div className="divide-y divide-border/70">{finished.map(row)}</div>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : <p className="py-4 text-sm text-muted-foreground" role="status">
+                    没有匹配的订阅；可以修改搜索词或筛选条件。
+                  </p>}
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-3 text-xs text-muted-foreground">
+                    <span role="status">显示 {paged.start}–{paged.end} 条，共 {paged.total} 条</span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Select aria-label="订阅每页条数" value={String(listPageSize)} className="w-32"
+                        onValueChange={(value) => { setListPageSize(Number(value)); setListPage(1); }}
+                        options={[10, 20, 50].map((size) => ({ value: String(size), label: `每页 ${size} 条` }))} />
+                      <Button size="sm" variant="outline" aria-label="订阅上一页"
+                        disabled={paged.page <= 1} onClick={() => setListPage(paged.page - 1)}>上一页</Button>
+                      <span className="tabular-nums">{paged.page}/{paged.pages}</span>
+                      <Button size="sm" variant="outline" aria-label="订阅下一页"
+                        disabled={paged.page >= paged.pages} onClick={() => setListPage(paged.page + 1)}>下一页</Button>
                     </div>
-                  ) : null}
+                  </div>
                 </div>
               ) : <p className="text-sm text-muted-foreground">还没有订阅。在待审批里点「追这部剧」，或在上面用一句话添加。</p>}
           </Panel>
