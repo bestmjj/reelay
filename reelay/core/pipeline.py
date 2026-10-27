@@ -412,7 +412,7 @@ class Pipeline:
             ctx.ns("tmdb").clear()
             if ctx.decision != Decision.SKIP:
                 ctx.decision = Decision.ASK
-                ctx.log("手动分享只有链接或操作说明：请填写真实片名、类型、季集后选择源文件")
+                ctx.log("手动分享只有链接或操作说明：需人工补齐真实片名、类型、季集后选择源文件")
         if ctx.raw.extra.get("manual_import") and ctx.parsed and (
                 ctx.parsed.media_type in ("tv", "anime") or ctx.parsed.episodes):
             # One-click historical saves must never copy an entire hidden
