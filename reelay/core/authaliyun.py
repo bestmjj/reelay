@@ -131,6 +131,16 @@ class AliyunAuth:
             try:
                 return self.set_token(token)
             except Exception as exc:
+                # Worker and Web use the same atomic secret file but separate
+                # processes. Another request may have *successfully rotated*
+                # the refresh token while this probe was in flight. If so,
+                # retry the replacement ONCE before declaring it expired.
+                latest = secret_store.get("aliyun_refresh_token")
+                if latest and latest != token:
+                    try:
+                        return self.set_token(latest)
+                    except Exception as newer:
+                        token, exc = latest, newer
                 self._fingerprint = hashlib.sha256(token.encode()).hexdigest()
                 if isinstance(exc, AliyunAPIError) and (exc.status in (401, 403)
                         or any(part in exc.code.lower() for part in ("invalid", "expired", "token"))):
