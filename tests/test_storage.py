@@ -333,6 +333,37 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done_b.state, TaskState.SKIPPED)
         self.assertEqual(len(self.cloud.receives()), 1)
 
+    async def test_approved_matching_episode_is_recorded_as_duplicate_not_user_rejection(self):
+        # The administrator approved a new share, but the same episode was
+        # already VERIFIED on this cloud account. Never copy it again and
+        # never label the result as the user's deliberate "ignore" action.
+        self.cloud.add_share("old", "小城良方.S01E14.mkv")
+        self.cloud.add_share("new", "小城良方.S01E14.mkv")
+        first = await self.execute(self.task("old", title="小城良方", episodes=(14,)))
+        self.assertEqual(first.state, TaskState.DONE)
+        pending = self.task("new", title="小城良方", episodes=(14,))
+        pending.state = TaskState.PENDING_APPROVAL
+        self.store.save_task(pending)
+        await self.service.approve(pending.task_id)
+        approved = self.store.get_task(pending.task_id)
+        self.assertEqual(approved.state, TaskState.QUEUED)
+        self.assertTrue(approved.ns("task")["user_approved"])
+        # Confirming the form must not issue a cloud transfer immediately.
+        self.assertEqual(len(self.cloud.receives()), 1)
+        skipped = await self.execute(pending)
+        self.assertEqual(skipped.state, TaskState.SKIPPED)
+        self.assertEqual(skipped.ns("task")["skip"]["kind"], "duplicate")
+        self.assertIn("均已入库", skipped.ns("task")["skip"]["reason"])
+        self.assertTrue(skipped.ns("task")["user_approved"])
+        self.assertEqual(len(self.cloud.receives()), 1)
+        self.assertFalse(skipped.ns("storage").get("manifest"))
+        # No stale resource claim should block a later new episode.
+        claimed = self.store._conn.execute(
+            "SELECT count(*) AS count FROM resource_claims WHERE task_id=?",
+            (pending.task_id,),
+        ).fetchone()["count"]
+        self.assertEqual(claimed, 0)
+
     async def test_different_shares_of_same_episode_are_serialized(self):
         self.cloud.add_share('a', 'S01E01.mkv')
         self.cloud.add_share('b', 'S01E01.mkv')
