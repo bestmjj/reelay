@@ -336,6 +336,8 @@ class Pipeline:
             return
         if not await self.run_hooks("before_parse", ctx):
             ctx.state = TaskState.SKIPPED
+            ctx.ns("task")["skip"] = {"kind": "rule", "reason": "消息被解析前规则拦截"}
+            ctx.log("规则拦截了消息，未进入转存队列")
             self.store.save_task(ctx)
             return
 
@@ -364,6 +366,8 @@ class Pipeline:
 
         if not await self.run_hooks("after_parse", ctx):
             ctx.state = TaskState.SKIPPED
+            ctx.ns("task")["skip"] = {"kind": "rule", "reason": "解析后的规则检查不允许继续处理"}
+            ctx.log("解析后规则拦截了消息，未进入转存队列")
             self.store.save_task(ctx)
             return
 
@@ -412,6 +416,10 @@ class Pipeline:
                 if (ctx.parsed and ctx.parsed.is_ad)
                 else TaskState.SKIPPED
             )
+            if ctx.state == TaskState.SKIPPED:
+                reason = (f"该作品在不接收列表中：{blocked['title']}" if blocked
+                          else "来源决策规则判定无需转存（不是用户在审核时点击忽略）")
+                ctx.ns("task")["skip"] = {"kind": "rule", "reason": reason}
             await self.emit("on_rejected", ctx, persist=False)
             self.store.save_task(ctx)
             return
@@ -444,7 +452,14 @@ class Pipeline:
         ctx = self.store.get_task(task_id)
         if not ctx or ctx.state != TaskState.PENDING_APPROVAL:
             return False
-        return self.store.set_state(task_id, TaskState.SKIPPED, expected=TaskState.PENDING_APPROVAL)
+        ctx.ns("task")["skip"] = {"kind": "user", "reason": "用户明确点击了忽略"}
+        ctx.state = TaskState.SKIPPED
+        ctx.log("用户明确点击忽略，不会转存")
+        try:
+            self.store.update_task_context(ctx, expected=TaskState.PENDING_APPROVAL)
+        except ValueError:
+            return False
+        return True
 
     # ------------------------------------------------------------------ #
     # 阶段 3：转存 + 整理（由 worker 从队列取出后调用）
@@ -476,6 +491,18 @@ class Pipeline:
         if provider == "aliyun" and not (cid.isascii() and cid.replace("_", "").replace("-", "").isalnum()):
             raise ValueError(f"目录「{alias}」不是有效的阿里云盘目录 ID")
         ctx.save_dir_alias, ctx.save_dir_cid = alias, cid
+
+    def _skip_duplicate(self, ctx: PipelineContext, reason: str) -> None:
+        """No cloud write occurred: preserve *why* an approved task was skipped.
+
+        Do not present deduplication as a user rejection. Release preparatory
+        content claims, otherwise future updates on the same show can stall.
+        """
+        self.store.release_resource(ctx.task_id)
+        ctx.state = TaskState.SKIPPED
+        ctx.ns("task")["skip"] = {"kind": "duplicate", "reason": reason[:500]}
+        ctx.log("安全去重，未发送转存请求：" + reason[:500])
+        self.store.save_task(ctx)
 
     async def execute_save(self, ctx: PipelineContext) -> None:
         """转存和整理分别有持久化边界；未知写结果仅核验，绝不重发。"""
@@ -534,6 +561,8 @@ class Pipeline:
                     return
             if not await self.run_hooks("before_save", ctx):
                 ctx.state = TaskState.SKIPPED
+                ctx.ns("task")["skip"] = {"kind": "rule", "reason": "转存前规则拒绝，尚未进行网盘复制"}
+                ctx.log("转存前规则拦截，未发送复制请求")
                 self.store.save_task(ctx)
                 return
             self._resolve_directory(ctx)
@@ -560,9 +589,7 @@ class Pipeline:
             # 剧集分享链接常在追更中原地增加新集：剧集按集去重，其他按分享去重。
             if not self._episodic(ctx) and self.store.saved_share(
                     ctx.parsed.share_code, dedup_cid, provider_name):
-                ctx.state = TaskState.SKIPPED
-                ctx.log("执行前去重命中，分享已转存到该目录")
-                self.store.save_task(ctx)
+                self._skip_duplicate(ctx, "该分享链接此前已在目标目录核验保存；没有重复发送复制请求")
                 return
             # work 是作品身份（TMDB ID、规范片名与年份）：同名的不同作品不会互相当成已入库
             ns["identity"] = {
@@ -634,19 +661,25 @@ class Pipeline:
                 with self.scope(ctx):
                     manifest = await storage.prepare(ctx)
             except AlreadyStored as exc:
-                ctx.state = TaskState.SKIPPED
-                ctx.log(f"执行前去重命中：{exc}")
-                self.store.save_task(ctx)
+                version = ctx.ns("share_selection").get("path")
+                detail = (f"；本次选择的来源文件夹是「{version}」，但去重按已保存的作品/季集判断，"
+                          "不代表已有文件与此版本的 HDR 格式完全相同；不会自动洗版"
+                          if version else "")
+                self._skip_duplicate(
+                    ctx, f"{exc}；本次未复制任何文件{detail}。"
+                    "如认为原有文件不正确，请先核实已入库记录，切勿直接重复转存")
                 return
             except ShareUnavailable as exc:
                 # 读不到分享就无法按清单去重；消息写明的集都已入库时，这条只是重复消息，不算失败
                 declared = ctx.episode_pairs()
                 stored = {tuple(pair) for pair in ns.get("stored_episodes") or []}
                 if (self._episodic(ctx) and declared and stored.issuperset(declared)
+                        and not ctx.ns("share_selection").get("folder_id")
                         and not re.search(r"第\s*\d{1,4}\s*期", ctx.raw.text or "")):
-                    ctx.state = TaskState.SKIPPED
-                    ctx.log(f"执行前去重命中：分享不可用（{exc}），但消息写明的 {pairs_label(declared)} 均已入库")
-                    self.store.save_task(ctx)
+                    self._skip_duplicate(
+                        ctx, f"分享当前不可用（{exc}），仅根据相同作品的已保存季集记录"
+                             f"判断 {pairs_label(declared)} 已存在；无法核验这条分享的具体版本，"
+                             "未发送任何复制请求")
                     return
                 await self._fail(ctx, f"分享不可用，无法转存：{exc}", retry_from=TaskState.QUEUED, auto_retry=False)
                 return
