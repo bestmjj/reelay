@@ -29,7 +29,8 @@ class TaskOpsMixin(ServiceBase):
         ctx = self._require_context(task_id)
         if ctx.state != TaskState.PENDING_APPROVAL:
             raise ConflictError("任务不是待审批状态")
-        if ctx.raw.extra.get("manual_review"):
+        if (ctx.raw.extra.get("manual_review")
+                or (ctx.raw.extra.get("manual_import") and ctx.raw.extra.get("manual_unlabeled"))):
             p = ctx.parsed
             if not p or not p.title or p.media_type not in ("anime", "tv", "movie"):
                 raise ConflictError("人工提交的分享请先填写真实片名、类型，保存后再确认转存")
