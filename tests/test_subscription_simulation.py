@@ -21,7 +21,7 @@ class SubscriptionSimulationWebTests(WebCase):
         entry = subscriptions.normalize({"title": "牧神记", "season": 1, "tmdbid": 236534})
         return self.app.state.store.add_subscription(subscriptions.key(entry), entry)
 
-    def test_historical_share_can_be_queued_directly_without_changing_source_mode(self):
+    def test_historical_share_needs_source_review_without_changing_source_mode(self):
         store = self.app.state.store
         pipeline = self.app.state.pipeline
         original = pipeline.rule_for("@shareAliyun")["approval_mode"]
