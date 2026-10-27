@@ -309,10 +309,14 @@ class Pipeline:
         """快速接收新消息并落为 RECEIVED；返回 None 表示消息级重复。"""
         ctx.source_rule = self.rule_for(ctx.raw.source)
         if ctx.raw.extra.get("manual_import") is True:
-            # A direct admin Web action applies only to this single task;
-            # never turn all Telegram listener messages into auto-approval.
-            ctx.source_rule["approval_mode"] = "auto"
-            ctx.log("用户手动提交资源：仅本任务按自动模式处理，仍执行安全过滤及转存核验")
+            # Direct pasted links can include multiple unrelated episodes,
+            # quality variants, or a stale wrong-copy receipt. Keep a real
+            # review step so the source file can be chosen BEFORE copying.
+            review = bool(ctx.raw.extra.get("manual_review"))
+            ctx.source_rule["approval_mode"] = "manual" if review else "auto"
+            ctx.log("用户手动提交资源：" +
+                    ("将先核对片名、集号及分享源文件，再人工确认" if review
+                     else "已读取配置频道消息；仍执行安全过滤、清单核验与去重"))
         self.stamp_config(ctx)
         await self.emit("on_message", ctx, persist=False)
         ctx.state = TaskState.RECEIVED
@@ -392,11 +396,14 @@ class Pipeline:
             ctx.log("这条更新早于订阅起始集号，不自动转存")
         if ctx.raw.extra.get("manual_import") and ctx.parsed and (
                 ctx.raw.extra.get("manual_unlabeled") or not ctx.parsed.title):
-            # A bare share URL has no trustworthy work identity. Always ask
-            # before saving or organizing it, even with an auto source.
+            # No AI output can establish a title from only a link plus a
+            # request to select a file. Ask for user-provided identity.
+            ctx.parsed.title = None
+            ctx.parsed.media_type = None
+            ctx.ns("tmdb").clear()
             if ctx.decision != Decision.SKIP:
                 ctx.decision = Decision.ASK
-                ctx.log("手动分享缺少可信作品名称，需人工补齐片名与类型")
+                ctx.log("手动分享只有链接或操作说明：请填写真实片名、类型、季集后选择源文件")
         if ctx.raw.extra.get("manual_import") and ctx.parsed and (
                 ctx.parsed.media_type in ("tv", "anime") or ctx.parsed.episodes):
             # One-click historical saves must never copy an entire hidden
@@ -408,6 +415,9 @@ class Pipeline:
             else:
                 ctx.decision = Decision.ASK
                 ctx.log("手动提交的剧集分享未能确认恰好一个季集，需人工核对，禁止盲目转存整季")
+        if ctx.raw.extra.get("manual_review") and ctx.decision != Decision.SKIP:
+            ctx.decision = Decision.ASK
+            ctx.log("人工提交的分享必须先确认来源文件；不会直接入队执行云盘复制")
         ctx.log(f"决策 = {ctx.decision.value}")
 
         if ctx.decision == Decision.SKIP:
