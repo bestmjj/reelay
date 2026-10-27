@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from reelay.core.contracts import NeedsManual, ParsedResource, PipelineContext, RawMessage, TaskState
+from reelay.core.contracts import AlreadyStored, NeedsManual, ParsedResource, PipelineContext, RawMessage, TaskState
 from reelay.core.media import episode_of
 from reelay.providers.aliyun import AliyunStorage
 from reelay.providers.storage import (P115Storage, SHARE_ROOT_DIRECT, _announced_latest,
@@ -36,6 +36,65 @@ class FolderChoiceTests(unittest.TestCase):
         with self.assertRaisesRegex(NeedsManual, "选择一个分享版本"):
             _select_video_items(two_versions(), self.parsed,
                                 hints={"drop": [two_versions()[0]["name"]]})
+
+    def test_all_old_do_vi_hdr_versions_are_skipped_before_source_choice(self):
+        # Production regression: 尚公主 E11 already saved. A new share has
+        # two season folders (DoVi / HDR.Vivid.60fps), but neither should
+        # require human selection or create a FAILED task.
+        files = two_versions()
+        with self.assertRaisesRegex(AlreadyStored, "均已入库"):
+            _select_video_items(files, self.parsed, scope="share",
+                                stored=[[1, 13], [1, 14]])
+        # The logic is identical for the message announcing only E14.
+        with self.assertRaisesRegex(AlreadyStored, "均已入库"):
+            _select_video_items(files, self.parsed, scope="message",
+                                stored=[[1, 14]])
+
+    def test_missing_episode_single_version_is_incrementally_copied(self):
+        # E13/E14 have two old versions; E15 is available only in DoVi.
+        # Do not let the old branches veto automatic filling of missing E15.
+        files = [*two_versions(), {
+            "id": "dovi-folder-15", "name": "小城良方.S01E15.2160p.mkv",
+            "size": 215, "is_dir": False, "share_folder_id": "dovi-folder",
+            "share_path": "Season 1 (DoVi)",
+        }]
+        selected = _select_video_items(
+            files, self.parsed, scope="share", stored=[[1, 13], [1, 14]],
+        )
+        self.assertEqual(selected["pairs"], [[1, 15]])
+        self.assertEqual([f["id"] for f in selected["files"]], ["dovi-folder-15"])
+
+    def test_only_ambiguous_missing_episode_needs_a_version_choice(self):
+        files = [*two_versions(),
+                 *[{"id": f"{branch}-15", "name": "小城良方.S01E15.2160p.mkv",
+                    "size": 215, "is_dir": False, "share_folder_id": branch,
+                    "share_path": path}
+                   for branch, path in (("dovi-folder", "Season 1 (DoVi)"),
+                                        ("hdr-folder", "Season 1 (HDR.Vivid)"))]]
+        with self.assertRaisesRegex(NeedsManual, "S01E015"):
+            _select_video_items(files, self.parsed, scope="share",
+                                stored=[[1, 13], [1, 14]])
+        chosen = _select_video_items(
+            files, self.parsed, scope="share",
+            share_folder_id="dovi-folder", stored=[[1, 13], [1, 14]],
+        )
+        self.assertEqual(chosen["pairs"], [[1, 15]])
+        self.assertEqual([f["id"] for f in chosen["files"]], ["dovi-folder-15"])
+
+    def test_quarantined_episode_cannot_be_hidden_by_old_dedup(self):
+        files = [*two_versions()]
+        with self.assertRaisesRegex(NeedsManual, "曾被标记为错片"):
+            _select_video_items(files, self.parsed, scope="share",
+                                stored=[[1, 13], [1, 14]],
+                                blocked_episodes=[[1, 14]])
+
+    def test_unnumbered_video_never_silently_becomes_duplicate(self):
+        files = [*two_versions(), {"id": "unknown-15", "name": "4K.mp4",
+                 "size": 215, "is_dir": False, "share_folder_id": "unknown-folder",
+                 "share_path": "Season 1 (unknown)"}]
+        with self.assertRaises(NeedsManual):
+            _select_video_items(files, self.parsed, scope="share",
+                                stored=[[1, 13], [1, 14]])
 
     def test_dovi_or_hdr_choice_selects_exact_episodes_not_both(self):
         listing = two_versions()
