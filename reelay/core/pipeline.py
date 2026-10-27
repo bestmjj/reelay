@@ -39,6 +39,7 @@ from .registry import Registry
 from .store import Store, _load_ctx
 from .config import config_revision, load_config, merge_config, normalize_config
 from .media import pairs_label, summarize_pairs
+from .parse_rules import prefilter_reason
 from . import confidence, existing_media, ignored, messages, runtime, subscriptions, works
 
 log = logging.getLogger("reelay.pipeline")
@@ -348,6 +349,14 @@ class Pipeline:
         parser_name = ctx.source_rule.get(
             "parser", self.cfg.get("defaults", {}).get("parser", "llm")
         )
+        # A manually submitted link without a verified work title cannot be
+        # classified by an LLM. Use deterministic share-link extraction and
+        # hold the task for human metadata; never guess from the URL.
+        manual_link_only = bool(ctx.raw.extra.get("manual_import")
+                                and ctx.raw.extra.get("manual_unlabeled"))
+        if manual_link_only:
+            parser_name = "regex"
+            ctx.log("手动提交的分享缺少可靠片名：仅提取分享链接，不调用 AI 猜片名")
         parser = self.reg.get_provider("parser", parser_name)
         try:
             with self.scope(ctx):
@@ -361,15 +370,22 @@ class Pipeline:
             self.store.save_task(ctx, error=str(exc))
             return
 
-        if ctx.raw.extra.get("manual_unlabeled") and ctx.raw.extra.get("manual_import"):
-            # A link plus "选择根目录里的247" is not evidence of title.
-            # Clear it before metadata/TMDB hooks get a chance to match a
-            # hallucinated work. The user will provide a trustworthy title.
-            ctx.parsed.title = None
-            ctx.parsed.media_type = None
-            ctx.parsed.year = None
+        if manual_link_only and ctx.parsed.share_code:
+            # The user deliberately requested a transfer, but the link does
+            # not prove the title, kind or episode. Even if an old cached AI
+            # answer labelled it non-media, this must become a *manual review*
+            # rather than a permanent SKIP. No remote copy is attempted.
+            p = ctx.parsed
+            p.is_media, p.is_ad, p.confidence = True, False, 0.0
+            p.title = p.media_type = p.year = p.season = None
+            p.episodes, p.genres, p.genre_ids, p.origin_country = [], [], [], []
+            p.resolution = p.size = None
+            p.release = {}
+            p.reason = "分享链接未包含可靠作品信息；请人工填写片名、类型、季集，并选择精确源视频"
+            ctx.ns("parse").update(incomplete=True, manual_link_only=True,
+                                    missing_fields=["title", "media_type"])
             ctx.ns("tmdb").clear()
-            ctx.log("人工分享没有可靠片名：跳过自动 TMDB 搜索，等待用户填写真实作品")
+            ctx.log("已保留网盘分享链接，不推测影视身份或集号；等待人工核对")
         ctx.state = TaskState.PARSED
         ctx.log(
             f"解析完成 is_media={ctx.parsed.is_media} is_ad={ctx.parsed.is_ad} "
@@ -393,6 +409,17 @@ class Pipeline:
         if blocked:
             ctx.decision = Decision.SKIP
             ctx.log(f"你已设置不再接收《{blocked['title']}》，直接忽略")
+        elif manual_link_only and ctx.parsed.share_code:
+            # Metadata-dependent allow/min-resolution filters cannot decide
+            # without a title or kind. Preserve deterministic URL/keyword
+            # prefilters, but let the user enter the missing facts explicitly.
+            reason = prefilter_reason(ctx, ctx.parsed.share_code)
+            if reason:
+                ctx.decision = Decision.SKIP
+                ctx.log(f"手动分享被来源预过滤阻止：{reason}")
+            else:
+                ctx.decision = Decision.ASK
+                ctx.log("仅链接的手动分享：必须人工填写季集、精确选源和保存目录，不自动复制")
         else:
             decider = self.reg.get_provider("decision",
                                             ctx.source_rule.get("decision", self.cfg["defaults"]["decision"]))
