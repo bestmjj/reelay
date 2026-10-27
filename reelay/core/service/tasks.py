@@ -42,6 +42,9 @@ class TaskOpsMixin(ServiceBase):
                 if not (ctx.ns("share_selection").get("file_id")
                         or ctx.ns("share_selection").get("folder_id")):
                     raise ConflictError("请先读取分享列表，选择正确的源文件或源文件夹，再确认转存")
+            if ctx.raw.extra.get("manual_unlabeled") and not (
+                    save_dir_alias or ctx.ns("library").get("pinned")):
+                raise ConflictError("只有分享链接的手动任务必须明确选择目标保存目录，避免误存到默认路径")
         advice = self.advice_action(ctx)
         if save_dir_alias:
             provider = (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
