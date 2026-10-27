@@ -63,6 +63,68 @@ class ApprovalReasonAPITests(WebCase):
         self.assertEqual(detail["skip_reason"], named[duplicate.task_id]["skip_reason"])
         self.assertFalse(detail["context"]["result"])
 
+    def test_reopen_duplicate_and_select_only_missing_episodes(self):
+        item = self.new("reopen", state=TaskState.SKIPPED)
+        item.ns("task")["skip"] = {
+            "kind": "duplicate", "reason": "第 14 集已入库，未发生任何转存",
+        }
+        self.app.state.store.save_task(item)
+        url = f"/api/tasks/{item.task_id}"
+        detail = self.client.get(url).json()
+        self.assertIn("reopen_duplicate", detail["actions"])
+
+        opened = self.client.post(url + "/reopen-duplicate")
+        self.assertEqual(opened.status_code, 200, opened.text)
+        self.assertEqual(opened.json()["state"], "pending_approval")
+        self.assertIn("select_episodes", opened.json()["actions"])
+        ctx = self.app.state.store.get_task(item.task_id)
+        self.assertEqual(ctx.decision, Decision.ASK)
+        self.assertTrue(ctx.ns("task").get("user_reopened_duplicate"))
+        self.assertFalse(ctx.ns("storage").get("manifest"))
+
+        selected = self.client.post(url + "/episode-selection",
+                                    json={"episodes": [15, 13]})
+        self.assertEqual(selected.status_code, 200, selected.text)
+        ctx = self.app.state.store.get_task(item.task_id)
+        self.assertEqual(ctx.ns("share_selection")["only_episodes"], [13, 15])
+        self.assertEqual(ctx.parsed.episodes, [14])  # original message is evidence, not overwritten
+        self.assertEqual(ctx.source_rule["approval_mode"], "manual")
+        self.assertEqual(self.client.post(url + "/episode-selection",
+                                         json={"episodes": [15, 15]}).status_code, 422)
+        self.assertEqual(self.client.post(url + "/episode-selection",
+                                         json={"episodes": [2001]}).status_code, 422)
+        self.assertEqual(self.client.post(url + "/episode-selection",
+                                         json={"episodes": list(range(1, 102))}).status_code, 422)
+
+        restored = self.client.post(url + "/episode-selection", json={"episodes": []})
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertNotIn("only_episodes",
+                         self.app.state.store.get_task(item.task_id).ns("share_selection"))
+
+    def test_user_ignored_or_completed_task_cannot_be_reopened_or_select_episodes(self):
+        ignored = self.new("ignored-no-reopen", state=TaskState.SKIPPED)
+        ignored.ns("task")["skip"] = {"kind": "user", "reason": "用户忽略"}
+        self.app.state.store.save_task(ignored)
+        self.assertEqual(self.client.post(f"/api/tasks/{ignored.task_id}/reopen-duplicate").status_code, 409)
+        self.assertNotIn("reopen_duplicate",
+                         self.client.get(f"/api/tasks/{ignored.task_id}").json()["actions"])
+        completed = self.new("completed", state=TaskState.DONE)
+        self.assertEqual(self.client.post(f"/api/tasks/{completed.task_id}/episode-selection",
+                                          json={"episodes": [13]}).status_code, 409)
+
+    def test_changed_episode_subset_invalidates_previously_pinned_source(self):
+        item = self.new("old-source")
+        item.ns("share_selection").update(folder_id="dovi-old",
+                                          path="Season 1 (DoVi)", file_id="file-old",
+                                          only_episodes=[14])
+        self.app.state.store.save_task(item)
+        url = f"/api/tasks/{item.task_id}"
+        resp = self.client.post(url + "/episode-selection",
+                                json={"episodes": [13, 15]})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        ctx = self.app.state.store.get_task(item.task_id)
+        self.assertEqual(ctx.ns("share_selection"), {"only_episodes": [13, 15]})
+
     def test_old_duplicate_without_metadata_is_recognized_from_durable_trail(self):
         old = self.new("legacy", state=TaskState.SKIPPED)
         old.log("执行前去重命中：分享内第 1 季 14 集均已入库")
