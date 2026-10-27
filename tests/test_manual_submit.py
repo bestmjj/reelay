@@ -162,9 +162,11 @@ class PermalinkSubmissionTests(WebCase):
         # No auto-save before confirming the genuine work and single episode.
         response = self.client.post(f"/api/tasks/{task_id}/approve", json={})
         self.assertEqual(response.status_code, 409, response.text)
-        corrected = self.client.post(f"/api/tasks/{task_id}/correct", json={
-            "title": "吞噬星空", "media_type": "anime", "year": 2020,
-            "season": 1, "episodes": [247], "resolution": "2160p",
+        corrected = self.client.patch(f"/api/tasks/{task_id}/parsed", json={
+            "values": {
+                "title": "吞噬星空", "media_type": "anime", "year": 2020,
+                "season": 1, "episodes": [247], "resolution": "2160p",
+            },
         })
         self.assertEqual(corrected.status_code, 200, corrected.text)
         ctx = db.get_task(task_id)
