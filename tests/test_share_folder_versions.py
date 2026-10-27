@@ -1,7 +1,9 @@
 """Shared-link HDR.Vivid/DoVi selection: no cloud writes, no mixed-version transfers."""
 from __future__ import annotations
 
+import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from reelay.core.contracts import NeedsManual, ParsedResource, PipelineContext, RawMessage, TaskState
@@ -394,6 +396,77 @@ class ManualE247FileChoiceAPITests(WebCase):
         self.assertEqual(queued.state, TaskState.QUEUED)
         self.assertFalse(queued.ns("storage").get("manifest"))
         self.assertIsNone(queued.result)
+
+    def test_existing_aliyun_episode_folder_is_verified_and_no_nested_series_created(self):
+        """The already saved episodes' *final* folder is the destination for E247."""
+        url = f"/api/tasks/{self.ctx.task_id}"
+        with patch.object(self.app.state.pipeline, "refresh_task", return_value=False):
+            corrected = self.client.patch(url + "/parsed", json={"values": {
+                "title": "吞噬星空", "media_type": "anime", "year": 2020,
+                "season": 1, "episodes": [247], "resolution": "2160p",
+            }})
+        self.assertEqual(corrected.status_code, 200, corrected.text)
+        selected = self.client.post(url + "/share-file", json={"file_id": "correct-247"})
+        self.assertEqual(selected.status_code, 200, selected.text)
+        storage = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        folder = "existing-season-01"
+        actual = "/影视/动漫/Dad/吞噬星空/Season 01"
+
+        def attrs(fid):
+            return {"id": fid, "name": "Season 01", "is_dir": True, "parent_id": "existing-show"}
+
+        with patch.object(storage, "client", SimpleNamespace(drive_id="resource-drive-e247")), \
+                patch.object(storage, "dir_path", return_value=actual) as directory, \
+                patch.object(storage, "library", return_value=SimpleNamespace(get_attr=attrs)):
+            no_drive = self.client.post(url + "/approve", json={
+                "existing_folder_id": folder,
+            })
+            self.assertEqual(no_drive.status_code, 422, no_drive.text)
+            wrong_drive = self.client.post(url + "/approve", json={
+                "existing_folder_id": folder, "existing_drive_id": "backup-drive",
+            })
+            self.assertEqual(wrong_drive.status_code, 409, wrong_drive.text)
+            with patch.object(storage, "dir_path", return_value="/影视/动漫/牧神记/Season 01"):
+                wrong_work = self.client.post(url + "/approve", json={
+                    "existing_folder_id": folder, "existing_drive_id": "resource-drive-e247",
+                })
+            self.assertEqual(wrong_work.status_code, 409, wrong_work.text)
+            self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state,
+                             TaskState.PENDING_APPROVAL)
+
+            approved = self.client.post(url + "/approve", json={
+                "existing_folder_id": folder, "existing_drive_id": "resource-drive-e247",
+            })
+            self.assertEqual(approved.status_code, 200, approved.text)
+            ctx = self.app.state.store.get_task(self.ctx.task_id)
+            self.assertEqual(ctx.state, TaskState.QUEUED)
+            self.assertEqual(ctx.ns("library")["direct_existing"]["path"], actual)
+            self.assertFalse(ctx.ns("storage").get("landed"))
+            # Worker resolves the same, still-existing resource-drive folder
+            # rather than the category alias, and must fail if it is renamed.
+            self.app.state.pipeline._resolve_directory(ctx)
+            self.assertEqual(ctx.save_dir_cid, folder)
+            self.assertEqual(directory.call_count >= 2, True)
+            with patch.object(storage, "dir_path", return_value="/影视/动漫/Dad/已移动"):
+                with self.assertRaisesRegex(ValueError, "无法再次核验"):
+                    self.app.state.pipeline._resolve_directory(ctx)
+            # The organizer retains the E247 filename but NEVER creates
+            # another "吞噬星空 (2020)/Season 01" inside the selected folder.
+            from reelay.plugins.organizer import LibraryRouter, Organizer
+            ctx.ns("storage")["landed"] = [{
+                "id": "landed247", "name": "247 4K.mp4", "size": 1620000000, "is_dir": False,
+            }]
+            ctx.ns("storage")["manifest"] = {
+                "files": [{"name": "247 4K.mp4", "season": 1, "episode": 247}]
+            }
+            with self.app.state.pipeline.scope(ctx):
+                asyncio.run(LibraryRouter().run(ctx))
+                asyncio.run(Organizer().prepare(ctx))
+            plan = ctx.ns("organize")["plan"]
+            self.assertEqual(len(plan), 1)
+            self.assertEqual(plan[0]["target_dir"], "")
+            self.assertIn("S01E247", plan[0]["target_name"])
+
 
 class FolderChoiceAPITests(WebCase):
     CONFIG = {"save_dirs": {"默认": "aliyun:library"},
