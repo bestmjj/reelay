@@ -15,7 +15,7 @@ export const ACTION_ENDPOINT: Record<PostedAction, TaskEndpoint> = {
 
 /** 操作成功后的提示。 */
 export const ACTION_DONE: Record<PostedAction, string> = {
-  approve: '已确认，开始转存', reject: '已忽略这条资源', dismiss: '已忽略这个任务', retry: '已重新排队',
+  approve: '已加入转存队列；后台核验后才会转存或安全去重', reject: '已忽略这条资源', dismiss: '已忽略这个任务', retry: '已重新排队',
   reparse: '已回到识别队列', reorganize: '已回到整理队列', resolve_conflict: '已回到整理队列',
   reconcile: '已排队核验转存', accept_partial: '已排队：按已到的文件继续整理', abandon: '已排队：放弃并删除暂存目录',
 };
