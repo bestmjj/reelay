@@ -5,7 +5,7 @@ import AuthAliyunCard from '@/components/AuthAliyunCard';
 import { Panel } from '@/components/app/Panel';
 import { ToneBadge } from '@/components/app/StatusBadge';
 import { fullTime, relativeTime } from '@/lib/format';
-import { connectionMeta } from '@/lib/status';
+import { connectionMeta, llmErrorExplanation } from '@/lib/status';
 import type { IConnection } from '@/lib/types';
 import type { Obj } from '@/lib/values';
 import { P115LimitsPanel } from './ServiceTabs';
@@ -33,12 +33,12 @@ export function ConnectionsTab({ connections, config, setField }: {
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium leading-6">{c.label}</p>
-                    <ToneBadge tone={connectionMeta(c.status).tone} className="mt-1">{connectionMeta(c.status).label}</ToneBadge>
+                    <ToneBadge tone={connectionMeta(c.status, key).tone} className="mt-1">{connectionMeta(c.status, key).label}</ToneBadge>
                     <p className="mt-1.5 text-xs text-muted-foreground">
                       {c.observed_at
                         ? <span title={fullTime(c.observed_at)}>更新于 {relativeTime(c.observed_at)}</span>
                         : c.configured ? '已填写凭证' : '尚未填写凭证'}
-                      {c.error ? <span className="block truncate text-destructive" title={c.error}>最近错误：{c.error}</span> : null}
+                      {c.error ? <span className="block text-xs text-destructive" title={c.error}>最近错误：{c.error}{key === 'llm' ? `。${llmErrorExplanation(c.error)}` : ''}</span> : null}
                     </p>
                   </div>
                 </div>
