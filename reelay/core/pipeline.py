@@ -656,10 +656,10 @@ class Pipeline:
                 # A selected version is scoped to one share/provider; if the
                 # share URL was corrected it must be chosen again.
                 selection = ctx.ns("share_selection")
-                if selection.get("folder_id"):
+                if selection.get("folder_id") or selection.get("file_id"):
                     if (selection.get("share_code") not in (None, ctx.parsed.share_code)
                             or selection.get("provider") not in (None, provider_name)):
-                        raise NeedsManual("分享链接或网盘已变化，请重新选择版本文件夹")
+                        raise NeedsManual("分享链接或网盘已变化，请重新选择源文件或版本文件夹")
                 else:
                     key = f"{provider_name}:{ctx.parsed.share_code}"
                     preference = (self.store.state_get("share_folder_preferences", "items", {}) or {}).get(key)
