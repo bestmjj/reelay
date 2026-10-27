@@ -244,6 +244,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   };
 
   const parsed = detail?.context.parsed;
+  const requireExplicitTarget = detail?.context.raw.extra?.manual_import === true
+    && detail?.context.raw.extra?.manual_unlabeled === true;
   const meta = (detail?.context.meta ?? {}) as TaskMeta;
   const plan = meta.organize?.plan ?? [];
   const organizeError = meta.organize?.error;
@@ -277,7 +279,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       <div className="flex gap-2">
         {can('dismiss') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('dismiss')} className="text-destructive"><EyeOff />忽略</Button> : null}
         {can('reject') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reject')} className="text-destructive"><X />忽略</Button> : null}
-        {can('approve') ? <Button size="sm" disabled={busy} onClick={() => void run('approve')}><Check />确认转存</Button> : null}
+        {can('approve') ? <Button size="sm" disabled={busy || (requireExplicitTarget && !targetDir)}
+              onClick={() => void run('approve')}><Check />确认转存</Button> : null}
       </div>
     </div>
   ) : null;
@@ -517,6 +520,12 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                 fallback={detail.state === 'pending_approval'
                   ? { value: autoAlias ?? '', label: `${detail.auto_path ?? detail.auto_dir} · 自动` }
                   : { value: autoAlias ?? '', note: '当前' }} />
+              {requireExplicitTarget ? (
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  这条任务最初只有网盘分享链接，必须明确选择保存目录。
+                  请确认该目录属于阿里云盘资源库，并与《吞噬星空》之前的集数所在位置一致。
+                </p>
+              ) : null}
               {targetDir && targetDir !== autoAlias
                 ? <p className="mt-1.5 text-xs text-muted-foreground">直接存入「{dirs.paths[targetDir] ?? targetDir}」，不再套用分类子目录。</p> : null}
             </Section>
