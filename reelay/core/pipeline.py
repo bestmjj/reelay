@@ -678,7 +678,7 @@ class Pipeline:
                         and not re.search(r"第\s*\d{1,4}\s*期", ctx.raw.text or "")):
                     self._skip_duplicate(
                         ctx, f"分享当前不可用（{exc}），仅根据相同作品的已保存季集记录"
-                             f"判断 {pairs_label(declared)} 已存在；无法核验这条分享的具体版本，"
+                             f"判断 {pairs_label(declared)} 均已入库；无法核验这条分享的具体版本，"
                              "未发送任何复制请求")
                     return
                 await self._fail(ctx, f"分享不可用，无法转存：{exc}", retry_from=TaskState.QUEUED, auto_retry=False)
