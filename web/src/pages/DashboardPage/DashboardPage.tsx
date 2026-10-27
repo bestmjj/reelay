@@ -39,8 +39,8 @@ const fetchLists = (): Promise<Lists> => Promise.all([
   inboxApi.list('pending_approval', PENDING_ROWS), taskApi.list({ state: 'done', limit: 8 }),
 ]).then(([pending, done]) => ({ pending, recent: done.items }));
 
-function HealthRow({ label, status, detail }: { label: string; status: string; detail?: string }) {
-  const meta = connectionMeta(status);
+function HealthRow({ label, status, detail, component }: { label: string; status: string; detail?: string; component?: string }) {
+  const meta = connectionMeta(status, component);
   return (
     <div className="flex items-center justify-between gap-3 py-2.5 text-sm first:pt-0 last:pb-0">
       <span className="min-w-0 truncate text-foreground/90">{label}</span>
@@ -242,7 +242,7 @@ export default function DashboardPage() {
                   <HealthRow label="后台 Worker" status={workerStatus}
                     detail={worker?.updated_at ? `最近心跳 ${fullTime(worker.updated_at)}` : undefined} />
                   {Object.entries(d.connections).map(([key, conn]) => (
-                    <HealthRow key={key} label={conn.label} status={conn.status}
+                    <HealthRow key={key} label={conn.label} status={conn.status} component={key}
                       detail={conn.error ? `最近错误：${conn.error}` : conn.observed_at ? `更新于 ${fullTime(conn.observed_at)}` : undefined} />
                   ))}
                 </div>
