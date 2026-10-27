@@ -4,7 +4,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from dataclasses import asdict
 from typing import Any
 
@@ -24,7 +26,48 @@ _BUSY = (TaskState.RECEIVED, TaskState.PARSED, TaskState.QUEUED, TaskState.SAVIN
 class TaskOpsMixin(ServiceBase):
     """任务的人工操作；只改任务状态，115 操作由 Worker 执行。"""
 
-    async def approve(self, task_id: str, *, save_dir_alias: str | None = None) -> None:
+    def _verify_existing_episode_folder(
+        self, ctx: PipelineContext, folder_id: str, drive_id: str
+    ) -> dict[str, str]:
+        """Read-only verification of a folder where earlier episodes already live.
+
+        The caller selects the *final* directory (such as Season 01), not a
+        classification root. Verify the resource drive and actual folder path
+        without trusting a client-supplied path or making any cloud changes.
+        """
+        if not ctx.raw.extra.get("manual_import") or len(ctx.episode_pairs()) != 1:
+            raise ConflictError("仅人工确认的单集任务可以指定已有剧集目录")
+        if not ctx.ns("share_selection").get("file_id"):
+            raise ConflictError("请先锁定单个源视频，再选择已有剧集目录")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", folder_id) or folder_id in ("0", "root"):
+            raise ValueError("只能选择阿里云盘已有剧集文件夹，不能选择根目录")
+        provider = ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
+        if provider != "aliyun":
+            raise ConflictError("已有目录选择只支持阿里云盘转存任务，不能跨网盘使用")
+        storage = self.pipeline.reg.get_provider("storage", "aliyun")
+        try:
+            actual_drive = str(storage.client.drive_id)
+            if not drive_id or actual_drive != drive_id:
+                raise ConflictError("阿里云盘资源库已变化，请重新选择已有目录")
+            attr = storage.library().get_attr(folder_id)
+            path = storage.dir_path(folder_id)
+        except ConflictError:
+            raise
+        except Exception:
+            raise ConflictError("无法核验所选目录是否仍存在于阿里云盘资源库，请刷新后重选") from None
+        if (not attr.get("is_dir") or str(attr.get("id")) != folder_id
+                or not path or not path.startswith("/")
+                or any(part.casefold().startswith(".reelay-") for part in path.split("/"))):
+            raise ConflictError("所选位置不是可用的已有剧集目录")
+        title = (ctx.parsed.title or "").strip()
+        if not title or title.casefold() not in path.casefold():
+            raise ConflictError(f"所选目录路径没有包含「{title}」，请选该作品原有的剧集文件夹")
+        return {"id": folder_id, "drive_id": actual_drive, "path": path,
+                "title": title, "provider": "aliyun"}
+
+    async def approve(self, task_id: str, *, save_dir_alias: str | None = None,
+                      existing_folder_id: str | None = None,
+                      existing_drive_id: str | None = None) -> None:
         """save_dir_alias 是手动指定的目录：与自动分类不一致时直接存入，不套用分类子目录。"""
         ctx = self._require_context(task_id)
         if ctx.state != TaskState.PENDING_APPROVAL:
@@ -43,8 +86,20 @@ class TaskOpsMixin(ServiceBase):
                         or ctx.ns("share_selection").get("folder_id")):
                     raise ConflictError("请先读取分享列表，选择正确的源文件或源文件夹，再确认转存")
             if ctx.raw.extra.get("manual_unlabeled") and not (
-                    save_dir_alias or ctx.ns("library").get("pinned")):
+                    save_dir_alias or existing_folder_id or ctx.ns("library").get("pinned")):
                 raise ConflictError("只有分享链接的手动任务必须明确选择目标保存目录，避免误存到默认路径")
+        if existing_folder_id and save_dir_alias:
+            raise ConflictError("按已有剧集目录保存与选择分类目录只能二选一")
+        if bool(existing_folder_id) != bool(existing_drive_id):
+            raise ValueError("已有目录的文件夹 ID 和资源库 ID 必须同时提供")
+        if existing_folder_id:
+            existing = await asyncio.to_thread(self._verify_existing_episode_folder,
+                                               ctx, existing_folder_id, existing_drive_id)
+            ctx.ns("library")["direct_existing"] = existing
+            ctx.ns("library").pop("pinned", None)
+            ctx.log(f"人工选择已有剧集目录：{existing['path']}，本集不再创建新作品目录")
+        else:
+            ctx.ns("library").pop("direct_existing", None)
         advice = self.advice_action(ctx)
         if save_dir_alias:
             provider = (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
@@ -61,7 +116,8 @@ class TaskOpsMixin(ServiceBase):
         ctx.ns("task").pop("skip", None)
         ctx.log("管理端批准并加入队列；只有网盘复制完成并核验后才算已入库，去重可能跳过")
         self._update(ctx, expected=TaskState.PENDING_APPROVAL)
-        self._record(ctx, "approve", {"save_dir_alias": save_dir_alias or None, "target": target}, advice)
+        self._record(ctx, "approve", {"save_dir_alias": save_dir_alias or None, "target": target,
+                                      "existing_folder": bool(existing_folder_id)}, advice)
         try:
             self._suggest_subscription(ctx)
         except Exception as exc:  # noqa: BLE001 - 订阅建议不影响批准
