@@ -71,7 +71,8 @@ class SubscriptionFlowE2E(WebCase):
             "source": "@shareAliyun"})
         self.assertEqual(result.status_code, 200, result.text)
         ctx = self._process(result.json()["task_id"], self._parsed())
-        self.assertEqual(ctx.state, TaskState.QUEUED)
+        self.assertEqual(ctx.state, TaskState.PENDING_APPROVAL)
+        self.assertTrue(ctx.raw.extra["manual_review"])
         self.assertEqual(ctx.source_rule["episodes_from"], "message")
         self.assertEqual(ctx.parsed.episodes, [106])
 
