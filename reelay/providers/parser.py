@@ -116,7 +116,7 @@ def sanitize_llm_title(title: str | None) -> str | None:
     if not title:
         return None
     text = title.strip()
-    if (re.search(r"(?:https?://|www\\.|(?:alipan|aliyundrive)\\.com/s/)", text, re.I)
+    if (re.search(r"(?:https?://|www\.|(?:alipan|aliyundrive)\.com/s/)", text, re.I)
             or re.match(r"^(?:请|帮我|我要|仅|只)?(?:选择分享|选择文件|转存|保存到|"
                         r"分享根目录|指定第|只要第)", text)):
         return None
