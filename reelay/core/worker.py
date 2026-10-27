@@ -117,25 +117,32 @@ class Worker:
         """
         revision, cfg = self.pipeline.revision, self.pipeline.cfg
         paths = {}
-        try:
-            for alias, reference in cfg["save_dirs"].items():
-                reference = str(reference)
-                if reference.startswith("aliyun:"):
-                    name, cid = "aliyun", reference.removeprefix("aliyun:")
-                else:
-                    name, cid = cfg["defaults"].get("storage", "p115"), reference
+        incomplete = False
+        for alias, reference in cfg["save_dirs"].items():
+            reference = str(reference)
+            if reference.startswith("aliyun:"):
+                name, cid = "aliyun", reference.removeprefix("aliyun:")
+            else:
+                name, cid = cfg["defaults"].get("storage", "p115"), reference
+            try:
                 storage = self.pipeline.reg.get_provider("storage", name)
                 if not hasattr(storage, "dir_path"):
                     continue
                 path = await asyncio.to_thread(storage.dir_path, cid)
                 if path:
                     paths[alias] = {"cid": reference, "path": path}
-        except Exception as exc:  # noqa: BLE001 - 只影响展示
-            if self._next_dir_paths == 0.0:
-                log.warning("读取保存目录的网盘路径失败，页面暂时显示目录别名：%s", exc)
+                else:
+                    incomplete = True
+            except Exception as exc:  # display-only, other aliases still usable
+                incomplete = True
+                if self._next_dir_paths == 0.0:
+                    log.warning("读取保存目录「%s」的网盘路径失败（%s）；不影响其他目录",
+                                alias, type(exc).__name__)
+        self.store.state_set("kernel", "save_dir_paths", paths)
+        if incomplete:
+            # Retry unresolved aliases without throwing away the valid paths.
             self._next_dir_paths = time.time() + 60
             return
-        self.store.state_set("kernel", "save_dir_paths", paths)
         self._dir_paths_revision, self._next_dir_paths = revision, 0.0
 
     async def _refresh_metadata(self) -> None:
