@@ -384,9 +384,13 @@ class ManualE247FileChoiceAPITests(WebCase):
                                         WrongEpisodeAndNestedDirectoryTests.listing())
         self.assertEqual([file["id"] for file in receipt["files"]], ["correct-247"])
         self.assertEqual(receipt["pairs"], [[1, 247]])
-        approve = self.client.post(url + "/approve")
+        # Link-only manual submissions must explicitly choose the Aliyun
+        # target even after the exact E247 source file has been selected.
+        self.assertEqual(self.client.post(url + "/approve").status_code, 409)
+        approve = self.client.post(url + "/approve", json={"save_dir_alias": "动漫"})
         self.assertEqual(approve.status_code, 200, approve.text)
         queued = self.app.state.store.get_task(self.ctx.task_id)
+        self.assertEqual(queued.save_dir_alias, "动漫")
         self.assertEqual(queued.state, TaskState.QUEUED)
         self.assertFalse(queued.ns("storage").get("manifest"))
         self.assertIsNone(queued.result)
