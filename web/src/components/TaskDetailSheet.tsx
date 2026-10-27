@@ -556,9 +556,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               {existingFolder ? <p className="mb-2 text-xs text-primary">已选择上面的已有剧集目录，本次不会使用下面的自动分类。</p> : null}
               <Select value={targetDir} onValueChange={(v) => { setTargetDir(v); setExistingFolder(null); }}
                 options={dirs.dirs.map((d) => ({ value: d, label: dirs.paths[d] ? `${d}（${dirs.paths[d]}）` : d }))}
-                placeholder={detail.state === 'pending_approval' ? `自动 · ${detail.auto_path ?? detail.auto_dir ?? '按分类'}`
-                  : `保持当前目录「${detail.context.save_dir_alias ?? '默认'}」`}
-                fallback={detail.state === 'pending_approval'
+                placeholder={existingFolder
+                  ? `已有剧集目录 · /${existingFolder.path.replaceAll(' / ', '/')}`
+                  : detail.state === 'pending_approval' ? `自动 · ${detail.auto_path ?? detail.auto_dir ?? '按分类'}`
+                    : `保持当前目录「${detail.context.save_dir_alias ?? '默认'}」`}
+                fallback={existingFolder ? undefined : detail.state === 'pending_approval'
                   ? { value: autoAlias ?? '', label: `${detail.auto_path ?? detail.auto_dir} · 自动` }
                   : { value: autoAlias ?? '', note: '当前' }} />
               {requireExplicitTarget ? (
