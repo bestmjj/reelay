@@ -101,14 +101,14 @@ class SourceMixin(ServiceBase):
                          extra={"manual_import": True, "manual_unlabeled": unlabeled,
                                 # A direct paste may select an exact source file;
                                 # never auto-copy before the user has verified it.
-                                "manual_review": telegram_id is None})
+                                "manual_review": telegram_id is None or unlabeled})
         ctx = PipelineContext(raw=raw)
         accepted = await self.pipeline.accept(ctx)
         if not accepted:
             raise ConflictError("这条消息已在转存队列中")
         return {"task_id":accepted.task_id, "state":accepted.state.value,
-                "note":("资源已提交；直接粘贴的分享需先人工确认片名、集数和源文件，"
-                        "不会仅凭一个链接自动转存。" if telegram_id is None
+                "note":("资源已提交；未提供可验证片名的分享需先人工确认片名、集数和源文件，"
+                        "不会仅凭链接自动转存。" if telegram_id is None or unlabeled
                         else "原频道消息已提交给后台；仍会经过分享清单与去重安全检查。")}
 
     async def test_parse(self, text: str, urls: list[str] | None = None, source: str | None = None,
