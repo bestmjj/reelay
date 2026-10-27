@@ -54,6 +54,49 @@ class AliyunWebTest(WebCase):
         self.assertNotIn("rotated-after-ping-12345", json.dumps(dashboard))
         self.assertEqual(secret_store.get("aliyun_refresh_token"), "rotated-after-ping-12345")
 
+    def test_recent_auth_status_survives_process_restart_and_worker_rotation(self):
+        from reelay.core.authaliyun import AliyunAuth
+        from reelay.web.aliyun import observed_aliyun_status
+
+        secret_store.current().update({
+            "aliyun_refresh_token": "initial-refresh-token-123456",
+        })
+        with patch("reelay.core.authaliyun.AliyunAuth._exchange",
+                   return_value=("rotated-token-1234567890", "resource-drive")):
+            result = self.client.post("/api/authaliyun/ping")
+        self.assertEqual(result.json()["state"], "active")
+        store = self.app.state.store
+        # New Web process: its AliyunAuth had no in-memory validation.
+        recreated = observed_aliyun_status(AliyunAuth(), store)
+        self.assertEqual(recreated["state"], "active")
+        self.assertTrue(recreated["last_observation"])
+        self.assertIsNotNone(recreated["checked_at"])
+        self.assertIsNone(recreated["drive_id"])
+        # Worker rotates token independently while browsing the cloud.
+        secret_store.current().update({
+            "aliyun_refresh_token": "worker-rotated-token-987654",
+        })
+        with patch("reelay.core.authaliyun.AliyunAuth._exchange",
+                   side_effect=AssertionError("GET status must never refresh token")):
+            status = self.client.get("/api/authaliyun/status")
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()["state"], "active")
+        self.assertTrue(status.json()["last_observation"])
+        self.assertNotIn("worker-rotated-token-987654", status.text)
+        # Recent evidence is not permanent; expiration is auto-recheckable.
+        with store._lock, store._conn:
+            store._conn.execute(
+                "UPDATE runtime_health SET updated_at=? WHERE component='aliyun'",
+                (time.time() - 7205,),
+            )
+        stale = self.client.get("/api/authaliyun/status").json()
+        self.assertEqual(stale["state"], "unknown")
+        # Clearing via a different settings route may not leave an active
+        # badge merely because a historical probe was successful.
+        secret_store.current().update({"aliyun_refresh_token": None})
+        self.assertEqual(self.client.get("/api/authaliyun/status").json()["state"],
+                         "not_configured")
+
     def test_ping_expired_or_network_error_reaches_dashboard(self):
         secret_store.current().update({"aliyun_refresh_token": "saved-refresh-token-12345"})
         for exception, expected in (
