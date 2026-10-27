@@ -102,6 +102,9 @@ export interface ITaskSummary {
   msg_id: string | null;
   title: string | null;
   error: string | null;
+  /** A deduplicated task did not result in another cloud copy. */
+  skip_kind?: 'duplicate' | 'rule' | 'user' | null;
+  skip_reason?: string | null;
   wrong_source_quarantined?: boolean;
   retries: number;
   created_at: number;
