@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
@@ -17,6 +18,41 @@ class TokenPayload(BaseModel):
 
 class QRPayload(BaseModel):
     uid: str
+
+
+# The per-web-process AliyunAuth instance is ephemeral. Transfer workers rotate
+# refresh tokens independently, invalidating its in-memory fingerprint even
+# though the same account is still working. Reuse a *recent* safe SQLite
+# observation instead of presenting "never checked" on every page reload.
+# This never grants access or stores a credential: storage operations still
+# reauthenticate against Aliyun before doing any I/O.
+AUTH_OBSERVATION_TTL = 2 * 3600
+
+
+def observed_aliyun_status(auth: AliyunAuth, store) -> dict:
+    state = auth.status()
+    if not state["configured"]:
+        return state
+    now = time.time()
+    checked = state.get("checked_at")
+    if (state["state"] != "unknown" and checked is not None
+            and 0 <= now - checked < AUTH_OBSERVATION_TTL):
+        return state
+    observed = store.health_status(stale_after=AUTH_OBSERVATION_TTL).get("aliyun")
+    if observed and observed.get("configured") and not observed.get("stale"):
+        kind = observed.get("status")
+        if kind in ("active", "expired", "error"):
+            # Explicit last-observation timestamp; "active" is recent success,
+            # not a guarantee the remote token will remain valid indefinitely.
+            return {"configured": True, "state": kind,
+                    "error": observed.get("error") or None,
+                    "checked_at": observed["updated_at"],
+                    "drive_id": state.get("drive_id") if checked else None,
+                    "last_observation": True}
+    # An old in-memory success is not eternal when the probe has gone stale.
+    return {"configured": True, "state": "unknown", "error": None,
+            "checked_at": checked, "drive_id": state.get("drive_id"),
+            "last_observation": False}
 
 
 def router(store) -> APIRouter:
@@ -40,7 +76,8 @@ def router(store) -> APIRouter:
 
     @api.get("/api/authaliyun/status")
     async def status():
-        return auth.status()
+        # Read-only: no implicit network/token rotation on status polling.
+        return observed_aliyun_status(auth, store)
 
     @api.post("/api/authaliyun/ping")
     async def ping():
