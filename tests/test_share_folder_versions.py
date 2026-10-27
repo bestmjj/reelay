@@ -8,7 +8,7 @@ from reelay.core.contracts import NeedsManual, ParsedResource, PipelineContext, 
 from reelay.core.media import episode_of
 from reelay.providers.aliyun import AliyunStorage
 from reelay.providers.storage import (P115Storage, SHARE_ROOT_DIRECT, _announced_latest,
-                                      _select_video_items, share_folder_choices)
+                                      _select_video_items, share_folder_choices, share_video_choices)
 from tests.fakes import WebCase
 
 
@@ -196,6 +196,43 @@ class WrongEpisodeAndNestedDirectoryTests(unittest.TestCase):
                                 share_folder_id="unrelated-folder",
                                 hints={"episodes": {"4K.mp4": (1, 247)}})
 
+    def test_exact_file_id_e247_never_copies_the_other_four_gigabyte_video(self):
+        files = self.listing()
+        choices = share_video_choices(files, self.parsed)
+        valid = [choice for choice in choices if choice["selectable"]]
+        self.assertEqual([choice["file_id"] for choice in valid], ["correct-247"])
+        self.assertFalse(next(choice for choice in choices
+                              if choice["file_id"] == "unrelated-4k")["selectable"])
+        selection = _select_video_items(
+            files, self.parsed, scope="message",
+            share_file_id="correct-247", share_file_name="247 4K.mp4",
+            share_file_path="", share_file_size=1620000000,
+        )
+        self.assertEqual([item["id"] for item in selection["files"]], ["correct-247"])
+        self.assertEqual(selection["pairs"], [[1, 247]])
+        for changed in (
+                {**files[0], "size": 4040000000},
+                {**files[0], "name": "wrong.mp4"},
+                {**files[0], "share_path": "other-folder"},
+        ):
+            listing = [changed, files[1]]
+            with self.assertRaisesRegex(NeedsManual, "已变化"):
+                _select_video_items(
+                    listing, self.parsed, scope="message",
+                    share_file_id="correct-247", share_file_name="247 4K.mp4",
+                    share_file_path="", share_file_size=1620000000)
+        with self.assertRaisesRegex(NeedsManual, "集数"):
+            _select_video_items(
+                files, self.parsed, scope="message",
+                share_file_id="unrelated-4k", share_file_name="4K.mp4",
+                share_file_path="洛DA", share_file_size=4040000000)
+        with self.assertRaisesRegex(NeedsManual, "曾被标记为错片"):
+            _select_video_items(
+                files, self.parsed, scope="message",
+                share_file_id="correct-247", share_file_name="247 4K.mp4",
+                share_file_path="", share_file_size=1620000000,
+                blocked_episodes=[[1, 247]])
+
     def test_nested_wrapper_lists_both_hdr_versions_and_empty_directories(self):
         listing = [
             {"id": "wrapper", "name": "X)小城良方", "is_dir": True,
@@ -279,6 +316,80 @@ class WrongEpisodeAndNestedDirectoryTests(unittest.TestCase):
                          {"wrapper", "hdr", "dovi", "empty", SHARE_ROOT_DIRECT})
         self.assertEqual(next(x["count"] for x in choices if x["folder_id"] == "hdr"), 1)
         self.assertEqual(next(x["count"] for x in choices if x["folder_id"] == "empty"), 0)
+
+class ManualE247FileChoiceAPITests(WebCase):
+    CONFIG = {
+        "save_dirs": {"动漫": "aliyun:existing-destination"},
+        "defaults": {"storage": "aliyun", "parser": "regex", "save_to": "动漫",
+                     "approval_mode": "manual"},
+        "sources": [{"bot": "@shareAliyun", "storage": "aliyun", "parser": "regex",
+                     "approval_mode": "manual"}],
+    }
+
+    def setUp(self):
+        super().setUp()
+        raw = RawMessage("@shareAliyun", "manual-e247",
+                         "https://www.alipan.com/s/gsQB8YFoLZQ 选择分享根目录中的 247",
+                         extra={"manual_import": True, "manual_unlabeled": True,
+                                "manual_review": True})
+        self.ctx = PipelineContext(raw)
+        self.ctx.state = TaskState.PENDING_APPROVAL
+        self.ctx.parsed = ParsedResource(
+            is_media=True, share_code="gsQB8YFoLZQ",
+            raw_fields={"share_provider": "aliyun",
+                        "share_url": "https://www.alipan.com/s/gsQB8YFoLZQ"},
+        )
+        self.ctx.source_rule = {"storage": "aliyun", "approval_mode": "manual",
+                                "episodes_from": "share"}
+        self.app.state.store.save_task(self.ctx)
+        storage = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        self._ready_patch = patch.object(storage, "ready", return_value=True)
+        self._listing_patch = patch.object(storage, "_share_files",
+                                           return_value=WrongEpisodeAndNestedDirectoryTests.listing())
+        self._ready_patch.start()
+        self._listing_patch.start()
+        self.addCleanup(self._ready_patch.stop)
+        self.addCleanup(self._listing_patch.stop)
+
+    def test_review_correction_exact_file_and_approval_never_copy_4gb_video(self):
+        url = f"/api/tasks/{self.ctx.task_id}"
+        no_title = self.client.post(url + "/approve")
+        self.assertEqual(no_title.status_code, 409)
+        self.assertIn("真实片名", no_title.text)
+        with patch.object(self.app.state.pipeline, "refresh_task", return_value=False):
+            corrected = self.client.patch(url + "/parsed", json={"values": {
+                "title": "吞噬星空", "media_type": "anime", "year": 2020,
+                "season": 1, "episodes": [247], "resolution": "2160p",
+            }})
+        self.assertEqual(corrected.status_code, 200, corrected.text)
+        saved = self.app.state.store.get_task(self.ctx.task_id)
+        self.assertEqual(saved.source_rule["episodes_from"], "message")
+        self.assertEqual(saved.parsed.episodes, [247])
+        before_file = self.client.post(url + "/approve")
+        self.assertEqual(before_file.status_code, 409)
+        self.assertIn("源文件", before_file.text)
+        preview = self.client.get(url + "/share-folders")
+        self.assertEqual(preview.status_code, 200, preview.text)
+        choices = preview.json()["files"]
+        self.assertEqual([f["file_id"] for f in choices if f["selectable"]],
+                         ["correct-247"])
+        self.assertEqual(self.client.post(url + "/share-file",
+                            json={"file_id": "unrelated-4k"}).status_code, 409)
+        selected = self.client.post(url + "/share-file",
+                                    json={"file_id": "correct-247"})
+        self.assertEqual(selected.status_code, 200, selected.text)
+        self.assertEqual(selected.json()["selected_file_id"], "correct-247")
+        chosen = self.app.state.store.get_task(self.ctx.task_id)
+        receipt = AliyunStorage._select(chosen,
+                                        WrongEpisodeAndNestedDirectoryTests.listing())
+        self.assertEqual([file["id"] for file in receipt["files"]], ["correct-247"])
+        self.assertEqual(receipt["pairs"], [[1, 247]])
+        approve = self.client.post(url + "/approve")
+        self.assertEqual(approve.status_code, 200, approve.text)
+        queued = self.app.state.store.get_task(self.ctx.task_id)
+        self.assertEqual(queued.state, TaskState.QUEUED)
+        self.assertFalse(queued.ns("storage").get("manifest"))
+        self.assertIsNone(queued.result)
 
 class FolderChoiceAPITests(WebCase):
     CONFIG = {"save_dirs": {"默认": "aliyun:library"},
