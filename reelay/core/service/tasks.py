@@ -149,7 +149,9 @@ class TaskOpsMixin(ServiceBase):
             raise ValueError("分享中找不到可以确认的源视频或文件夹")
         key = f"{provider}:{ctx.parsed.share_code}"
         preference = (self.store.state_get("share_folder_preferences", "items", {}) or {}).get(key)
-        selected = ctx.ns("share_selection").get("folder_id") or (preference or {}).get("folder_id")
+        selection = ctx.ns("share_selection")
+        selected = (None if selection.get("file_id") else
+                    selection.get("folder_id") or (preference or {}).get("folder_id"))
         return {"folders": folders, "files": files,
                 "selected_file_id": ctx.ns("share_selection").get("file_id"),
                 "selected_folder_id": selected,
