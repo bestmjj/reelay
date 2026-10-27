@@ -361,6 +361,17 @@ class TaskOpsMixin(ServiceBase):
         values = dict(before)
         values.update(patch)
         ctx.parsed = ParsedResource(**validate_resource(values))
+        # The initial URL may have been parsed with unknown type/episodes.
+        # A subsequent human correction to E247 MUST rebind the file
+        # selector to that one episode, not the original whole-share scope.
+        # This is a per-task source rule, never a persistent bot setting.
+        if ctx.raw.extra.get("manual_import"):
+            if ctx.parsed.media_type in ("tv", "anime") and len(ctx.episode_pairs()) == 1:
+                ctx.source_rule["episodes_from"] = "message"
+                ctx.log(f"人工确认单集 E{ctx.parsed.episodes[0]:03d}：仅选择该集的源文件")
+            else:
+                ctx.source_rule["episodes_from"] = "share"
+                ctx.log("手动分享不是唯一单集；转存前必须再核对分享清单")
         if any(before.get(key) != getattr(ctx.parsed, key) for key in ("title", "year", "media_type")):
             # 片名或类型改了，原来的 TMDB 匹配（含 tmdbid、海报）不再可信；待审批任务随后按新片名重新匹配
             ctx.meta.pop("tmdb", None)
