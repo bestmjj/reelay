@@ -20,7 +20,7 @@ from reelay.core.registry import Registry, discover
 from reelay.core.service import ManagementService
 from reelay.core.store import Store
 from reelay.core.worker import Worker
-from reelay.providers.decision import DefaultDecision, LLMDecision
+from reelay.providers.decision import DefaultDecision, LLMDecision, SubscriptionDecision
 from reelay.providers.notify import ConsoleNotify
 from reelay.providers.parser import LLMParser, RegexParser
 from reelay.providers.source import TelegramUserbotSource
@@ -75,7 +75,7 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
         changes = [{"is_ad": "false"}, {"is_media": "true"}, {"confidence": 2},
                    {"confidence": float("nan")}, {"confidence": True}, {"year": "2026"},
                    {"season": True}, {"episodes": ["bad"]}, {"episodes": [1, 1]},
-                   {"genres": "动画"}, {"media_type": "unknown"}, {"title": None}, {"extra": 1}]
+                   {"genres": "动画"}, {"media_type": "unknown"}, {"extra": 1}]
         for change in changes:
             with self.subTest(change=change):
                 ctx = context()
@@ -85,6 +85,25 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
                 ctx.parsed = await parser.parse(ctx)
                 self.assertTrue(ctx.meta["parse"]["fallback"])
                 self.assertEqual(await DefaultDecision().decide(ctx), Decision.ASK)
+
+    async def test_missing_title_or_type_is_incomplete_not_invalid_and_requires_review(self):
+        # JSON Schema explicitly permits null title/type for sparse Telegram
+        # messages. Never retry valid JSON or promote it to a cloud copy, even
+        # when the admin lowers confidence_threshold to zero.
+        for missing in ({"title": None}, {"media_type": None},
+                        {"title": None, "media_type": None},
+                        {"title": "  "}):
+            with self.subTest(missing=missing):
+                ctx = context()
+                ctx.source_rule = {"approval_mode": "auto", "confidence_threshold": 0}
+                parser = LLMParser()
+                parser._client = FakeAI({**movie(), **missing})
+                ctx.parsed = await parser.parse(ctx)
+                self.assertEqual(len(parser._client.calls), 1)
+                self.assertFalse(ctx.meta["parse"].get("fallback", False))
+                self.assertTrue(ctx.meta["parse"]["incomplete"])
+                self.assertEqual(await DefaultDecision().decide(ctx), Decision.ASK)
+                self.assertEqual(SubscriptionDecision.promote(ctx, Decision.ASK), Decision.ASK)
 
     async def test_timeout_refusal_and_missing_credentials_require_approval(self):
         for client in (None, FakeAI(TimeoutError("secret must not be persisted")), FakeAI(movie(), refusal="no")):
