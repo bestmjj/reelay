@@ -172,10 +172,47 @@ def _overlapping_share_versions(video_items: list[dict], parsed) -> list[str]:
     ))
 
 
+def share_video_choices(items: list[dict], parsed) -> list[dict]:
+    """Read-only exact-file choices for a user-requested single episode.
+
+    Include unnumbered neighboring videos for transparency but never make
+    them selectable. Selecting an ID is only a request: the real transfer
+    enumerates the share and validates its immutable identity again.
+    """
+    if parsed.media_type not in ("tv", "anime") or len(parsed.episodes) != 1:
+        return []
+    requested = parsed.episodes[0]
+    season = parsed.season or 1
+    choices = []
+    for item in items:
+        if not is_video(item.get("name", "")) or is_extra(item.get("name", "")):
+            continue
+        file_season, episode = episode_of(item["name"])
+        folder_season = season_of(item.get("share_path") or "")
+        if episode not in (None, requested):
+            continue
+        if file_season is not None and file_season != season:
+            continue
+        if folder_season is not None and folder_season != season:
+            continue
+        choices.append({
+            "file_id": str(item["id"]), "name": item["name"],
+            "path": str(item.get("share_path") or ""),
+            "size": item.get("size"), "episode": episode,
+            "selectable": episode == requested and type(item.get("size")) is int
+                          and item["size"] > 0,
+        })
+        if len(choices) > 500:
+            raise NeedsManual("此分享的单集候选超过 500 个，无法安全显示完整源文件，请选择更具体的分享")
+    return sorted(choices, key=lambda c: (not c["selectable"], c["path"].casefold(), c["name"].casefold()))
+
+
 def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: str = 'share',
                         hints: dict | None = None, stored_variety_parts=(),
                         share_folder_id: str | None = None, share_folder_path: str | None = None,
-                        required_latest: int | None = None, blocked_episodes=()) -> dict:
+                        required_latest: int | None = None, blocked_episodes=(),
+                        share_file_id: str | None = None, share_file_name: str | None = None,
+                        share_file_path: str | None = None, share_file_size: int | None = None) -> dict:
     """确定本次转存的文件。分享清单是集数的事实来源，消息/LLM 给出的集数只作提示。
 
     返回 ``{'files', 'episodes', 'season', 'pairs'}``：每个文件带自己的季与集，``pairs`` 为
@@ -189,6 +226,25 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
     """
     hints = hints or {}
     episodic = parsed.media_type in ('tv', 'anime') or bool(parsed.episodes)
+    if share_file_id:
+        if not episodic or len(parsed.episodes) != 1:
+            raise NeedsManual("精确选择源文件仅适用于已确认的单集任务")
+        selected = [item for item in video_items
+                    if not item.get("is_dir") and str(item.get("id") or "") == str(share_file_id)]
+        if len(selected) != 1:
+            raise NeedsManual("已选分享源文件 ID 不存在或不唯一，请重新浏览分享后选择")
+        item = selected[0]
+        if (item.get("name") != share_file_name
+                or (item.get("share_path") or "") != (share_file_path or "")
+                or type(item.get("size")) is not int
+                or item["size"] != share_file_size):
+            raise NeedsManual("分享源文件名称、路径或大小已变化，必须重新确认，绝不自动替换")
+        file_season, file_ep = episode_of(item["name"])
+        folder_season = season_of(item.get("share_path") or "")
+        if file_ep != parsed.episodes[0] or (file_season and file_season != (parsed.season or 1))                 or (folder_season and folder_season != (parsed.season or 1)):
+            raise NeedsManual("选择的文件名无法核验为消息指定的集数，不能冒认或更名")
+        video_items = selected
+        share_folder_id = None
     if share_folder_id is not None:
         candidates = share_folder_choices(video_items)
         chosen = next((choice for choice in candidates if choice["folder_id"] == str(share_folder_id)), None)
@@ -537,7 +593,11 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
                                    share_folder_id=ctx.ns('share_selection').get('folder_id'),
                                    share_folder_path=ctx.ns('share_selection').get('path'),
                                    required_latest=_announced_latest(ctx),
-                                   blocked_episodes=ctx.ns('storage').get('blocked_episodes') or [])
+                                   blocked_episodes=ctx.ns('storage').get('blocked_episodes') or [],
+                                   share_file_id=ctx.ns('share_selection').get('file_id'),
+                                   share_file_name=ctx.ns('share_selection').get('file_name'),
+                                   share_file_path=ctx.ns('share_selection').get('file_path'),
+                                   share_file_size=ctx.ns('share_selection').get('file_size'))
 
     async def select(self, ctx: PipelineContext, listing: list[dict]) -> dict:
         """按规则确定转存文件；规则无法确定时先让 AI 给出方案，方案经同一套规则校验，不过再转人工。"""
@@ -664,11 +724,15 @@ class P115Storage(ShareStorage):
             return {'status': 'available', **extra}
         return {**describe_share(P115ShareFileSystem(client, parsed.share_code, parsed.receive_code), parsed), **extra}
 
-    def share_folder_choices(self, parsed) -> list[dict]:
-        """List source-version folders read-only; never write to the cloud."""
+    def share_source_inventory(self, parsed) -> dict:
+        """One read-only full share scan for both source folders and files."""
         from types import SimpleNamespace
-        return share_folder_choices(
-            self._list_share_sync(SimpleNamespace(parsed=parsed), include_dirs=True))
+        listing = self._list_share_sync(SimpleNamespace(parsed=parsed), include_dirs=True)
+        return {"folders": share_folder_choices(listing),
+                "files": share_video_choices(listing, parsed)}
+
+    def share_folder_choices(self, parsed) -> list[dict]:
+        return self.share_source_inventory(parsed)["folders"]
 
     def browse(self, cid: str, offset: int = 0, limit: int = 100, *, include_files: bool = False) -> dict[str, Any]:
         """目录选择器仅列目录；文件管理页也列出普通文件。"""
