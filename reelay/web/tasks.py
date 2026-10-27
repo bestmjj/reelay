@@ -32,6 +32,12 @@ class ShareFilePayload(BaseModel):
     file_id: str = Field(min_length=1, max_length=128)
 
 
+class EpisodeSelectionPayload(BaseModel):
+    # [] restores ordinary automated dedup. Explicitly selected episodes
+    # still pass the same verified-cloud and quarantine checks.
+    episodes: list[int] = Field(default_factory=list, max_length=100)
+
+
 class ParsePatchPayload(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
@@ -88,6 +94,14 @@ def router(service) -> APIRouter:
     @api.post("/api/tasks/{task_id}/share-file")
     async def task_select_share_file(task_id: str, payload: ShareFilePayload):
         return await asyncio.to_thread(service.choose_share_file, task_id, payload.file_id)
+
+    @api.post("/api/tasks/{task_id}/episode-selection")
+    async def choose_episodes(task_id: str, payload: EpisodeSelectionPayload):
+        return service.set_episode_selection(task_id, payload.episodes)
+
+    @api.post("/api/tasks/{task_id}/reopen-duplicate")
+    async def reopen_duplicate(task_id: str):
+        return service.reopen_duplicate(task_id)
 
     @api.post("/api/tasks/{task_id}/approve")
     async def approve(task_id: str, payload: ActionPayload | None = None):
