@@ -557,6 +557,10 @@ class Pipeline:
                         or path != existing["path"]):
                     raise ValueError("已有剧集目录被移动、更名或删除")
             except Exception:
+                # A changed or unverifiable destination is not a transient
+                # safe-to-retry cloud write. Stop until the operator rechecks
+                # the real folder rather than retrying in the background.
+                ctx.ns("task")["no_auto_retry"] = True
                 raise ValueError("已有剧集目录无法再次核验，请检查资源库、路径后重新确认") from None
             cid = existing["id"]
             ctx.log(f"再次核验已有剧集目标目录：{existing['path']}")
