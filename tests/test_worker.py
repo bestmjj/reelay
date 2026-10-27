@@ -76,6 +76,38 @@ class TestWorkerBackoffAndAuthPause(PipelineCase):
         self.assertIsNone(worker.storage_paused)
         self.assertEqual(self.store.active_alerts(), [])
 
+    async def test_one_missing_alias_keeps_other_real_aliyun_paths(self):
+        class SomeMissingFolders:
+            name = "aliyun"
+            broken = True
+            def dir_path(self, cid):
+                if cid == "missing" and self.broken:
+                    raise RuntimeError("NotFound.File")
+                return {"good": "/影视/动漫", "missing": "/旧目录"}.get(cid)
+
+        cloud = SomeMissingFolders()
+        registry = Registry()
+        registry.add_provider("storage", cloud)
+        cfg = {
+            "save_dirs": {"错误别名": "aliyun:missing", "默认": "aliyun:good"},
+            "defaults": {"storage": "aliyun", "save_to": "默认"},
+        }
+        worker = Worker(self.pipeline(registry=registry, cfg=cfg), self.store)
+        await worker.record_dir_paths()
+        saved = self.store.state_get("kernel", "save_dir_paths", {})
+        self.assertEqual(saved, {
+            "默认": {"cid": "aliyun:good", "path": "/影视/动漫"}
+        })
+        self.assertIsNone(worker._dir_paths_revision)
+        self.assertGreater(worker._next_dir_paths, time.time())
+
+        cloud.broken = False
+        await worker.record_dir_paths()
+        saved = self.store.state_get("kernel", "save_dir_paths", {})
+        self.assertEqual(saved["错误别名"]["path"], "/旧目录")
+        self.assertEqual(worker._dir_paths_revision, worker.pipeline.revision)
+        self.assertEqual(worker._next_dir_paths, 0.0)
+
     async def test_115_pause_only_blocks_115_tasks(self):
         worker = self.worker("not used")
         worker.pause_storage("115 cookie 未配置")
