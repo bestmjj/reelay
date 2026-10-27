@@ -113,7 +113,90 @@ class PermalinkSubmissionTests(WebCase):
         self.assertEqual(ctx.decision, Decision.ASK)
         self.assertIsNone(ctx.parsed.title)
         self.assertIsNone(ctx.parsed.media_type)
+        # "选择根目录中的 247" is an instruction, not a trustworthy
+        # episode announcement. The operator must supply E247 explicitly.
+        self.assertFalse(ctx.parsed.episodes)
+        self.assertNotEqual(ctx.source_rule.get("episodes_from"), "message")
+
+    def test_link_only_reparse_becomes_editable_review_and_requires_exact_file(self):
+        """Reproduce the production bug: an explicit bare Aliyun link was SKIPPED."""
+        from reelay.core.contracts import Decision, TaskState
+        text = ("https://www.alipan.com/s/gsQB8YFoLZQ"
+                "/folder/66dedc90db272aa5727046ab8aa6870281939962")
+        result = self.client.post("/api/resources/submit", json={
+            "text": text, "source": "@shareAliyun",
+        })
+        self.assertEqual(result.status_code, 200, result.text)
+        task_id = result.json()["task_id"]
+        db = self.app.state.store
+        ctx = db.get_task(task_id)
+        self.assertTrue(ctx.raw.extra["manual_unlabeled"])
+        # Mimic the existing task created by the old deployed image.
+        ctx.state = TaskState.SKIPPED
+        ctx.decision = Decision.SKIP
+        db.save_task(ctx)
+        restored = self.client.post(f"/api/tasks/{task_id}/reparse")
+        self.assertEqual(restored.status_code, 200, restored.text)
+        ctx = db.get_task(task_id)
+        self.assertEqual(ctx.state, TaskState.RECEIVED)
+
+        # No network AI invocation is necessary: a URL does not carry a name.
+        llm_parser = self.app.state.pipeline.reg.get_provider("parser", "llm")
+        with patch.object(llm_parser, "parse", side_effect=AssertionError(
+                "A bare manual share should not spend an AI request")):
+            asyncio.run(self.app.state.pipeline.process_received(ctx))
+        ctx = db.get_task(task_id)
+        self.assertEqual((ctx.state, ctx.decision),
+                         (TaskState.PENDING_APPROVAL, Decision.ASK))
+        self.assertTrue(ctx.parsed.is_media)
+        self.assertFalse(ctx.parsed.is_ad)
+        self.assertIsNone(ctx.parsed.title)
+        self.assertIsNone(ctx.parsed.media_type)
+        self.assertEqual(ctx.parsed.episodes, [])
+        self.assertEqual(ctx.parsed.share_code, "gsQB8YFoLZQ")
+        self.assertTrue(ctx.meta["parse"]["manual_link_only"])
+        detail = self.client.get(f"/api/tasks/{task_id}").json()
+        self.assertIn("correct", detail["actions"])
+        self.assertIn("choose_share_folder", detail["actions"])
+
+        # No auto-save before confirming the genuine work and single episode.
+        response = self.client.post(f"/api/tasks/{task_id}/approve", json={})
+        self.assertEqual(response.status_code, 409, response.text)
+        corrected = self.client.post(f"/api/tasks/{task_id}/correct", json={
+            "title": "吞噬星空", "media_type": "anime", "year": 2020,
+            "season": 1, "episodes": [247], "resolution": "2160p",
+        })
+        self.assertEqual(corrected.status_code, 200, corrected.text)
+        ctx = db.get_task(task_id)
         self.assertEqual(ctx.source_rule["episodes_from"], "message")
+        self.assertEqual(ctx.parsed.episodes, [247])
+
+        # Even corrected metadata alone may not copy a whole share.
+        response = self.client.post(f"/api/tasks/{task_id}/approve", json={})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(db.get_task(task_id).state, TaskState.PENDING_APPROVAL)
+
+    def test_link_only_manual_import_still_obeys_keyword_prefilter(self):
+        from reelay.core.contracts import TaskState
+        result = self.client.post("/api/resources/submit", json={
+            "text": "https://www.alipan.com/s/blocked987", "source": "@shareAliyun",
+        })
+        self.assertEqual(result.status_code, 200, result.text)
+        ctx = self.app.state.store.get_task(result.json()["task_id"])
+        ctx.source_rule["filters"] = {"block_keywords": ["blocked987"]}
+        asyncio.run(self.app.state.pipeline.process_received(ctx))
+        self.assertEqual(ctx.state, TaskState.SKIPPED)
+
+    def test_link_only_with_metadata_allow_filter_stays_reviewable(self):
+        from reelay.core.contracts import TaskState
+        result = self.client.post("/api/resources/submit", json={
+            "text": "https://www.alipan.com/s/review987", "source": "@shareAliyun",
+        })
+        self.assertEqual(result.status_code, 200, result.text)
+        ctx = self.app.state.store.get_task(result.json()["task_id"])
+        ctx.source_rule["filters"] = {"allow": [{"media_type": "anime"}]}
+        asyncio.run(self.app.state.pipeline.process_received(ctx))
+        self.assertEqual(ctx.state, TaskState.PENDING_APPROVAL)
 
     def test_unknown_and_private_channels_are_rejected_without_fetch(self):
         service = self.app.state.service
