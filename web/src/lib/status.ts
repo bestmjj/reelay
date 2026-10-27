@@ -93,7 +93,8 @@ const CONNECTION_META: Record<string, { label: string; tone: Tone }> = {
 export function connectionMeta(status: string, component?: string): { label: string; tone: Tone } {
   if (component === 'llm') {
     if (status === 'failed') return { label: '最近识别失败', tone: 'danger' };
-    if (status === 'connected') return { label: '最近识别成功', tone: 'success' };
+    if (status === 'connected') return { label: '最近 AI 请求正常', tone: 'success' };
+    if (status === 'incomplete') return { label: '最近识别信息不足', tone: 'warning' };
     if (status === 'active') return { label: '连通性测试通过', tone: 'success' };
     if (status === 'error') return { label: '最近测试失败', tone: 'danger' };
   }
@@ -103,7 +104,8 @@ export function connectionMeta(status: string, component?: string): { label: str
 /** 后端仅记录安全的失败类别；给出能对应实际排查方向的解释，不假定具体根因。 */
 export function llmErrorExplanation(category?: string): string {
   const error = (category ?? '').toLowerCase();
-  if (error.includes('invalid')) return '模型接口可能通畅，但返回的 JSON 字段没有通过影视识别校验。';
+  if (error.includes('missing_title_or_type')) return 'AI 正常返回结果，但消息缺少可靠片名或影视类型，需人工确认；接口并未断开。';
+  if (error.includes('invalid')) return '模型返回的 JSON 字段未通过结构或类型校验。';
   if (error.includes('badrequest') || error.includes('400')) return '接口拒绝了实际解析请求，请核对模型是否支持 JSON Schema 和请求参数。';
   if (error.includes('apiconnection') || error.includes('timeout')) return '实际解析请求发生网络故障或超时，简单测试成功不代表每次请求都成功。';
   if (error.includes('ratelimit') || error.includes('429')) return '接口可能触发限流或配额限制。';
