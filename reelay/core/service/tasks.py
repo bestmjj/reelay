@@ -473,6 +473,11 @@ class TaskOpsMixin(ServiceBase):
         values = dict(before)
         values.update(patch)
         ctx.parsed = ParsedResource(**validate_resource(values))
+        if (ctx.ns("library").get("direct_existing")
+                and any(before.get(key) != getattr(ctx.parsed, key)
+                        for key in ("title", "year", "media_type", "season", "episodes"))):
+            ctx.ns("library").pop("direct_existing", None)
+            ctx.log("修改作品或季集后，原来选择的已有剧集目标目录已失效")
         if (ctx.ns("share_selection").get("file_id")
                 and any(before.get(key) != getattr(ctx.parsed, key)
                         for key in ("title", "year", "media_type", "season", "episodes"))):
