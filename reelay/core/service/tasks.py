@@ -29,6 +29,18 @@ class TaskOpsMixin(ServiceBase):
         ctx = self._require_context(task_id)
         if ctx.state != TaskState.PENDING_APPROVAL:
             raise ConflictError("任务不是待审批状态")
+        if ctx.raw.extra.get("manual_review"):
+            p = ctx.parsed
+            if not p or not p.title or p.media_type not in ("anime", "tv", "movie"):
+                raise ConflictError("人工提交的分享请先填写真实片名、类型，保存后再确认转存")
+            if p.media_type in ("anime", "tv"):
+                if len(ctx.episode_pairs()) != 1:
+                    raise ConflictError("人工单集转存必须明确唯一季集号，禁止盲目整季复制")
+                if ctx.source_rule.get("episodes_from") != "message":
+                    raise ConflictError("已修正的单集范围未绑定，请先保存识别结果")
+                if not (ctx.ns("share_selection").get("file_id")
+                        or ctx.ns("share_selection").get("folder_id")):
+                    raise ConflictError("请先读取分享列表，选择正确的源文件或源文件夹，再确认转存")
         advice = self.advice_action(ctx)
         target = self.pipeline.target_preview(ctx)
         if save_dir_alias:
@@ -130,13 +142,17 @@ class TaskOpsMixin(ServiceBase):
         if not storage.ready():
             raise ConflictError("网盘没有登录，无法读取分享文件列表")
         with self.pipeline.scope(ctx):
-            folders = storage.share_folder_choices(ctx.parsed)
-        if not folders:
-            raise ValueError("分享中找不到可选择的视频文件夹")
+            inventory = storage.share_source_inventory(ctx.parsed)
+        folders = inventory["folders"]
+        files = inventory["files"]
+        if not folders and not files:
+            raise ValueError("分享中找不到可以确认的源视频或文件夹")
         key = f"{provider}:{ctx.parsed.share_code}"
         preference = (self.store.state_get("share_folder_preferences", "items", {}) or {}).get(key)
         selected = ctx.ns("share_selection").get("folder_id") or (preference or {}).get("folder_id")
-        return {"folders": folders, "selected_folder_id": selected,
+        return {"folders": folders, "files": files,
+                "selected_file_id": ctx.ns("share_selection").get("file_id"),
+                "selected_folder_id": selected,
                 "saved_preference": bool(preference), "provider": provider}
 
     def choose_share_folder(self, task_id: str, folder_id: str, *, remember: bool = True) -> dict[str, Any]:
@@ -155,8 +171,11 @@ class TaskOpsMixin(ServiceBase):
         if folder["count"] <= 0:
             raise ValueError("这个版本文件夹中没有可转存视频")
         previous = ctx.state
-        ctx.ns("share_selection").update(folder_id=folder_id, path=folder["path"],
-                                         provider=provider, share_code=ctx.parsed.share_code)
+        selection = ctx.ns("share_selection")
+        for key in ("file_id", "file_name", "file_path", "file_size"):
+            selection.pop(key, None)
+        selection.update(folder_id=folder_id, path=folder["path"],
+                         provider=provider, share_code=ctx.parsed.share_code)
         ctx.log(f"人工选择分享版本「{folder['path']}」，只从所选文件夹取文件；其他版本不参与转存")
         self._update(ctx, expected=previous)
         if remember:
@@ -164,6 +183,32 @@ class TaskOpsMixin(ServiceBase):
             choices = self.store.state_get("share_folder_preferences", "items", {}) or {}
             choices[key] = {"folder_id": folder_id, "path": folder["path"]}
             self.store.state_set("share_folder_preferences", "items", choices)
+        return self.share_folders(task_id)
+
+    def choose_share_file(self, task_id: str, file_id: str) -> dict[str, Any]:
+        """Pin a single source file ID; NEVER initiate a remote transfer.
+
+        A fresh share scan is required at selection time and again during
+        prepare; plain filenames/paths are only audit evidence.
+        """
+        ctx, provider = self._selectable_share_task(task_id)
+        if not file_id or len(file_id) > 128:
+            raise ValueError("源文件 ID 无效")
+        if ctx.parsed.media_type not in ("tv", "anime") or len(ctx.episode_pairs()) != 1:
+            raise ConflictError("精确选择源视频之前请先保存唯一季集号")
+        preview = self.share_folders(task_id)
+        matches = [item for item in preview["files"] if item["file_id"] == file_id]
+        if len(matches) != 1 or not matches[0]["selectable"]:
+            raise ConflictError("源文件不属于已确认单集、缺少大小信息或已失效，请重新选择")
+        selected = matches[0]
+        existing = ctx.ns("share_selection")
+        existing.clear()
+        existing.update(file_id=file_id, file_name=selected["name"],
+                        file_path=selected["path"], file_size=selected["size"],
+                        share_code=ctx.parsed.share_code, provider=provider)
+        ctx.log(f"人工选择精确分享源文件：{selected['path']}/{selected['name']}，"
+                f"大小 {selected['size']} 字节；正式转存前会重新核验文件 ID")
+        self._update(ctx, expected=ctx.state)
         return self.share_folders(task_id)
 
     async def bulk(self, action: str, task_ids: list[str], *, save_dir_alias: str | None = None) -> list[dict[str, Any]]:
