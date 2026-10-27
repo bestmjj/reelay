@@ -113,7 +113,7 @@ class PermalinkSubmissionTests(WebCase):
         self.assertEqual(ctx.decision, Decision.ASK)
         self.assertIsNone(ctx.parsed.title)
         self.assertIsNone(ctx.parsed.media_type)
-        self.assertEqual(ctx.source_rule["episodes_from"], "share")
+        self.assertEqual(ctx.source_rule["episodes_from"], "message")
 
     def test_unknown_and_private_channels_are_rejected_without_fetch(self):
         service = self.app.state.service
