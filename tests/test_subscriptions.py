@@ -248,13 +248,24 @@ class TestSubscriptionLiveProgress(ServiceCase):
 
     async def test_wrong_e247_quarantine_is_not_counted_as_registered(self):
         self.subscribe({"title": "吞噬星空", "season": 1, "tmdbid": 101172, "total": 260})
-        wrong = done_task(self.store, "247", title="吞噬星空",
-                          episodes=(247,), tmdbid=101172)
+        wrong = tv_ctx(msg_id="247", title="吞噬星空",
+                       tmdbid=101172, episodes=(247,))
+        wrong.save_dir_cid = "resource-test-cid"
+        wrong.result = {"storage_verified": True}
+        wrong.ns("storage")["identity"] = {
+            "provider": "aliyun", "cid": "resource-test-cid",
+            "share_code": "wrong-source", "title": "吞噬星空",
+            "season": 1, "episodes": [247],
+        }
         wrong.ns("storage")["manifest"] = {
             "pairs": [[1, 247]],
             "files": [{"id": "wrong-4k-file", "name": "4K.mp4",
                        "size": 4040000000, "share_path": "洛DA/4K.mp4"}],
         }
+        wrong.state = TaskState.STORED
+        self.store.save_task(wrong)
+        self.store.finish_transfer(wrong)
+        wrong.state = TaskState.DONE
         self.store.save_task(wrong)
         before = self.service.list_subscriptions()["items"][0]
         self.assertIn(247, before["have"])
