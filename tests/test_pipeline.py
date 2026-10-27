@@ -434,6 +434,67 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(store.retry_delivery(failed["id"]))
         self.assertEqual(store.delivery_counts(), {"done": 1, "pending": 1})
 
+    async def test_telegram_bot_to_bot_error_is_terminal_and_log_is_rate_limited(self):
+        # Reproduce the production storm: every notification targets a Bot,
+        # which Telegram rejects with USER_IS_BOT. Keep failed deliveries
+        # durable (not skipped), but do not retry the same invalid peer.
+        class UserIsBotError(Exception):
+            pass
+
+        class Target:
+            name = "console"
+            reject = True
+            calls = 0
+            async def notice(self, text, **kwargs):
+                self.calls += 1
+                if self.reject:
+                    raise UserIsBotError("Bots cannot message other bots")
+
+        target = Target()
+        reg = Registry()
+        reg.add_provider("notify", target)
+        store = self.store()
+        pipeline = Pipeline(reg, store, {"providers": {"notify": ["console"]}})
+        for i in range(27):
+            store.stage_notice(f"bad-peer:{i}", f"notice {i}", ["console"])
+        with self.assertLogs("reelay.pipeline", level="ERROR") as logged:
+            while await pipeline.dispatch_deliveries():
+                pass
+        self.assertEqual(len(logged.output), 1)
+        self.assertIn("UserIsBotError", logged.output[0])
+        self.assertIn("停止自动重试", logged.output[0])
+        self.assertEqual(target.calls, 27)
+        self.assertEqual(store.delivery_counts(), {"failed": 27})
+        rows = store._conn.execute(
+            "SELECT attempts, error, status FROM outbox ORDER BY id").fetchall()
+        self.assertTrue(all(tuple(row) == (1, "UserIsBotError", "failed") for row in rows))
+        self.assertEqual(store.claim_deliveries(), [])
+
+        # An operator can correct owner_id/forward.target then manually
+        # replay failed notifications from the management dashboard.
+        target.reject = False
+        self.assertTrue(store.retry_delivery(store.list_deliveries()[0]["id"]))
+        await pipeline.dispatch_deliveries()
+        self.assertEqual(store.delivery_counts(), {"done": 1, "failed": 26})
+
+    async def test_transient_delivery_failure_retains_backoff(self):
+        class Transient:
+            name = "console"
+            async def notice(self, text, **kwargs):
+                raise ConnectionError("Telegram disconnected")
+        reg = Registry()
+        reg.add_provider("notify", Transient())
+        store = self.store()
+        pipeline = Pipeline(reg, store, {"providers": {"notify": ["console"]}})
+        store.stage_notice("transient", "notice", ["console"])
+        with self.assertLogs("reelay.pipeline", level="WARNING") as logged:
+            await pipeline.dispatch_deliveries()
+        self.assertIn("退避策略重试", logged.output[0])
+        self.assertEqual(store.delivery_counts(), {"pending": 1})
+        delivery = store._conn.execute(
+            "SELECT attempts, error FROM outbox").fetchone()
+        self.assertEqual(tuple(delivery), (1, "ConnectionError"))
+
     async def test_task_and_event_intent_commit_or_rollback_together(self):
         class Listener:
             name, event = "event", "on_message"
