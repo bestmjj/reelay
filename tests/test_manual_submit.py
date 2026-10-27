@@ -14,7 +14,7 @@ from tests.fakes import WebCase
 
 class PermalinkSubmissionTests(WebCase):
     CONFIG = {
-        "save_dirs": {"默认": "aliyun:movie_root", "动漫": "aliyun:anime_root"},
+        "save_dirs": {"默认": "aliyun:movie_root", "动漫": "aliyun:anime_root", "115剧集": "12345"},
         "defaults": {"parser": "regex", "storage": "aliyun", "save_to": "默认",
                      "approval_mode": "manual"},
         "sources": [{"bot": "@shareAliyun", "storage": "aliyun", "parser": "regex",
@@ -196,6 +196,12 @@ class PermalinkSubmissionTests(WebCase):
                                       json={"file_id": "good247"})
         self.assertEqual(chosen.status_code, 200, chosen.text)
         self.assertEqual(chosen.json()["selected_file_id"], "good247")
+        # An Aliyun transfer may not target an unrelated 115 directory.
+        wrong = self.client.post(f"/api/tasks/{task_id}/approve", json={
+            "save_dir_alias": "115剧集",
+        })
+        self.assertEqual(wrong.status_code, 422, wrong.text)
+        self.assertEqual(db.get_task(task_id).state, TaskState.PENDING_APPROVAL)
         response = self.client.post(f"/api/tasks/{task_id}/approve", json={
             "save_dir_alias": "动漫",
         })
