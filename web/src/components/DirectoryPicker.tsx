@@ -8,11 +8,12 @@ import { useDirListing, type Crumb } from '@/hooks/useDirListing';
 import { cn } from '@/lib/utils';
 
 /** 选中的目录；path 是从根目录起的路径，如「影视 / 剧集」。 */
-export type PickedDir = Crumb & { path: string; provider: 'p115' | 'aliyun' };
+export type PickedDir = Crumb & { path: string; provider: 'p115' | 'aliyun'; driveId?: string };
 
 /** 选择 网盘目录的弹窗；打开时才挂载（见 BasicTab），从 initialCid 开始浏览。 */
-export default function DirectoryPicker({ open, initialCid = '0', initialName = '根目录', initialProvider = 'p115', onOpenChange, onSelect }:
-  { open: boolean; initialCid?: string; initialName?: string; initialProvider?: 'p115' | 'aliyun'; onOpenChange: (open: boolean) => void; onSelect: (dir: PickedDir) => void }) {
+export default function DirectoryPicker({ open, initialCid = '0', initialName = '根目录', initialProvider = 'p115', fixedProvider, onOpenChange, onSelect }:
+  { open: boolean; initialCid?: string; initialName?: string; initialProvider?: 'p115' | 'aliyun';
+    fixedProvider?: 'p115' | 'aliyun'; onOpenChange: (open: boolean) => void; onSelect: (dir: PickedDir) => void }) {
   const [provider, setProvider] = useState<'p115' | 'aliyun'>(initialProvider);
   const dir = useDirListing({
     cid: initialCid || '0',
@@ -33,7 +34,7 @@ export default function DirectoryPicker({ open, initialCid = '0', initialName = 
 
       <div className="flex flex-wrap items-center gap-2 border-t border-border/70 px-4 py-2">
         <span className="text-xs text-muted-foreground">选择网盘</span>
-        {([{ id: 'p115', name: '115 网盘' }, { id: 'aliyun', name: '阿里云盘（资源库）' }] as const).map(item => (
+        {([{ id: 'p115', name: '115 网盘' }, { id: 'aliyun', name: '阿里云盘（资源库）' }] as const).filter(item => !fixedProvider || item.id === fixedProvider).map(item => (
           <Button key={item.id} size="sm" variant={provider === item.id ? 'default' : 'outline'}
             disabled={provider === item.id} onClick={() => { setProvider(item.id); dir.open('0', []); }}>
             {item.name}
@@ -107,7 +108,7 @@ export default function DirectoryPicker({ open, initialCid = '0', initialName = 
           <Button
             className="flex-1 sm:flex-none" disabled={busy || Boolean(error)}
             onClick={() => {
-              onSelect({ ...current, provider, path: dir.path.map(x => x.name).join(' / ') || '根目录' });
+              onSelect({ ...current, provider, driveId: dir.driveId, path: dir.path.map(x => x.name).join(' / ') || '根目录' });
               onOpenChange(false);
               toast.success(`已选择目录「${current.name}」`);
             }}
