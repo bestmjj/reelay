@@ -81,6 +81,8 @@ export interface IAuthAliyunStatus {
   checked_at: number | null;
   drive_id: string | null;
   error: string | null;
+  /** Recent read-only SQLite observation, not a new remote validation. */
+  last_observation?: boolean;
 }
 
 export interface IAliyunQrStart { uid: string; expires_at: number }
