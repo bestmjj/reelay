@@ -58,6 +58,30 @@ class AuthAliyunTest(unittest.TestCase):
         self.assertEqual(result["state"], "expired")
         self.assertEqual(self.secrets.get("aliyun_refresh_token"), "expired-refresh-token-123")
 
+    def test_concurrent_worker_token_rotation_does_not_falsely_expire_login(self):
+        old = "first-refresh-token-123456"
+        newer = "worker-rotated-token-123456"
+        final = "web-rotated-token-123456"
+        self.secrets.update({"aliyun_refresh_token": old})
+        attempts = []
+
+        def exchange(token):
+            attempts.append(token)
+            if token == old:
+                # Background worker just rotated the token while the Web
+                # status probe was refreshing. A 401 here is not logout.
+                self.secrets.update({"aliyun_refresh_token": newer})
+                raise AliyunAPIError(401, "InvalidToken")
+            self.assertEqual(token, newer)
+            return final, "resource-drive-123"
+
+        with patch.object(self.auth, "_exchange", side_effect=exchange):
+            result = self.auth.ping()
+        self.assertEqual(result["state"], "active")
+        self.assertEqual(attempts, [old, newer])
+        self.assertEqual(self.secrets.get("aliyun_refresh_token"), final)
+        self.assertNotIn(final, str(result))
+
     def test_qr_lifecycle_scanned_confirmed_saved_once(self):
         with patch("reelay.core.authaliyun._passport_request", side_effect=[
             {"t": 123456789, "ck": "test-check", "codeContent": "https://example.com/qr"},
