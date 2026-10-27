@@ -90,6 +90,31 @@ class PermalinkSubmissionTests(WebCase):
         self.assertEqual(parsed.raw_fields["share_provider"], "aliyun")
         self.assertEqual(parsed.share_code, "gsQB8YFoLZQ")
 
+    def test_ai_guessed_title_from_link_instructions_is_discarded_before_tmdb(self):
+        from reelay.core.contracts import Decision, ParsedResource, TaskState
+
+        response = self.client.post("/api/resources/submit", json={
+            "text": "https://www.alipan.com/s/another247 选择分享根目录中的 247"})
+        self.assertEqual(response.status_code, 200, response.text)
+        ctx = self.app.state.store.get_task(response.json()["task_id"])
+        fake_parse = ParsedResource(is_media=True, title="选择分享根目录中的 247",
+                                    media_type="anime", confidence=0.99, season=1,
+                                    episodes=[247], share_code="another247",
+                                    raw_fields={"share_provider": "aliyun"})
+        parser = self.app.state.pipeline.reg.get_provider("parser", "regex")
+        decider = self.app.state.pipeline.reg.get_provider("decision", "subscription")
+        with patch.object(parser, "parse", new_callable=AsyncMock, return_value=fake_parse), \
+                patch.object(self.app.state.pipeline, "run_hooks",
+                             new_callable=AsyncMock, return_value=True), \
+                patch.object(decider, "decide", new_callable=AsyncMock,
+                             return_value=Decision.SAVE):
+            asyncio.run(self.app.state.pipeline.process_received(ctx))
+        self.assertEqual(ctx.state, TaskState.PENDING_APPROVAL)
+        self.assertEqual(ctx.decision, Decision.ASK)
+        self.assertIsNone(ctx.parsed.title)
+        self.assertIsNone(ctx.parsed.media_type)
+        self.assertEqual(ctx.source_rule["episodes_from"], "share")
+
     def test_unknown_and_private_channels_are_rejected_without_fetch(self):
         service = self.app.state.service
         with patch.object(service, "source_messages", new_callable=AsyncMock) as fetched:
