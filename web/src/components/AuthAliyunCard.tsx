@@ -151,7 +151,9 @@ export default function AuthAliyunCard() {
       icon={Cloud}
       title="阿里云盘连接"
       description="扫码一次登录，默认使用资源库（数据盘），不是备份盘；分享转存、目录浏览和整理共用凭证。"
-      actions={<ToneBadge tone={meta.tone}>{meta.label}</ToneBadge>}
+      actions={<ToneBadge tone={meta.tone}>
+        {status?.last_observation && status.state === 'active' ? '最近检测正常' : meta.label}
+      </ToneBadge>}
       bodyClassName="space-y-4 p-4 sm:p-5"
     >
       {loaded.error ? (
