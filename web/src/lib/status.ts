@@ -89,8 +89,29 @@ const CONNECTION_META: Record<string, { label: string; tone: Tone }> = {
   error: { label: '连接异常', tone: 'danger' },
 };
 
-export function connectionMeta(status: string): { label: string; tone: Tone } {
+/** AI 为按请求观察的状态，不是持续网络探活；不能用通用「连接失败」误导用户。 */
+export function connectionMeta(status: string, component?: string): { label: string; tone: Tone } {
+  if (component === 'llm') {
+    if (status === 'failed') return { label: '最近识别失败', tone: 'danger' };
+    if (status === 'connected') return { label: '最近识别成功', tone: 'success' };
+    if (status === 'active') return { label: '连通性测试通过', tone: 'success' };
+    if (status === 'error') return { label: '最近测试失败', tone: 'danger' };
+  }
   return CONNECTION_META[status] ?? { label: '状态未知', tone: 'warning' };
+}
+
+/** 后端仅记录安全的失败类别；给出能对应实际排查方向的解释，不假定具体根因。 */
+export function llmErrorExplanation(category?: string): string {
+  const error = (category ?? '').toLowerCase();
+  if (error.includes('invalid')) return '模型接口可能通畅，但返回的 JSON 字段没有通过影视识别校验。';
+  if (error.includes('badrequest') || error.includes('400')) return '接口拒绝了实际解析请求，请核对模型是否支持 JSON Schema 和请求参数。';
+  if (error.includes('apiconnection') || error.includes('timeout')) return '实际解析请求发生网络故障或超时，简单测试成功不代表每次请求都成功。';
+  if (error.includes('ratelimit') || error.includes('429')) return '接口可能触发限流或配额限制。';
+  if (error.includes('authentication') || error.includes('401')) return '认证失败，请核对运行配置的 API Key。';
+  if (error.includes('permission') || error.includes('403')) return '当前凭证可能没有使用该模型的权限。';
+  if (error.includes('unavailable')) return '后台没有可用的 AI 客户端，请检查已保存的密钥和依赖。';
+  if (error.includes('refused')) return '模型拒绝了这条解析请求，并不意味着网络断开。';
+  return '这里显示的是最近一次实际 AI 请求的结果，并非持续的网络连接检测。';
 }
 
 // 系统运行模式：live / not_configured / not_running
