@@ -7,13 +7,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 
 from .. import messages, source_audit, subscriptions
 from ..media import is_video
-from ..contracts import ParsedResource, PipelineContext, TaskState
+from ..contracts import Decision, ParsedResource, PipelineContext, TaskState
 from ..validation import MEDIA_SCHEMA, validate_resource
 from .base import ConflictError, NotFoundError, ServiceBase
 
@@ -128,17 +128,88 @@ class TaskOpsMixin(ServiceBase):
         except Exception as exc:  # noqa: BLE001 - 订阅建议不影响批准
             log.warning("订阅建议生成失败：%s", exc)
 
+    def reopen_duplicate(self, task_id: str) -> dict[str, Any]:
+        """Let an operator inspect a fully skipped bundle for newly missing
+        episodes. This changes only the local task state, not any cloud file.
+        The first automatic duplicate decision still remains in task history.
+        """
+        ctx = self._require_context(task_id)
+        previous = ctx.state
+        storage = ctx.ns("storage")
+        skip = ctx.ns("task").get("skip") or {}
+        if (previous != TaskState.SKIPPED or skip.get("kind") != "duplicate"
+                or not ctx.parsed or ctx.parsed.media_type not in ("tv", "anime")
+                or not ctx.parsed.title or not ctx.parsed.share_code
+                or storage.get("manifest") or storage.get("landed")
+                or storage.get("phase") in ("receiving", "stored")):
+            raise ConflictError("只有未发生转存的剧集「重复跳过」任务可以重新检查缺集")
+        ctx.state = TaskState.PENDING_APPROVAL
+        ctx.decision = Decision.ASK
+        ctx.ns("task")["generation"] = ctx.ns("task").get("generation", 0) + 1
+        ctx.ns("task")["user_reopened_duplicate"] = True
+        ctx.ns("task").pop("skip", None)
+        ctx.source_rule["approval_mode"] = "manual"
+        ctx.log("人工重新检查此前自动跳过的分享：可指定需要补的集数；不会关闭已有集去重")
+        self._update(ctx, expected=previous)
+        return self.get_task(task_id)
+
+    def set_episode_selection(self, task_id: str, episodes: list[int]) -> dict[str, Any]:
+        """Per-task subset of episodes, with mandatory existing-content dedup.
+
+        Empty list restores automatic share/message selection. Never let this
+        edit override a verified transfer, quarantine, or a busy Worker task.
+        """
+        ctx = self._require_context(task_id)
+        storage = ctx.ns("storage")
+        if ctx.state not in (TaskState.PENDING_APPROVAL, TaskState.FAILED):
+            raise ConflictError("只能在待确认或尚未转存的失败任务中指定补集")
+        if storage.get("manifest") or storage.get("landed") or storage.get("phase") == "receiving":
+            raise ConflictError("该任务存在转存检查点，禁止修改要复制的集数")
+        if not ctx.parsed or not ctx.parsed.title or ctx.parsed.media_type not in ("tv", "anime"):
+            raise ConflictError("请先保存真实片名和剧集/动漫类型")
+        if ctx.parsed.season is None or not 1 <= ctx.parsed.season <= 100:
+            raise ConflictError("请先确认季号，再选择要补的集数（不能跨季）")
+        if len(episodes) > 100 or any(type(ep) is not int or not 1 <= ep <= 2000 for ep in episodes):
+            raise ValueError("本次最多选择 100 集，集号必须是 1～2000 的整数")
+        if len(episodes) != len(set(episodes)):
+            raise ValueError("集号有重复，请去重后提交")
+        selected = sorted(episodes)
+        selection = ctx.ns("share_selection")
+        # File ID and folder version are tied to the previous requested set:
+        # force a fresh read instead of reusing a wrong file or HDR folder.
+        old = selection.get("only_episodes") or []
+        if selected != old:
+            for key in ("file_id", "file_name", "file_path", "file_size",
+                        "folder_id", "path"):
+                selection.pop(key, None)
+            selection.pop("only_episodes", None)
+            if selected:
+                selection["only_episodes"] = selected
+            ctx.log("人工指定只补 " + (", ".join(f"E{ep:03d}" for ep in selected)
+                                       if selected else "恢复自动判断")
+                    + "；已有核验集仍自动跳过，不允许借此洗版")
+            self._update(ctx, expected=ctx.state)
+        return self.get_task(task_id)
+
     def task_actions(self, ctx: PipelineContext) -> list[str]:
         """这条任务现在允许的人工操作（管理台按它显示按钮）；判断与各操作自己的检查一致。"""
         state, storage = ctx.state, ctx.meta.get("storage") or {}
         unknown_transfer = storage.get("phase") == "receiving" and bool(storage.get("manifest"))
         out: list[str] = []
+        if (state == TaskState.SKIPPED and ctx.ns("task").get("skip", {}).get("kind") == "duplicate"
+                and ctx.parsed and ctx.parsed.media_type in ("tv", "anime")
+                and ctx.parsed.share_code and not storage.get("manifest") and not storage.get("landed")):
+            out.append("reopen_duplicate")
         if state == TaskState.PENDING_APPROVAL:
             out += ["approve", "reject"]
             if subscriptions.subscribable(ctx) and not subscriptions.subscribed(self.store.subscriptions(), ctx):
                 out.append("subscribe")
         if state == TaskState.FAILED:
             out.append("retry")
+        if (state in (TaskState.PENDING_APPROVAL, TaskState.FAILED)
+                and not storage.get("manifest") and not storage.get("landed")
+                and ctx.parsed and ctx.parsed.title and ctx.parsed.media_type in ("tv", "anime")):
+            out.append("select_episodes")
         if state == TaskState.NEED_MANUAL:
             if unknown_transfer:
                 out += ["reconcile", *(["accept_partial"] if storage.get("partial") else []), "abandon"]
@@ -209,8 +280,10 @@ class TaskOpsMixin(ServiceBase):
         storage = self.pipeline.reg.get_provider("storage", provider)
         if not storage.ready():
             raise ConflictError("网盘没有登录，无法读取分享文件列表")
+        only = ctx.ns("share_selection").get("only_episodes") or []
+        preview_parsed = replace(ctx.parsed, episodes=list(only)) if only else ctx.parsed
         with self.pipeline.scope(ctx):
-            inventory = storage.share_source_inventory(ctx.parsed)
+            inventory = storage.share_source_inventory(preview_parsed)
         folders = inventory["folders"]
         files = inventory["files"]
         if not folders and not files:
@@ -264,15 +337,20 @@ class TaskOpsMixin(ServiceBase):
         ctx, provider = self._selectable_share_task(task_id)
         if not file_id or len(file_id) > 128:
             raise ValueError("源文件 ID 无效")
-        if ctx.parsed.media_type not in ("tv", "anime") or len(ctx.episode_pairs()) != 1:
-            raise ConflictError("精确选择源视频之前请先保存唯一季集号")
+        only = ctx.ns("share_selection").get("only_episodes") or []
+        count = len(only) if only else len(ctx.episode_pairs())
+        if ctx.parsed.media_type not in ("tv", "anime") or count != 1:
+            raise ConflictError("精确选择源视频之前请先指定唯一目标集数")
         preview = self.share_folders(task_id)
         matches = [item for item in preview["files"] if item["file_id"] == file_id]
         if len(matches) != 1 or not matches[0]["selectable"]:
             raise ConflictError("源文件不属于已确认单集、缺少大小信息或已失效，请重新选择")
         selected = matches[0]
         existing = ctx.ns("share_selection")
+        only = existing.get("only_episodes")
         existing.clear()
+        if only:
+            existing["only_episodes"] = list(only)
         existing.update(file_id=file_id, file_name=selected["name"],
                         file_path=selected["path"], file_size=selected["size"],
                         share_code=ctx.parsed.share_code, provider=provider)
@@ -372,6 +450,7 @@ class TaskOpsMixin(ServiceBase):
         self.pipeline.stamp_config(ctx)
         ctx.meta.pop("parse", None)
         ctx.meta.pop("preference", None)
+        ctx.meta.pop("share_selection", None)  # previous override/file ID cannot survive a new identity
         ctx.meta.get("library", {}).pop("preferred", None)
         ctx.meta.pop("storage", None)  # 无远端写检查点，显式重新解析可重新选择 Provider。
         ctx.meta["parse_request"] = {"bypass_cache": True}  # 人工要求重新解析，不复用缓存结果
@@ -478,6 +557,11 @@ class TaskOpsMixin(ServiceBase):
         values = dict(before)
         values.update(patch)
         ctx.parsed = ParsedResource(**validate_resource(values))
+        if (ctx.ns("share_selection").get("only_episodes")
+                and any(before.get(key) != getattr(ctx.parsed, key)
+                        for key in ("title", "year", "media_type", "season", "episodes"))):
+            ctx.ns("share_selection").pop("only_episodes", None)
+            ctx.log("修改作品季集后已清除原指定补集，请重新确认")
         if (ctx.ns("library").get("direct_existing")
                 and any(before.get(key) != getattr(ctx.parsed, key)
                         for key in ("title", "year", "media_type", "season", "episodes"))):
