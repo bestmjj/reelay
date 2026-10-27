@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -59,7 +60,11 @@ class ConsoleNotify:
                              photo=messages.card_image_url(ctx))
 
         elif event == "saved":
-            await self._send(messages.saved_message(ctx, _drive_path(ctx)), messages.link_buttons(ctx),
+            # Saved notifications are delivered from a durable task snapshot.
+            # Resolve the actual destination (or say it is unverified); a
+            # category alias such as "默认" is not a filesystem path.
+            root = await _drive_path(ctx)
+            await self._send(messages.saved_message(ctx, root), messages.link_buttons(ctx),
                              photo=messages.card_image_url(ctx))
 
         elif event in ("transfer_uncertain", "organize_failed", "failed"):
@@ -83,15 +88,55 @@ def _subscriptions() -> list[dict]:
         return []
 
 
-def _drive_path(ctx: PipelineContext) -> str:
-    """保存目录在网盘里的路径（Worker 读到后记录）；不知道或目录 CID 已改时用目录别名。"""
-    alias = ctx.save_dir_alias or "默认"
+async def _drive_path(ctx: PipelineContext) -> str | None:
+    """Resolve the *actual* directory of this saved task, never a category alias.
+
+    Aliyun save_dirs contain "aliyun:<id>" whereas task.save_dir_cid is
+    unqualified. A direct-existing-folder transfer can also have a CID distinct
+    from its configured alias, so its verified path takes precedence.
+    """
+    cid = str(ctx.save_dir_cid or "")
+    if not cid:
+        return None
+    provider = (ctx.ns("storage").get("provider")
+                or ctx.source_rule.get("storage")
+                or runtime.get("defaults.storage", "p115"))
+    existing = ctx.ns("library").get("direct_existing") or {}
+    if (provider == "aliyun" and str(existing.get("id") or "") == cid
+            and existing.get("provider") == "aliyun"
+            and isinstance(existing.get("path"), str)
+            and existing["path"].startswith("/")):
+        # This path was verified again immediately before the cloud copy.
+        return existing["path"]
+
     try:
-        saved = runtime.services().store.state_get("kernel", "save_dir_paths", {}) or {}
-    except RuntimeError:  # 不在管线作用域里（如测试直接调用）
-        return alias
-    entry = saved.get(alias) or {}
-    return entry["path"] if entry.get("path") and entry.get("cid") == str(ctx.save_dir_cid) else alias
+        services = runtime.services()
+    except RuntimeError:
+        return None
+    alias = ctx.save_dir_alias or "默认"
+    entry = (services.store.state_get("kernel", "save_dir_paths", {}) or {}).get(alias) or {}
+    cached_ref = str(entry.get("cid") or "")
+    if provider == "aliyun":
+        cached_matches = (cached_ref.startswith("aliyun:") and
+                          (cached_ref.removeprefix("aliyun:") in ("0", "root")
+                           and cid in ("0", "root")
+                           or cached_ref.removeprefix("aliyun:") == cid))
+    else:
+        cached_matches = cached_ref == cid and not cached_ref.startswith("aliyun:")
+    if (cached_matches and isinstance(entry.get("path"), str)
+            and entry["path"].startswith("/")):
+        return entry["path"]
+
+    # A single broken alias must not hide the path of a successfully saved
+    # task. Do a fresh read of the *task's* resolved directory, off the loop.
+    try:
+        storage = services.storage(provider)
+        path = await asyncio.to_thread(storage.dir_path, cid)
+        return path if isinstance(path, str) and path.startswith("/") else None
+    except Exception as exc:  # display-only; never undo an already verified copy
+        log.warning("任务 %s 的实际目录无法查询（%s），通知标注路径未核验",
+                    ctx.task_id, type(exc).__name__)
+        return None
 
 
 def _render(tpl: str, ctx: PipelineContext) -> str:
