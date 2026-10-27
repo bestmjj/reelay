@@ -131,6 +131,7 @@ class AliyunAuth:
             try:
                 return self.set_token(token)
             except Exception as exc:
+                failure = exc
                 # Worker and Web use the same atomic secret file but separate
                 # processes. Another request may have *successfully rotated*
                 # the refresh token while this probe was in flight. If so,
@@ -140,14 +141,14 @@ class AliyunAuth:
                     try:
                         return self.set_token(latest)
                     except Exception as newer:
-                        token, exc = latest, newer
+                        token, failure = latest, newer
                 self._fingerprint = hashlib.sha256(token.encode()).hexdigest()
-                if isinstance(exc, AliyunAPIError) and (exc.status in (401, 403)
-                        or any(part in exc.code.lower() for part in ("invalid", "expired", "token"))):
+                if isinstance(failure, AliyunAPIError) and (failure.status in (401, 403)
+                        or any(part in failure.code.lower() for part in ("invalid", "expired", "token"))):
                     self._state = "expired"
                 else:
                     self._state = "error"
-                self._error = str(exc)[:180]
+                self._error = str(failure)[:180]
                 self._checked_at = time.time()
                 return self.status()
 
