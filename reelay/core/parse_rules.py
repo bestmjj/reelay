@@ -213,9 +213,10 @@ def _title_line(text: str) -> str:
     lines = []
     for raw in (text or "").splitlines():
         without_link = _URL_IN_TEXT_RE.sub(" ", raw)
-        line = re.sub(r"^[^\w【《(（\[]+", "", without_link).strip()
-        if not re.sub(r"#\S+|[^\w]", "", line):
+        # Hashtag-only captions are metadata, not a real title line.
+        if not re.sub(r"#\S+|[^\w]", "", without_link):
             continue
+        line = re.sub(r"^[^\w【《(（\[]+", "", without_link).strip()
         if _LABEL_RE.match(line):
             return line
         if _SOURCE_INSTRUCTION_RE.match(line):
