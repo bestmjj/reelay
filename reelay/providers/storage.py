@@ -688,7 +688,8 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
         except NeedsManual as exc:
             if str(exc).startswith(("分享包含多个版本文件夹", "选中的分享版本文件夹",
                                     "选中版本缺少", "分享不同目录混有",
-                                    "选中的文件夹内部还有")):
+                                    "选中的文件夹内部还有", "缺失集 ",
+                                    "所选目录仍包含缺失集")):
                 raise  # Folder selection must be explicit; AI cannot bypass it.
             if self._client is None or not runtime.get('ai.assist', True):
                 raise
