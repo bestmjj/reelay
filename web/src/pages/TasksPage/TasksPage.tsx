@@ -71,7 +71,7 @@ function TaskRow({ item, onOpen }: { item: ITaskSummary; onOpen: () => void }) {
           <p className="mt-0.5 truncate text-xs text-muted-foreground" title={item.skip_reason}>
             {item.skip_kind === 'duplicate' ? '没有再次转存：' : '跳过原因：'}{item.skip_reason}
           </p>
-        ) : null
+        ) : null}
         <p className="mt-0.5 truncate text-xs text-muted-foreground md:hidden">
           {item.source} · {relativeTime(item.updated_at)}
         </p>
