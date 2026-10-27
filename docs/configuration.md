@@ -132,6 +132,28 @@ AI 接口密钥与 TMDB key 是密钥，见 [密钥](#密钥)。改了立即生�
 | `telegram.backfill_limit` / `backfill_max_days` | `200` / `7` | 监听启动时（含断线后进程重启）每个来源最多补拉的停机期间消息条数（`0` 关闭）与最大消息年龄（天）；首次监听的来源不导入历史 |
 | `telegram.alert_after_sec` | `120` | 消息源断开（含还没配置或登录 Telegram）多久后告警 |
 
+#### 控制 Bot 的通知失败（`UserIsBotError`）
+
+- `UserIsBotError` 是 Telegram 明确拒绝 **Bot 向另一个 Bot 发消息**；不是 AI 识别、阿里云盘转存或常规的 Telegram 断线错误。
+- 管理台「总览 → 通知发送」会展示失败事件类型。**`identified`** 是「识别后转发」，检查全局或该来源的 `forward.target` 是否填写成另一个 Bot；**`saved` / `pending_approval` / `failed` / 系统通知** 则检查 `telegram.owner_id` 是否是你**自己的 Telegram 用户数字 ID**，而不是控制 Bot ID。首次接收 Bot 私聊通常需要先向它发送 `/start`。
+- 新版直接将 `UserIsBotError` 的通知标记为 `failed`（不会重试同一个错误目标 8 次），保留 Outbox 记录供核对；修正目标后到「总览 → 通知发送 → 重发失败」手动恢复。**不要在接收目标仍错误时批量重发。**
+- `telethon ... Server closed the connection` 是另一种网络中断；如果 Telegram 监听和控制 Bot 能自动重连，一两次警告不说明发送目标有问题。持续断开时再排查 `proxy.telegram` 与代理连通性。
+- 容器内可只读排查最近错误事件类别，避免打印 Bot Token、分享消息或 Telegram 账号数字 ID：
+
+  ```bash
+  docker exec -i aliyundrive-subscribe-telegram-worker-1 python - <<'PY'
+  import sqlite3
+  db = sqlite3.connect("file:/app/data/reelay.db?mode=ro", uri=True)
+  for row in db.execute("""
+      SELECT event, status, error, COUNT(*)
+      FROM outbox WHERE error = 'UserIsBotError'
+      GROUP BY event, status, error ORDER BY COUNT(*) DESC
+  """):
+      print(*row)
+  db.close()
+  PY
+  ```
+
 ### 115 请求限速（`p115`）
 
 | 字段 | 默认 | 说明 |
