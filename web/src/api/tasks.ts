@@ -65,6 +65,12 @@ export const taskApi = {
     post<IShareFolderPreview>(`tasks/${taskId}/share-folder`, { folder_id: folderId, remember }),
   chooseShareFile: (taskId: string, fileId: string) =>
     post<IShareFolderPreview>(`tasks/${taskId}/share-file`, { file_id: fileId }),
+  /** Change only this task's target episodes. Empty list restores auto-selection. */
+  selectEpisodes: (taskId: string, episodes: number[]) =>
+    post<ITaskDetail>(`tasks/${taskId}/episode-selection`, { episodes }),
+  /** An auto-skipped duplicate can be manually inspected for newly missing episodes. */
+  reopenDuplicate: (taskId: string) =>
+    post<ITaskDetail>(`tasks/${taskId}/reopen-duplicate`),
   act: (taskId: string, endpoint: TaskEndpoint, body?: unknown) =>
     post<{ ok: boolean }>(`tasks/${taskId}/${endpoint}`, body),
   /** 修正识别结果，返回更新后的详情。 */
