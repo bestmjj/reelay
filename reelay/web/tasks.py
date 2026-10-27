@@ -26,6 +26,10 @@ class ShareFolderPayload(BaseModel):
     remember: bool = True
 
 
+class ShareFilePayload(BaseModel):
+    file_id: str = Field(min_length=1, max_length=128)
+
+
 class ParsePatchPayload(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
@@ -78,6 +82,10 @@ def router(service) -> APIRouter:
     async def task_select_share_folder(task_id: str, payload: ShareFolderPayload):
         return await asyncio.to_thread(
             service.choose_share_folder, task_id, payload.folder_id, remember=payload.remember)
+
+    @api.post("/api/tasks/{task_id}/share-file")
+    async def task_select_share_file(task_id: str, payload: ShareFilePayload):
+        return await asyncio.to_thread(service.choose_share_file, task_id, payload.file_id)
 
     @api.post("/api/tasks/{task_id}/approve")
     async def approve(task_id: str, payload: ActionPayload | None = None):
