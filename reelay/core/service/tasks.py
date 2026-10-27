@@ -12,6 +12,7 @@ from typing import Any
 
 
 from .. import messages, source_audit, subscriptions
+from ..media import is_video
 from ..contracts import ParsedResource, PipelineContext, TaskState
 from ..validation import MEDIA_SCHEMA, validate_resource
 from .base import ConflictError, NotFoundError, ServiceBase
@@ -49,8 +50,10 @@ class TaskOpsMixin(ServiceBase):
             actual_drive = str(storage.client.drive_id)
             if not drive_id or actual_drive != drive_id:
                 raise ConflictError("阿里云盘资源库已变化，请重新选择已有目录")
-            attr = storage.library().get_attr(folder_id)
+            library = storage.library()
+            attr = library.get_attr(folder_id)
             path = storage.dir_path(folder_id)
+            children = library.iterdir(folder_id)
         except ConflictError:
             raise
         except Exception:
@@ -59,6 +62,8 @@ class TaskOpsMixin(ServiceBase):
                 or not path or not path.startswith("/")
                 or any(part.casefold().startswith(".reelay-") for part in path.split("/"))):
             raise ConflictError("所选位置不是可用的已有剧集目录")
+        if not any(not item.get("is_dir") and is_video(item.get("name", "")) for item in children):
+            raise ConflictError("这个文件夹没有已有视频，请进入实际存放 E01～E246 的最终目录后再选择")
         title = (ctx.parsed.title or "").strip()
         if not title or title.casefold() not in path.casefold():
             raise ConflictError(f"所选目录路径没有包含「{title}」，请选该作品原有的剧集文件夹")
