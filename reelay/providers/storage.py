@@ -426,7 +426,9 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         if bare:
             raise NeedsManual(f'分享包含多季 {sorted(marked)}，但有文件名不带季号：{"、".join(bare[:5])}')
         if scope == 'message' and requested:
-            raise NeedsManual(f'分享包含多季 {sorted(marked)}，指定补集未确定季号，请先指定季号')
+            if only_episodes:
+                raise NeedsManual(f'分享包含多季 {sorted(marked)}，人工补集需要先确认季号')
+            raise NeedsManual(f'分享包含多季 {sorted(marked)}，消息只写了集数，需先指定季号')
         season, picked = None, detected
     withheld = {(int(s), int(ep)) for s, ep in blocked_episodes}
     affected = sorted(withheld & {(s, ep) for _, s, ep in picked})
