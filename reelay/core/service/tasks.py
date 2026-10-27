@@ -406,6 +406,11 @@ class TaskOpsMixin(ServiceBase):
         values = dict(before)
         values.update(patch)
         ctx.parsed = ParsedResource(**validate_resource(values))
+        if (ctx.ns("share_selection").get("file_id")
+                and any(before.get(key) != getattr(ctx.parsed, key)
+                        for key in ("title", "year", "media_type", "season", "episodes"))):
+            ctx.ns("share_selection").clear()
+            ctx.log("修改了作品身份或季集：之前选中的源文件已失效，需重新确认")
         # The initial URL may have been parsed with unknown type/episodes.
         # A subsequent human correction to E247 MUST rebind the file
         # selector to that one episode, not the original whole-share scope.
