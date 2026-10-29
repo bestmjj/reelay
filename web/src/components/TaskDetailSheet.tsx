@@ -100,18 +100,31 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const [rememberShareFolder, setRememberShareFolder] = useState(true);
   const [shareFolderBusy, setShareFolderBusy] = useState(false);
   const [wrongCopyReason, setWrongCopyReason] = useState('');
-  // 换了任务或保存了修改：表单回到这份详情（渲染时同步，而不是在 effect 里再设一次）
+  // Server refreshes after selecting a share file must not erase the destination
+  // picked for the same work. Clear it only when the task/work/share changes.
+  // The backend still re-verifies the folder's drive ID, path and title.
   if (detail !== shown) {
+    const before = shown?.context.parsed;
+    const after = detail?.context.parsed;
+    const sameTaskAndWork = Boolean(detail && shown && detail.task_id === shown.task_id
+      && before?.title === after?.title
+      && before?.year === after?.year
+      && before?.media_type === after?.media_type
+      && before?.season === after?.season
+      && before?.share_code === after?.share_code
+      && JSON.stringify(before?.episodes ?? []) === JSON.stringify(after?.episodes ?? []));
     setShown(detail);
     setDraft(detail?.context.parsed ?? {});
     setEpisodesText((detail?.context.parsed?.episodes ?? []).join(', '));
     const selection = detail?.context.meta?.share_selection;
     setOnlyEpisodesText(Array.isArray(selection?.only_episodes)
       ? selection.only_episodes.join(', ') : '');
-    setTargetDir('');  // 空值 = 审批时按自动分类、重新整理时保持当前目录
-    setExistingFolder(null);
-    setDestinationMode('exact');
-    setExistingPickerOpen(false);
+    if (!sameTaskAndWork) {
+      setTargetDir('');  // 空值 = 审批时按自动分类、重新整理时保持当前目录
+      setExistingFolder(null);
+      setDestinationMode('exact');
+      setExistingPickerOpen(false);
+    }
     setRepairReport(null);
     setRepairSelected([]);
     setChoosing(false);
@@ -404,9 +417,22 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const partial = meta.storage?.partial;
   const conflict = can('resolve_conflict') ? meta.organize?.pending_conflict : undefined;
   const reorganize = () => (conflict ? setChoosing(true) : void run('reorganize'));
+  const currentSeason = `Season ${String(parsed?.season ?? 1).padStart(2, '0')}`;
+  const forceBlockReason = !forcedCopy ? null
+    : hasPendingMetadataEdits ? '识别结果有未保存的修改，请先点击「保存修改」'
+    : !meta.share_selection?.file_id ? '请在「选择分享源文件或文件夹」中锁定准确的单集视频'
+    : !existingFolder ? `还没有指定最终保存位置：请在上方「指定阿里云盘保存目录」选择已有的 ${currentSeason} 文件夹`
+    : !existingFolder.driveId ? '所选文件夹缺少阿里云盘资源库 ID，请重新选择'
+    : destinationMode !== 'exact' ? '保存方式必须选择「直接存入所选文件夹」'
+    : null;
 
   const footer = detail && detail.actions.length ? (
     <div className="flex flex-wrap items-center justify-between gap-2">
+      {can('approve') && forceBlockReason ? (
+        <p role="status" className="w-full text-xs text-destructive">
+          暂时无法强制转存：{forceBlockReason}。
+        </p>
+      ) : null}
       <div className="flex flex-wrap gap-2">
         {can('correct') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void saveParsed()}>保存修改</Button> : null}
         {can('reparse') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reparse')}><RotateCcw />重新识别</Button> : null}
@@ -447,7 +473,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         {can('dismiss') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('dismiss')} className="text-destructive"><EyeOff />忽略</Button> : null}
         {can('reject') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reject')} className="text-destructive"><X />忽略</Button> : null}
         {can('approve') ? <Button size="sm"
-              disabled={busy || (forcedCopy && (!meta.share_selection?.file_id || !existingFolder || destinationMode !== 'exact')) || Boolean(hasPendingMetadataEdits)
+              disabled={busy || Boolean(forceBlockReason) || Boolean(hasPendingMetadataEdits)
                 || (requireExplicitTarget && !targetDir && !existingFolder)
                 || Boolean(existingFolder && !existingFolder.driveId)}
               onClick={() => void run('approve')}><Check />{forcedCopy ? '确认强制转存本集' : '确认转存'}</Button> : null}
@@ -624,7 +650,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             <Section title="人工强制转存（只限本集）" icon={AlertTriangle}>
               <p className="text-xs leading-5 text-muted-foreground">
                 已明确绕过本集旧的数据库入库去重。请在下方精确选择分享中的目标源文件，
-                然后浏览阿里云盘，选中已经存在的 Season 04 最终剧集文件夹。
+                然后浏览阿里云盘，选中已经存在的 {currentSeason} 最终剧集文件夹。
                 保存方式必须为「直接存入」。不会自动删除、替换已有文件；
                 同名文件采用安全后缀保留两份。
               </p>
