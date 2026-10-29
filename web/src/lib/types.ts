@@ -66,7 +66,7 @@ export interface IDashboard {
 export type TaskActionName =
   | 'approve' | 'reject' | 'retry' | 'reparse' | 'correct' | 'reorganize' | 'resolve_conflict'
   | 'reconcile' | 'accept_partial' | 'abandon' | 'dismiss' | 'subscribe' | 'choose_share_folder'
-  | 'quarantine_wrong_source' | 'resolve_quarantine' | 'reopen_duplicate' | 'select_episodes';
+  | 'quarantine_wrong_source' | 'resolve_quarantine' | 'reopen_duplicate' | 'select_episodes' | 'repair_missing';
 
 export interface IAlert {
   key: string;
