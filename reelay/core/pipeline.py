@@ -186,7 +186,9 @@ class Pipeline:
         """不手动改目录时任务将存入的位置（含二级分类），供审批卡片与管理台展示。"""
         existing = ctx.meta.get("library", {}).get("direct_existing") or {}
         if existing.get("path"):
-            return existing["path"]
+            path = existing["path"]
+            return (path + "/（按片名和季整理）"
+                    if existing.get("mode") == "organized" else path)
         with self.scope(ctx):
             for hook in self.reg.hooks_for("before_save", self.task_config(ctx)):
                 if hasattr(hook, "preview"):
@@ -570,10 +572,20 @@ class Pipeline:
         if existing:
             if provider != "aliyun" or existing.get("provider") != "aliyun":
                 raise ValueError("已有剧集目录仅允许用于阿里云盘任务")
+            mode = existing.get("mode", "existing")
+            if mode not in ("existing", "exact", "organized"):
+                raise ValueError("保存方式发生变化，需要重新确认目标目录")
             if (not ctx.parsed or ctx.parsed.title != existing.get("title")
-                    or len(ctx.episode_pairs()) != 1
-                    or not ctx.ns("share_selection").get("file_id")):
-                raise ValueError("作品、季集或选定源文件发生变化，不能沿用原来的剧集目录")
+                    or (existing.get("media_type") is not None
+                        and ctx.parsed.media_type != existing["media_type"])
+                    or (existing.get("pairs") is not None
+                        and [list(p) for p in ctx.episode_pairs()] != existing["pairs"])
+                    or (existing.get("share_code") is not None
+                        and ctx.parsed.share_code != existing["share_code"])
+                    or (mode == "existing" and
+                        (len(ctx.episode_pairs()) != 1
+                         or not ctx.ns("share_selection").get("file_id")))):
+                raise ValueError("作品、类型、季集或分享身份发生变化，不能沿用原来选定的目录")
             storage = self.reg.get_provider("storage", "aliyun")
             try:
                 if str(storage.client.drive_id) != existing.get("drive_id"):
@@ -590,7 +602,7 @@ class Pipeline:
                 ctx.ns("task")["no_auto_retry"] = True
                 raise ValueError("已有剧集目录无法再次核验，请检查资源库、路径后重新确认") from None
             cid = existing["id"]
-            ctx.log(f"再次核验已有剧集目标目录：{existing['path']}")
+            ctx.log(f"再次核验指定阿里云盘目标目录：{existing['path']}（{mode}）")
         ctx.save_dir_alias, ctx.save_dir_cid = alias, cid
 
     def _skip_duplicate(self, ctx: PipelineContext, reason: str) -> None:
