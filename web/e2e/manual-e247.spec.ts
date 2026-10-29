@@ -129,18 +129,19 @@ test('corrected manual E247 can select exact 1.62GB source, not unnumbered 4GB',
   await expect.poll(() => selectedFile).toBe('f247');
   await expect(page.getByText(/已锁定单集源文件：分享根目录\/247 4K.mp4/)).toBeVisible();
   expect(cloudWrites).toBe(0);
-  await page.getByRole('button', { name: '浏览阿里云盘已有目录' }).click();
+  await page.getByRole('button', { name: '浏览阿里云盘选择保存位置' }).click();
   const dialog = page.getByRole('dialog', { name: '选择网盘目录' });
   await expect(dialog.getByRole('button', { name: '115 网盘' })).toHaveCount(0);
   for (const name of ['影视', '动漫', 'Dad', '吞噬星空', 'Season 01']) {
     await dialog.getByRole('button', { name, exact: true }).last().click();
   }
   await dialog.getByRole('button', { name: '选择当前目录' }).click();
-  await expect(page.getByText(/已选最终目标：\/影视\/动漫\/Dad\/吞噬星空\/Season 01/)).toBeVisible();
+  await expect(page.getByText(/已选择：\/影视\/动漫\/Dad\/吞噬星空\/Season 01/)).toBeVisible();
   await page.getByRole('button', { name: '确认转存' }).click();
   expect(approvedTarget).toEqual({
     existing_folder_id: 'existing-season',
     existing_drive_id: 'resource-drive-e247',
+    destination_mode: 'exact',
   });
   expect(cloudWrites).toBe(1); // mocked HTTP approval, never a cloud copy
 });
