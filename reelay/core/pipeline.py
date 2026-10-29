@@ -549,26 +549,31 @@ class Pipeline:
         # A later alias edit must not silently redirect an already-queued transfer.
         cfg = self.task_config(ctx)
         save_dirs = cfg["save_dirs"]
-        if alias not in save_dirs:
-            raise ValueError(f"任务接收时的目标目录别名不存在：{alias}")
-        configured = str(save_dirs[alias])
         provider = (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
                     or cfg["defaults"]["storage"])
-        if configured.startswith("aliyun:"):
-            if provider != "aliyun":
-                raise ValueError(f"目录「{alias}」属于阿里云盘，当前任务使用 {provider}，请更换保存目录")
-            cid = configured.removeprefix("aliyun:")
-        else:
-            # Aliyun folder IDs must be explicitly provider-qualified, including the root.
-            # Numeric 115 CIDs (including "0") must never silently target Aliyun.
-            if provider == "aliyun":
-                raise ValueError(f"目录「{alias}」属于 115；请重新选择以 aliyun: 开头的阿里云盘目录")
-            cid = configured
-        if provider == "p115" and not cid.isdecimal():
-            raise ValueError(f"目录「{alias}」不是有效的 115 目录，请在设置中重新选择")
-        if provider == "aliyun" and not (cid.isascii() and cid.replace("_", "").replace("-", "").isalnum()):
-            raise ValueError(f"目录「{alias}」不是有效的阿里云盘目录 ID")
         existing = ctx.meta.get("library", {}).get("direct_existing") or {}
+        if not existing:
+            # An explicitly picked task target is authoritative. Its cloud
+            # provider, folder and drive are verified below, without relying
+            # on an unrelated original category alias. Only automatic routing
+            # should require a matching saved alias in the task's config.
+            if alias not in save_dirs:
+                raise ValueError(f"任务接收时的目标目录别名不存在：{alias}")
+            configured = str(save_dirs[alias])
+            if configured.startswith("aliyun:"):
+                if provider != "aliyun":
+                    raise ValueError(f"目录「{alias}」属于阿里云盘，当前任务使用 {provider}，请更换保存目录")
+                cid = configured.removeprefix("aliyun:")
+            else:
+                if provider == "aliyun":
+                    raise ValueError(f"目录「{alias}」属于 115；请重新选择以 aliyun: 开头的阿里云盘目录")
+                cid = configured
+            if provider == "p115" and not cid.isdecimal():
+                raise ValueError(f"目录「{alias}」不是有效的 115 目录，请在设置中重新选择")
+            if provider == "aliyun" and not (cid.isascii() and cid.replace("_", "").replace("-", "").isalnum()):
+                raise ValueError(f"目录「{alias}」不是有效的阿里云盘目录 ID")
+        else:
+            cid = None  # replaced only by the verified chosen folder ID
         if existing:
             if provider != "aliyun" or existing.get("provider") != "aliyun":
                 raise ValueError("已有剧集目录仅允许用于阿里云盘任务")
