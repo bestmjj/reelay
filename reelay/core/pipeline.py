@@ -40,7 +40,7 @@ from .store import Store, _load_ctx
 from .config import config_revision, load_config, merge_config, normalize_config
 from .media import pairs_label, summarize_pairs
 from .parse_rules import prefilter_reason
-from . import confidence, existing_media, ignored, messages, runtime, subscriptions, works
+from . import confidence, existing_media, ignored, messages, repair, runtime, subscriptions, works
 
 log = logging.getLogger("reelay.pipeline")
 
@@ -578,7 +578,7 @@ class Pipeline:
             if provider != "aliyun" or existing.get("provider") != "aliyun":
                 raise ValueError("已有剧集目录仅允许用于阿里云盘任务")
             mode = existing.get("mode", "existing")
-            if mode not in ("existing", "exact", "organized"):
+            if mode not in ("existing", "exact", "organized", "repair"):
                 raise ValueError("保存方式发生变化，需要重新确认目标目录")
             if (not ctx.parsed or ctx.parsed.title != existing.get("title")
                     or (existing.get("media_type") is not None
@@ -642,6 +642,13 @@ class Pipeline:
         provider_name = ns.get("provider") or ctx.source_rule.get("storage", self.cfg["defaults"]["storage"])
         storage = self.reg.get_provider("storage", provider_name)
         ns["provider"] = provider_name
+        repair_info = ctx.ns("task").get("repair") or {}
+        if repair_info and (provider_name != "aliyun"
+                            or not repair_info.get("files")
+                            or not repair_info.get("source_task_id")):
+            await self._fail(ctx, "补转任务缺少可信的原始记录", retry_from=TaskState.QUEUED,
+                             auto_retry=False)
+            return
         if ns.get("manifest") and hasattr(storage, "_assert_manifest_drive"):
             # Explicitly reject an old backup-disk manifest before looking up
             # saved shares or episodes; otherwise a prior dedup record could
@@ -660,7 +667,7 @@ class Pipeline:
             # Old FAILED tasks keep the original parsed snapshot. Narrow again
             # before claiming episode keys, so retry also obeys latest-only
             # and cannot be blocked by 100 unrelated historical scan entries.
-            if ctx.decision == Decision.SAVE:
+            if ctx.decision == Decision.SAVE and not repair_info:
                 progress_scope = subscriptions.scope_latest_progress(ctx, self.store.subscriptions())
                 if progress_scope == "below_floor":
                     await self._fail(ctx, "当前更新早于订阅起始集号，禁止自动补收历史合集",
@@ -676,6 +683,13 @@ class Pipeline:
                     await self._fail(
                         ctx, f"{episodes} 的历史入库被人工标记为错片；请核验云盘原文件并解除隔离后再转存",
                         retry_from=TaskState.QUEUED, auto_retry=False)
+                    return
+            if repair_info:
+                try:
+                    await self._recheck_repair(ctx, storage)
+                except NeedsManual as exc:
+                    await self._fail(ctx, f"原文件状态已变化，停止补转：{exc}",
+                                     retry_from=TaskState.QUEUED, auto_retry=False)
                     return
             if not await self.run_hooks("before_save", ctx):
                 ctx.state = TaskState.SKIPPED
@@ -705,7 +719,7 @@ class Pipeline:
                 self.store.save_task(ctx)  # 移到轮询末尾，避免等待资源的任务阻塞新任务
                 return
             # 剧集分享链接常在追更中原地增加新集：剧集按集去重，其他按分享去重。
-            if not self._episodic(ctx) and self.store.saved_share(
+            if not repair_info and not self._episodic(ctx) and self.store.saved_share(
                     ctx.parsed.share_code, dedup_cid, provider_name):
                 self._skip_duplicate(ctx, "该分享链接此前已在目标目录核验保存；没有重复发送复制请求")
                 return
@@ -725,6 +739,12 @@ class Pipeline:
                 drive = str(storage.client.drive_id) if provider_name == "aliyun" else None
                 already.update(tuple(pair) for pair in self.store.stored_episode_pairs_in_drive(
                     work, provider_name, drive))
+                if repair_info:
+                    # The DONE ledger remains immutable. Only file IDs that
+                    # were just confirmed missing may bypass its old episode keys.
+                    allowed = {(int(f["season"]), int(f["episode"]))
+                               for f in repair_info["files"] if type(f.get("episode")) is int}
+                    already.difference_update(allowed)
                 ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
                 ns["stored_variety_parts"] = self.store.stored_variety_parts_in_drive(
                     work, provider_name, drive)
@@ -778,6 +798,13 @@ class Pipeline:
                         ctx.log(f"此分享沿用上次选择的版本「{preference.get('path') or '已选择文件夹'}」")
                 with self.scope(ctx):
                     manifest = await storage.prepare(ctx)
+                if repair_info:
+                    expected = sorted((str(f["source_id"]), f["source_name"], f["source_size"])
+                                      for f in repair_info["files"])
+                    actual = sorted((str(f.get("id")), f.get("name"), f.get("size"))
+                                    for f in manifest.get("files") or [])
+                    if actual != expected:
+                        raise NeedsManual("原分享源文件 ID、名称或大小已变，不能自动选择另一版本补转")
             except AlreadyStored as exc:
                 version = ctx.ns("share_selection").get("path")
                 detail = (f"；本次选择的来源文件夹是「{version}」，但去重按已保存的作品/季集判断，"
@@ -843,6 +870,15 @@ class Pipeline:
 
         auto_recheck = ns.pop("auto_recheck_run", False)  # 这一轮是 Worker 的后台自动复查
         sending = ns["phase"] == "ready"
+        if sending and repair_info:
+            try:
+                await self._recheck_repair(ctx, storage)
+            except NeedsManual as exc:
+                # The cloud may have been restored after the manifest was
+                # prepared. Do not send any copy request from a stale decision.
+                await self._fail(ctx, f"复制前再次核验不通过：{exc}",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
         try:
             if sending:
                 ns["phase"] = "receiving"
@@ -1059,9 +1095,36 @@ class Pipeline:
             if manifest.get("variety_parts"):
                 identity["variety_parts"] = [dict(row) for row in manifest["variety_parts"]]
 
+    async def _recheck_repair(self, ctx: PipelineContext, storage) -> None:
+        """Fail closed if any old file came back before a repair cloud write."""
+        info = ctx.ns("task").get("repair") or {}
+        parent = self.store.get_task(info.get("source_task_id", ""))
+        if not parent or parent.state != TaskState.DONE:
+            raise NeedsManual("原成功任务已变化")
+        completed = [self.store.get_task(cid) for cid in
+                     parent.ns("task").get("repair_children", [])
+                     if cid != ctx.task_id]
+        try:
+            report = await asyncio.to_thread(
+                repair.check_saved_files, parent, storage,
+                [child for child in completed if child is not None])
+        except Exception as exc:
+            raise NeedsManual(f"原文件实时核验失败：{exc}") from exc
+        if report["drive_id"] != info.get("drive_id") or report["uncertain"]:
+            raise NeedsManual("云盘资源库或文件状态无法确认")
+        missing = {row["old_id"] for row in report["missing"]}
+        expected = {row["old_id"] for row in info["files"]}
+        if not expected or not expected.issubset(missing):
+            raise NeedsManual("待补文件已经恢复或移动；禁止重复复制，请重新检查成功任务")
+
     async def _recheck_manifest(self, ctx: PipelineContext, storage, provider_name: str) -> bool:
         ns = ctx.ns("storage")
         manifest = ns["manifest"]
+        # A manually confirmed repair only allows already-verified-missing
+        # cloud file IDs. The normal immutable DONE ledger must not veto those
+        # exact files; the separate live-ID check runs immediately before copy.
+        if ctx.ns("task").get("repair"):
+            return True
         dedup_cid = ns.get("dedup_cid") or ctx.save_dir_cid
         reason = None
         if not manifest.get("episodes") and self.store.saved_share(
