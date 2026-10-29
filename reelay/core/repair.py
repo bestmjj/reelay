@@ -31,6 +31,8 @@ def _original_rows(ctx: PipelineContext) -> list[dict[str, Any]]:
         raise ValueError("旧任务缺少原分享或作品身份，不能安全补转")
     if (ctx.meta.get("organize") or {}).get("conflicts"):
         raise ValueError("旧任务存在整理冲突/覆盖记录，需先人工核对原文件")
+    if manifest.get("variety_parts"):
+        raise ValueError("综艺上下期/加更需逐版本处理，不能按普通剧集集号补转")
     files = manifest.get("files") or []
     if not files or not plan or len(files) != len(plan) or len(plan) > 1000:
         raise ValueError("缺少逐文件的原转存清单，或单任务文件超过 1000 个")
