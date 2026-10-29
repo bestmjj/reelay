@@ -13,6 +13,53 @@ from .media import episode_of, is_video
 from ..providers.aliyun import AliyunAPIError
 
 
+def scan_exact_season_episodes(storage, folder_id: str, season: int,
+                               episodes: list[int]) -> dict[str, Any]:
+    """Read-only inventory of a user-selected *final* Aliyun season folder.
+
+    An old Reelay DONE/dedup entry is not proof that a physical video still
+    exists. The scan uses the real Aliyun file list; unknown video identities
+    fail closed to prevent copying a second release over a mislabeled file.
+    """
+    if (type(season) is not int or not 1 <= season <= 100
+            or not episodes or len(episodes) > 100
+            or len(set(episodes)) != len(episodes)
+            or any(type(ep) is not int or not 1 <= ep <= 2000 for ep in episodes)):
+        raise ValueError("仅能检查同一季的 1～100 个明确集号")
+    requested = set(episodes)
+    folder_id = str(folder_id)
+    library = storage.library()
+    attr = library.get_attr(folder_id)
+    if not attr.get("is_dir") or str(attr.get("id")) != folder_id:
+        raise ValueError("目标目录已变化或不是文件夹，停止批量补集")
+    entries = list(library.iterdir(folder_id))
+    if len(entries) > 2000:
+        raise ValueError("目标目录文件过多，无法安全核对全部集数")
+    present: set[int] = set()
+    uncertain: list[str] = []
+    for file in entries:
+        name = str(file.get("name") or "")
+        if file.get("is_dir") or not is_video(name):
+            continue
+        file_season, ep = episode_of(name)
+        if ep is None or (file_season is not None and file_season != season):
+            uncertain.append(name)
+            continue
+        if ep in requested:
+            present.add(ep)
+    if uncertain:
+        raise ValueError("目标目录存在无法确认季集的视频（"
+                         + "、".join(uncertain[:3])
+                         + "），请先人工核对，未执行转存")
+    return {
+        "drive_id": str(storage.client.drive_id),
+        "folder_id": folder_id,
+        "season": season,
+        "present": sorted(present),
+        "missing": sorted(requested - present),
+    }
+
+
 def _not_found(exc: Exception) -> bool:
     return (isinstance(exc, AliyunAPIError) and exc.status == 404
             and exc.code.lower() in {"notfound.file", "filenotfound"})

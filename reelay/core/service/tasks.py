@@ -102,7 +102,7 @@ class TaskOpsMixin(ServiceBase):
             if not p or not p.title or p.media_type not in ("anime", "tv", "movie"):
                 raise ConflictError("人工提交的分享请先填写真实片名、类型，保存后再确认转存")
             if p.media_type in ("anime", "tv"):
-                if len(ctx.episode_pairs()) != 1:
+                if len(ctx.episode_pairs()) != 1 and not ctx.ns("task").get("force_missing_range"):
                     raise ConflictError("人工单集转存必须明确唯一季集号，禁止盲目整季复制")
                 if ctx.source_rule.get("episodes_from") != "message":
                     raise ConflictError("已修正的单集范围未绑定，请先保存识别结果")
@@ -112,6 +112,21 @@ class TaskOpsMixin(ServiceBase):
             if ctx.raw.extra.get("manual_unlabeled") and not (
                     save_dir_alias or existing_folder_id or ctx.ns("library").get("pinned")):
                 raise ConflictError("只有分享链接的手动任务必须明确选择目标保存目录，避免误存到默认路径")
+        forced_range = ctx.ns("task").get("force_missing_range") or {}
+        if forced_range:
+            selected = ctx.ns("share_selection")
+            if (ctx.source_rule.get("storage") != "aliyun"
+                    or ctx.parsed.season != forced_range.get("season")
+                    or ctx.parsed.share_code != forced_range.get("share_code")
+                    or ctx.parsed.episodes != forced_range.get("episodes")
+                    or selected.get("only_episodes") != forced_range.get("episodes")
+                    or not selected.get("folder_id")
+                    or selected.get("share_code") != ctx.parsed.share_code
+                    or selected.get("provider") != "aliyun"
+                    or selected.get("file_id")):
+                raise ConflictError("批量补集需先选择同一季明确集号，并确认唯一的分享版本文件夹")
+            if not existing_folder_id or destination_mode != "exact":
+                raise ConflictError("批量补集必须选择阿里云盘最终 Season 文件夹，保存方式为直接存入")
         forced = ctx.ns("task").get("force_single_copy") or {}
         if forced:
             selected = ctx.ns("share_selection")
@@ -132,6 +147,20 @@ class TaskOpsMixin(ServiceBase):
             existing = await asyncio.to_thread(self._verify_existing_episode_folder,
                                                ctx, existing_folder_id, existing_drive_id,
                                                destination_mode)
+            if forced_range:
+                storage_provider = self.pipeline.reg.get_provider("storage", "aliyun")
+                try:
+                    report = await asyncio.to_thread(
+                        repair.scan_exact_season_episodes, storage_provider,
+                        existing_folder_id, forced_range["season"], forced_range["episodes"])
+                except Exception as exc:
+                    raise ConflictError(f"读取实际云盘目录失败，未排队补集：{exc}") from exc
+                if report["drive_id"] != existing_drive_id:
+                    raise ConflictError("资源库身份发生变化，禁止将补集复制到另一个网盘")
+                if not report["missing"]:
+                    raise ConflictError("您选择的集数已全部存在于此文件夹，无需批量转存")
+                ctx.log("批量补集提交前只读扫描：" +
+                        f"已有 {len(report['present'])} 集，实际缺 {len(report['missing'])} 集")
             ctx.ns("library")["direct_existing"] = existing
             ctx.ns("library").pop("pinned", None)
             mode_text = ("按作品和季整理" if destination_mode == "organized"
@@ -319,6 +348,43 @@ class TaskOpsMixin(ServiceBase):
         self._update(ctx, expected=TaskState.SKIPPED)
         return self.get_task(task_id)
 
+    def force_missing_range(self, task_id: str, episodes: list[int]) -> dict[str, Any]:
+        """Human-authorized batch retransfer of physically absent episodes.
+
+        A historical duplicate task is reopened once. After user selects ONE
+        share version and the original season folder, the Worker independently
+        checks the actual files before any copy. Old DONE records are retained.
+        """
+        ctx = self._require_context(task_id)
+        if "force_missing_range" not in self.task_actions(ctx):
+            raise ConflictError("仅支持阿里云盘未发生转存的重复跳过剧集任务")
+        if (not episodes or len(episodes) > 100
+                or any(type(ep) is not int or not 1 <= ep <= 2000 for ep in episodes)
+                or len(set(episodes)) != len(episodes)):
+            raise ValueError("请输入同一季的 1～100 个不重复集号，范围 1～2000")
+        season = ctx.parsed.season
+        if type(season) is not int or not 1 <= season <= 100:
+            raise ConflictError("请先确认作品季号，再批量补集")
+        requested = sorted(episodes)
+        ctx.ns("task")["force_missing_range"] = {
+            "season": season, "episodes": requested, "share_code": ctx.parsed.share_code,
+        }
+        ctx.ns("task")["generation"] = ctx.ns("task").get("generation", 0) + 1
+        ctx.ns("task")["user_reopened_duplicate"] = True
+        ctx.ns("task").pop("skip", None)
+        ctx.ns("share_selection").clear()
+        ctx.ns("share_selection")["only_episodes"] = requested
+        ctx.ns("library").pop("direct_existing", None)
+        ctx.parsed.episodes = requested
+        ctx.state, ctx.decision = TaskState.PENDING_APPROVAL, Decision.ASK
+        ctx.source_rule["approval_mode"] = "manual"
+        ctx.source_rule["episodes_from"] = "message"
+        ctx.log(f"人工申请批量补回 S{season:02d} 的 {len(requested)} 集："
+                "旧入库记录不会删除；需明确选分享版本与最终保存文件夹，"
+                "实际缺集以云盘实时只读扫描为准")
+        self._update(ctx, expected=TaskState.SKIPPED)
+        return self.get_task(task_id)
+
     def set_episode_selection(self, task_id: str, episodes: list[int]) -> dict[str, Any]:
         """Per-task subset of episodes, with mandatory existing-content dedup.
 
@@ -327,8 +393,8 @@ class TaskOpsMixin(ServiceBase):
         """
         ctx = self._require_context(task_id)
         storage = ctx.ns("storage")
-        if ctx.ns("task").get("force_single_copy"):
-            raise ConflictError("强制转存已锁定唯一集数；如需修改，请取消本次强制转存并重新提交")
+        if ctx.ns("task").get("force_single_copy") or ctx.ns("task").get("force_missing_range"):
+            raise ConflictError("强制转存已锁定申请集数；如需修改，请重新提交新的人工补集任务")
         if ctx.state not in (TaskState.PENDING_APPROVAL, TaskState.FAILED):
             raise ConflictError("只能在待确认或尚未转存的失败任务中指定补集")
         if storage.get("manifest") or storage.get("landed") or storage.get("phase") == "receiving":
@@ -369,6 +435,10 @@ class TaskOpsMixin(ServiceBase):
                 and ctx.parsed and ctx.parsed.media_type in ("tv", "anime")
                 and ctx.parsed.share_code and not storage.get("manifest") and not storage.get("landed")):
             out.append("reopen_duplicate")
+            if ((ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")) == "aliyun"
+                    and (ctx.parsed.raw_fields or {}).get("share_provider") == "aliyun"
+                    and type(ctx.parsed.season) is int and 1 <= ctx.parsed.season <= 100):
+                out.append("force_missing_range")
             if (len(ctx.episode_pairs()) == 1
                     and (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")) == "aliyun"
                     and (ctx.parsed.raw_fields or {}).get("share_provider") == "aliyun"):
@@ -386,6 +456,7 @@ class TaskOpsMixin(ServiceBase):
             out.append("retry")
         if (state in (TaskState.PENDING_APPROVAL, TaskState.FAILED)
                 and not ctx.ns("task").get("force_single_copy")
+                and not ctx.ns("task").get("force_missing_range")
                 and not storage.get("manifest") and not storage.get("landed")
                 and ctx.parsed and ctx.parsed.title and ctx.parsed.media_type in ("tv", "anime")):
             out.append("select_episodes")
@@ -516,6 +587,8 @@ class TaskOpsMixin(ServiceBase):
         prepare; plain filenames/paths are only audit evidence.
         """
         ctx, provider = self._selectable_share_task(task_id)
+        if ctx.ns("task").get("force_missing_range"):
+            raise ConflictError("批量补集必须选择同一分享版本文件夹，而不是单个源文件")
         if not file_id or len(file_id) > 128:
             raise ValueError("源文件 ID 无效")
         only = ctx.ns("share_selection").get("only_episodes") or []
@@ -747,6 +820,15 @@ class TaskOpsMixin(ServiceBase):
                               for key in ("title", "media_type", "year", "season", "episodes"))):
             ctx.ns("task").pop("force_single_copy", None)
             ctx.log("修改作品身份或季集后已取消此前的强制转存授权")
+        if ctx.ns("task").get("force_missing_range"):
+            forced = ctx.ns("task")["force_missing_range"]
+            if (ctx.parsed.share_code != forced["share_code"]
+                    or ctx.parsed.season != forced["season"]
+                    or ctx.parsed.episodes != forced["episodes"]
+                    or any(before.get(key) != getattr(ctx.parsed, key)
+                           for key in ("title", "year", "media_type", "season", "episodes"))):
+                ctx.ns("task").pop("force_missing_range", None)
+                ctx.log("修改作品身份或集数后已撤销原批量补集授权")
         if (ctx.ns("share_selection").get("only_episodes")
                 and any(before.get(key) != getattr(ctx.parsed, key)
                         for key in ("title", "year", "media_type", "season", "episodes"))):

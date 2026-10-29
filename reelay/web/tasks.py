@@ -39,6 +39,10 @@ class EpisodeSelectionPayload(BaseModel):
     episodes: list[int] = Field(default_factory=list, max_length=100)
 
 
+class ForceMissingRangePayload(BaseModel):
+    episodes: list[int] = Field(min_length=1, max_length=100)
+
+
 class RepairMissingPayload(BaseModel):
     # Immutable file IDs returned by the read-only repair-check endpoint.
     # The server rechecks every ID before queuing a new transfer.
@@ -121,6 +125,10 @@ def router(service) -> APIRouter:
     @api.post("/api/tasks/{task_id}/force-reopen")
     async def force_reopen(task_id: str):
         return service.force_reopen_duplicate(task_id)
+
+    @api.post("/api/tasks/{task_id}/force-missing-range")
+    async def force_missing_range(task_id: str, payload: ForceMissingRangePayload):
+        return service.force_missing_range(task_id, payload.episodes)
 
     @api.post("/api/tasks/{task_id}/approve")
     async def approve(task_id: str, payload: ActionPayload | None = None):

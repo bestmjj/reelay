@@ -688,6 +688,8 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
         try:
             return self._select(ctx, listing)
         except NeedsManual as exc:
+            if ctx.ns("task").get("force_missing_range"):
+                raise  # Never let AI guess among versions or episodes for a forced bulk copy.
             if str(exc).startswith(("分享包含多个版本文件夹", "选中的分享版本文件夹",
                                     "选中版本缺少", "分享不同目录混有",
                                     "选中的文件夹内部还有", "缺失集 ",

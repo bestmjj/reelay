@@ -644,6 +644,25 @@ class Pipeline:
         ns["provider"] = provider_name
         repair_info = ctx.ns("task").get("repair") or {}
         forced = ctx.ns("task").get("force_single_copy") or {}
+        forced_range = ctx.ns("task").get("force_missing_range") or {}
+        if forced_range:
+            selection = ctx.ns("share_selection")
+            target = ctx.ns("library").get("direct_existing") or {}
+            requested = forced_range.get("episodes") or []
+            if (provider_name != "aliyun" or not ctx.parsed
+                    or ctx.parsed.season != forced_range.get("season")
+                    or ctx.parsed.share_code != forced_range.get("share_code")
+                    or ctx.parsed.episodes != requested
+                    or not requested or len(requested) > 100
+                    or selection.get("only_episodes") != requested
+                    or not selection.get("folder_id") or selection.get("file_id")
+                    or selection.get("provider") != "aliyun"
+                    or selection.get("share_code") != ctx.parsed.share_code
+                    or target.get("mode") != "exact"
+                    or target.get("provider") != "aliyun"):
+                await self._fail(ctx, "批量补集授权或版本/目标文件夹不完整，未发送复制",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
         if forced:
             selected = ctx.ns("share_selection")
             destination = ctx.ns("library").get("direct_existing") or {}
@@ -716,6 +735,27 @@ class Pipeline:
                 self.store.save_task(ctx)
                 return
             self._resolve_directory(ctx)
+            if forced_range:
+                try:
+                    with self.scope(ctx):
+                        inventory = await asyncio.to_thread(
+                            repair.scan_exact_season_episodes, storage, ctx.save_dir_cid,
+                            forced_range["season"], forced_range["episodes"])
+                    target = ctx.ns("library")["direct_existing"]
+                    if inventory["drive_id"] != target.get("drive_id"):
+                        raise NeedsManual("原云盘资源库 ID 已改变")
+                    missing = inventory["missing"]
+                except Exception as exc:
+                    await self._fail(ctx, f"无法实时确认待补集是否真正缺失：{exc}",
+                                     retry_from=TaskState.QUEUED, auto_retry=False)
+                    return
+                if not missing:
+                    self._skip_duplicate(ctx, "本次指定的所有集数均在原目标目录中存在；未复制任何文件")
+                    return
+                ctx.ns("share_selection")["only_episodes"] = missing
+                forced_range["effective_episodes"] = missing
+                ctx.log(f"读取目标 Season 目录：原申请 {len(forced_range['episodes'])} 集，"
+                        f"现有 {len(inventory['present'])} 集，本次只转存 {len(missing)} 个缺集")
             # Namespace Aliyun dedup by the resolved resource-drive identity.
             # Both backup and resource drive have a root folder named '0'.
             try:
@@ -769,7 +809,7 @@ class Pipeline:
                 observed = existing_media.apply_associations(
                     existing_media.scan_observations(self.store),
                     self.store.state_get("media_associations", "confirmed", {}) or {})
-                if ctx.episode_pairs() and observed:
+                if ctx.episode_pairs() and observed and not forced_range:
                     try:
                         with self.scope(ctx):
                             guard = await asyncio.to_thread(
@@ -790,6 +830,12 @@ class Pipeline:
                         already.update(confirmed)
                         ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
                         ctx.log(f"已实时核验网盘原有文件，跳过 {len(confirmed)} 个重复季集，不记为 Reelay 已转存")
+                if forced_range:
+                    # Only episodes *physically absent* from the explicit final
+                    # folder may bypass historical DONE records.
+                    for ep in forced_range["effective_episodes"]:
+                        already.discard((forced_range["season"], ep))
+                    ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
                 if forced:
                     # A deliberate, exact single-file copy can bypass the stale
                     # episode ledger, but NOT quarantine or concurrent claims.
@@ -824,6 +870,17 @@ class Pipeline:
                         ctx.log(f"此分享沿用上次选择的版本「{preference.get('path') or '已选择文件夹'}」")
                 with self.scope(ctx):
                     manifest = await storage.prepare(ctx)
+                if forced_range:
+                    effective = forced_range.get("effective_episodes") or []
+                    source_files = manifest.get("files") or []
+                    actual_pairs = [(f.get("season"), f.get("episode")) for f in source_files]
+                    required_pairs = [(forced_range["season"], ep) for ep in effective]
+                    if (len(source_files) != len(required_pairs)
+                            or sorted(actual_pairs) != required_pairs
+                            or len({str(f.get("id")) for f in source_files}) != len(source_files)
+                            or any(not f.get("id") or type(f.get("size")) is not int
+                                   or f["size"] <= 0 for f in source_files)):
+                        raise NeedsManual("分享版本的实际文件与需补集数不一致，禁止整季误转存")
                 if forced:
                     chosen = ctx.ns("share_selection")
                     received = manifest.get("files") or []
@@ -913,6 +970,27 @@ class Pipeline:
                 # The cloud may have been restored after the manifest was
                 # prepared. Do not send any copy request from a stale decision.
                 await self._fail(ctx, f"复制前再次核验不通过：{exc}",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
+        if sending and forced_range:
+            try:
+                in_manifest = [(f["season"], f["episode"])
+                               for f in (ns.get("manifest") or {}).get("files") or []]
+                expected = [(forced_range["season"], ep)
+                            for ep in forced_range.get("effective_episodes") or []]
+                if not expected or sorted(in_manifest) != expected:
+                    raise NeedsManual("待复制的实际文件清单与本次补集申请不一致")
+                with self.scope(ctx):
+                    inventory = await asyncio.to_thread(
+                        repair.scan_exact_season_episodes, storage, ctx.save_dir_cid,
+                        forced_range["season"], forced_range["effective_episodes"])
+                if inventory["drive_id"] != forced_range.get("drive_id", inventory["drive_id"]):
+                    raise NeedsManual("补集过程中资源库已变化")
+                if inventory["present"]:
+                    raise NeedsManual("有缺集在排队期间已经出现：" +
+                                      ", ".join(f"E{ep:03d}" for ep in inventory["present"]))
+            except Exception as exc:
+                await self._fail(ctx, f"复制前复核发现变化，未发送任何新复制请求：{exc}",
                                  retry_from=TaskState.QUEUED, auto_retry=False)
                 return
         try:
@@ -1159,7 +1237,8 @@ class Pipeline:
         # A manually confirmed repair only allows already-verified-missing
         # cloud file IDs. The normal immutable DONE ledger must not veto those
         # exact files; the separate live-ID check runs immediately before copy.
-        if ctx.ns("task").get("repair") or ctx.ns("task").get("force_single_copy"):
+        if (ctx.ns("task").get("repair") or ctx.ns("task").get("force_single_copy")
+                or ctx.ns("task").get("force_missing_range")):
             # Forced single-file jobs already validate the exact immutable
             # source ID against the prepared manifest and preserve content claims.
             return True
