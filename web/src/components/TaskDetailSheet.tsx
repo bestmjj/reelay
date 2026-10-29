@@ -669,6 +669,10 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                   </p>
                   {!existingFolder.driveId
                     ? <p className="text-destructive">未读到资源库 ID，请重新选择文件夹。</p> : null}
+                  <Button variant="outline" size="sm" onClick={() => {
+                    setExistingFolder(null);
+                    setTargetDir('');
+                  }}>取消指定目录，恢复自动分类</Button>
                 </div>
               ) : null}
               {existingPickerOpen ? (
@@ -687,8 +691,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             </Section>
           ) : null}
 
-          {needDirs && dirs?.dirs.length && !conflict ? (
-            <Section title="保存到">
+          {needDirs && dirs?.dirs.length && !conflict && !existingFolder ? (
+            <Section title="预设保存目录（可选）">
               {existingFolder ? <p className="mb-2 text-xs text-primary">本次将使用上面指定的真实文件夹，下面的自动分类和预设目录不生效。</p> : null}
               <Select value={targetDir} onValueChange={(v) => { setTargetDir(v); setExistingFolder(null); }}
                 options={dirs.dirs.map((d) => ({ value: d, label: dirs.paths[d] ? `${d}（${dirs.paths[d]}）` : d }))}
