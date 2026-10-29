@@ -164,7 +164,7 @@ class SuccessfulRepairWebTests(WebCase):
         self.assertEqual(made.status_code, 200, made.text)
         self.cloud.exists11 = True
         child_id = made.json()["task_id"]
-        with patch.object(self.storage, "save") as cloud_copy, \\
+        with patch.object(self.storage, "save") as cloud_copy, \
                 patch.object(self.storage, "prepare") as stage:
             child = self.app.state.store.get_task(child_id)
             asyncio.run(self.app.state.pipeline.execute_save(child))
