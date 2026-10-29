@@ -44,6 +44,29 @@ class TaskRepository:
             self._write_task(latest)
             self._write_task(repair)
 
+    def queue_bulk_missing_draft(self, original: PipelineContext, draft: PipelineContext) -> None:
+        """Create a separate manual batch draft atomically; never rewrite DONE.
+
+        The original receipt and content ledger remain intact. Only the
+        parent-child pointer is appended to the historical task snapshot.
+        Repeated clicks cannot create two concurrent bulk copies.
+        """
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            latest = self.get_task(original.task_id)
+            if not latest or latest.state != TaskState.DONE or not (latest.result or {}).get("storage_verified"):
+                raise ValueError("原成功任务已经变化，请刷新并重新核对")
+            children = list(latest.ns("task").get("bulk_missing_children") or [])
+            for child_id in children:
+                existing = self.get_task(child_id)
+                if existing and existing.state not in (
+                        TaskState.DONE, TaskState.SKIPPED, TaskState.REJECTED):
+                    raise ValueError("已有批量补集草稿或执行中任务，请先处理，避免重复复制")
+            latest.ns("task")["bulk_missing_children"] = [*children, draft.task_id]
+            latest.log(f"仅创建人工缺集草稿 {draft.task_id}；原成功回执、状态和去重记录不变")
+            self._write_task(latest)
+            self._write_task(draft)
+
     def _write_task(self, ctx: PipelineContext, *, error: str | None = None) -> None:
         """事务内写入；调用方负责提交，不能在这里提前 commit。"""
         snap = _dump_ctx(ctx)

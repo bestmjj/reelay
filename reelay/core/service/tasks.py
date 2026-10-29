@@ -357,7 +357,9 @@ class TaskOpsMixin(ServiceBase):
         """
         ctx = self._require_context(task_id)
         if "force_missing_range" not in self.task_actions(ctx):
-            raise ConflictError("仅支持阿里云盘未发生转存的重复跳过剧集任务")
+            raise ConflictError("仅支持阿里云盘人工补集或已核验的成功任务")
+        original = ctx if ctx.state == TaskState.DONE else None
+        previous_state = ctx.state
         if (not episodes or len(episodes) > 100
                 or any(type(ep) is not int or not 1 <= ep <= 2000 for ep in episodes)
                 or len(set(episodes)) != len(episodes)):
@@ -366,6 +368,19 @@ class TaskOpsMixin(ServiceBase):
         if type(season) is not int or not 1 <= season <= 100:
             raise ConflictError("请先确认作品季号，再批量补集")
         requested = sorted(episodes)
+        if original:
+            # A completed task must remain DONE with its original receipt.
+            # Clone only the proven share/work metadata into a new pending
+            # draft. No cloud write and no old episode-ledger mutation.
+            ctx = PipelineContext(copy.deepcopy(original.raw))
+            ctx.raw.msg_id = f"{original.raw.msg_id}:bulk:{ctx.task_id}"
+            ctx.raw.extra["bulk_from"] = original.task_id
+            ctx.parsed = copy.deepcopy(original.parsed)
+            ctx.source_rule = copy.deepcopy(original.source_rule)
+            ctx.source_rule["storage"] = "aliyun"
+            ctx.save_dir_alias = original.save_dir_alias
+            ctx.meta["runtime"] = copy.deepcopy(original.meta.get("runtime") or {})
+            ctx.meta["tmdb"] = copy.deepcopy(original.meta.get("tmdb") or {})
         ctx.ns("task")["force_missing_range"] = {
             "season": season, "episodes": requested, "share_code": ctx.parsed.share_code,
         }
@@ -382,8 +397,14 @@ class TaskOpsMixin(ServiceBase):
         ctx.log(f"人工申请批量补回 S{season:02d} 的 {len(requested)} 集："
                 "旧入库记录不会删除；需明确选分享版本与最终保存文件夹，"
                 "实际缺集以云盘实时只读扫描为准")
-        self._update(ctx, expected=TaskState.SKIPPED)
-        return self.get_task(task_id)
+        if original:
+            try:
+                self.store.queue_bulk_missing_draft(original, ctx)
+            except ValueError as exc:
+                raise ConflictError(str(exc)) from exc
+        else:
+            self._update(ctx, expected=previous_state, reset_retries=previous_state == TaskState.FAILED)
+        return self.get_task(ctx.task_id)
 
     def set_episode_selection(self, task_id: str, episodes: list[int]) -> dict[str, Any]:
         """Per-task subset of episodes, with mandatory existing-content dedup.
@@ -443,6 +464,15 @@ class TaskOpsMixin(ServiceBase):
                     and (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")) == "aliyun"
                     and (ctx.parsed.raw_fields or {}).get("share_provider") == "aliyun"):
                 out.append("force_reopen_duplicate")
+        if (state == TaskState.DONE and (ctx.result or {}).get("storage_verified")
+                and (storage.get("provider") or ctx.source_rule.get("storage")) == "aliyun"
+                and ctx.parsed and ctx.parsed.title
+                and ctx.parsed.media_type in ("anime", "tv")
+                and ctx.parsed.share_code
+                and (ctx.parsed.raw_fields or {}).get("share_provider") == "aliyun"
+                and type(ctx.parsed.season) is int and 1 <= ctx.parsed.season <= 100
+                and not (self.store.disputed_transfer(ctx.task_id) or {}).get("active")):
+            out.append("force_missing_range")
         if state == TaskState.PENDING_APPROVAL:
             out += ["approve", "reject"]
             if subscriptions.subscribable(ctx) and not subscriptions.subscribed(self.store.subscriptions(), ctx):
