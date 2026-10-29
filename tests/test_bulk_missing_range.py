@@ -69,7 +69,7 @@ class ExactFolderScanTests(unittest.TestCase):
         parsed = ParsedResource(is_media=True, title="狂王", season=2,
                                 media_type="anime", episodes=list(range(1, 14)))
         listing = source_files() + [
-            {"**file, "id": f"hdr-{ep}", "share_folder_id": "hdr-folder",
+            {**file, "id": f"hdr-{ep}", "share_folder_id": "hdr-folder",
              "share_path": "第二季 HDR.Vivid"}
             for ep, file in enumerate(source_files(), 1)
         ]
