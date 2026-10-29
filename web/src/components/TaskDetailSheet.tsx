@@ -182,8 +182,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         || repairReport.uncertain.length) return;
     if (!window.confirm(
       `只补转选中的 ${repairSelected.length} 个、已核实丢失的文件？`
-      + '\\n不覆盖云盘里仍存在的文件；原成功任务和历史记录不变。'
-      + '\\n转存前还会再检查，如果文件恢复则停止。'
+      + '\n不覆盖云盘里仍存在的文件；原成功任务和历史记录不变。'
+      + '\n转存前还会再检查，如果文件恢复则停止。'
     )) return;
     setBusy(true);
     try {
