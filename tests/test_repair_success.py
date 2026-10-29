@@ -174,6 +174,20 @@ class SuccessfulRepairWebTests(WebCase):
         self.cloud.error11 = True
         self.assertEqual(self.inspect().status_code, 409)
 
+    def test_cloud_api_failure_never_claims_missing_or_starts_copy(self):
+        # A cloud listing outage is not proof that any video was deleted.
+        with patch.object(self.cloud, "iterdir",
+                          side_effect=AliyunAPIError(503, "ServiceUnavailable")):
+            check = self.inspect()
+            self.assertEqual(check.status_code, 409, check.text)
+            repair = self.client.post(self.api + "/repair-missing",
+                                      json={"missing_ids": ["old11"]})
+            self.assertEqual(repair.status_code, 409, repair.text)
+        self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state,
+                         TaskState.DONE)
+        self.assertFalse(self.app.state.store.get_task(
+            self.ctx.task_id).ns("task").get("repair_children"))
+
     def test_worker_stops_when_file_was_restored_after_queue(self):
         made = self.client.post(self.api + "/repair-missing", json={"missing_ids": ["old11"]})
         self.assertEqual(made.status_code, 200, made.text)
