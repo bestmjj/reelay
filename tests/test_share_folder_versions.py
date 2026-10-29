@@ -604,11 +604,11 @@ class TelegramDestinationCorrectionTests(WebCase):
         super().setUp()
         self.ctx = PipelineContext(RawMessage(
             "@shareAliyun", "tg-wrong-title",
-            "K狂王 第二季 https://www.alipan.com/s/real-share",
+            "K狂王 第二季 https://www.alipan.com/s/gsQB8YFoLZQ",
             extra={}))  # NOT a manual_import
         self.ctx.parsed = ParsedResource(
             is_media=True, title="误识别作品", media_type="tv", year=2026,
-            season=1, episodes=[1], share_code="real-share",
+            season=1, episodes=[1], share_code="gsQB8YFoLZQ",
             raw_fields={"share_provider": "aliyun"})
         self.ctx.state = TaskState.PENDING_APPROVAL
         self.ctx.source_rule = {"storage": "aliyun", "approval_mode": "manual",
