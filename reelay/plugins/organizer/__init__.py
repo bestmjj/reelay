@@ -351,9 +351,12 @@ class LibraryRouter(_MediaLibrary):
     async def run(self, ctx: PipelineContext) -> bool:
         ns = ctx.ns("library")
         if ns.get("direct_existing"):
-            ns.pop("relative_category", None)
-            ns.pop("category_path", None)
-            note = "手动指定现有剧集目录，跳过自动分类及新作品目录创建"
+            repairing = ns["direct_existing"].get("mode") == "repair"
+            if not repairing:
+                ns.pop("relative_category", None)
+                ns.pop("category_path", None)
+            note = ("补转任务固定原保存根目录及原分类，不再重新自动路由"
+                    if repairing else "手动指定现有剧集目录，跳过自动分类及新作品目录创建")
             if ns.get("note") != note:
                 ctx.log(note)
             ns["note"] = note
@@ -403,8 +406,22 @@ class Organizer(_MediaLibrary):
         mapping = {f["name"]: (f.get("season"), f["episode"]) for f in manifest.get("files", [])
                    if f.get("name") and type(f.get("episode")) is int}
         ns["plan"] = build_plan(ctx.parsed, landed, relative_category, mapping)
+        repair_info = ctx.ns("task").get("repair") or {}
+        if repair_info:
+            # Use the exact original verified destination path/name, even if
+            # naming templates or category rules have since changed.
+            by_source = {f["source_name"]: f for f in repair_info["files"]}
+            if len(by_source) != len(repair_info["files"]):
+                raise ValueError("补转源文件名不唯一，请人工处理")
+            for item in ns["plan"]:
+                old = by_source.get(item["src_name"])
+                if old is None:
+                    raise ValueError("补转整理计划混入了原清单外的视频")
+                item["target_dir"], item["target_name"] = old["target_dir"], old["target_name"]
+            if len(ns["plan"]) != len(by_source):
+                raise ValueError("补转整理计划缺少原目标文件")
         destination = ctx.ns("library").get("direct_existing") or {}
-        if destination and destination.get("mode", "existing") != "organized":
+        if destination and destination.get("mode", "existing") not in ("organized", "repair"):
             # Explicit exact directory: retain standard filenames, but never
             # create an extra <title>/Season tree under the user-chosen folder.
             for item in ns["plan"]:
