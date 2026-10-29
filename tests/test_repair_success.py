@@ -49,7 +49,7 @@ class Cloud:
             return [{"id": "season-folder", "name": "Season 01", "is_dir": True}]
         if cid == "season-folder":
             return [self.files["old10"],
-                    *([self.files["old11"]] if self.exists11 and not self.moved11 else []),
+                    *([self.get_attr("old11")] if self.exists11 and not self.moved11 else []),
                     *([self.files["new11"]] if "new11" in self.files else []),
                     *([self.files["alternate11"]] if "alternate11" in self.files else [])]
         return []
