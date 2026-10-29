@@ -11,9 +11,9 @@ import { cn } from '@/lib/utils';
 export type PickedDir = Crumb & { path: string; provider: 'p115' | 'aliyun'; driveId?: string };
 
 /** 选择 网盘目录的弹窗；打开时才挂载（见 BasicTab），从 initialCid 开始浏览。 */
-export default function DirectoryPicker({ open, initialCid = '0', initialName = '根目录', initialProvider = 'p115', fixedProvider, onOpenChange, onSelect }:
+export default function DirectoryPicker({ open, initialCid = '0', initialName = '根目录', initialProvider = 'p115', fixedProvider, forbidRoot = false, onOpenChange, onSelect }:
   { open: boolean; initialCid?: string; initialName?: string; initialProvider?: 'p115' | 'aliyun';
-    fixedProvider?: 'p115' | 'aliyun'; onOpenChange: (open: boolean) => void; onSelect: (dir: PickedDir) => void }) {
+    fixedProvider?: 'p115' | 'aliyun'; forbidRoot?: boolean; onOpenChange: (open: boolean) => void; onSelect: (dir: PickedDir) => void }) {
   const [provider, setProvider] = useState<'p115' | 'aliyun'>(initialProvider);
   const dir = useDirListing({
     cid: initialCid || '0',
@@ -106,7 +106,7 @@ export default function DirectoryPicker({ open, initialCid = '0', initialName = 
         <div className="flex gap-2">
           <Button variant="outline" className="flex-1 sm:flex-none" onClick={() => onOpenChange(false)}>取消</Button>
           <Button
-            className="flex-1 sm:flex-none" disabled={busy || Boolean(error)}
+            className="flex-1 sm:flex-none" disabled={busy || Boolean(error) || (forbidRoot && current.id === '0')}
             onClick={() => {
               onSelect({ ...current, provider, driveId: dir.driveId, path: dir.path.map(x => x.name).join(' / ') || '根目录' });
               onOpenChange(false);
