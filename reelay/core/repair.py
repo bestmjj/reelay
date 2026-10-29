@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..contracts import PipelineContext, TaskState
+from .contracts import PipelineContext, TaskState
 from ..providers.aliyun import AliyunAPIError
 
 
