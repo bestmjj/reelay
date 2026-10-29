@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from reelay.core.contracts import ParsedResource, PipelineContext, RawMessage, TaskState
 from reelay.providers.aliyun import AliyunAPIError
@@ -48,7 +48,9 @@ class Cloud:
         if cid == "show-folder":
             return [{"id": "season-folder", "name": "Season 01", "is_dir": True}]
         if cid == "season-folder":
-            return [self.files["old10"], *([self.files["old11"]] if self.exists11 and not self.moved11 else [])]
+            return [self.files["old10"],
+                    *([self.files["old11"]] if self.exists11 and not self.moved11 else []),
+                    *([self.files["new11"]] if "new11" in self.files else [])]
         return []
 
 
@@ -171,6 +173,49 @@ class SuccessfulRepairWebTests(WebCase):
         self.assertEqual(cloud_copy.call_count, 0)
         self.assertEqual(stage.call_count, 0)
         self.assertEqual(self.app.state.store.get_task(child_id).state, TaskState.FAILED)
+        self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state, TaskState.DONE)
+
+    def test_finished_repair_is_seen_as_existing_even_when_original_id_is_gone(self):
+        queued = self.client.post(self.api + "/repair-missing", json={"missing_ids": ["old11"]})
+        self.assertEqual(queued.status_code, 200, queued.text)
+        child_id = queued.json()["task_id"]
+        child = self.app.state.store.get_task(child_id)
+        child.state = TaskState.DONE
+        child.result = {"storage_verified": True}
+        child.ns("organize")["plan"] = [{
+            "src_id": "new11", "src_name": "11 4K.mp4", "size": 2048,
+            "target_dir": "动漫/K狂王/Season 01",
+            "target_name": "K狂王 - S01E11.mp4",
+        }]
+        self.app.state.store.save_task(child)
+        self.cloud.files["new11"] = {
+            "id": "new11", "name": "K狂王 - S01E11.mp4",
+            "parent_id": "season-folder", "size": 2048, "is_dir": False,
+        }
+        report = self.inspect()
+        self.assertEqual(report.status_code, 200, report.text)
+        self.assertFalse(report.json()["missing"])
+        self.assertEqual(len(report.json()["present"]), 2)
+
+    def test_wrong_source_file_in_prepared_manifest_cannot_copy(self):
+        queued = self.client.post(self.api + "/repair-missing", json={"missing_ids": ["old11"]})
+        self.assertEqual(queued.status_code, 200, queued.text)
+        child = self.app.state.store.get_task(queued.json()["task_id"])
+        manifest = {
+            "files": [{"id": "another-version", "name": "11 4K.mp4", "size": 2048,
+                       "season": 1, "episode": 11}],
+            "season": 1, "episodes": [11], "pairs": [[1, 11]],
+            "staging_cid": "unused-stage", "to_cid": "folder-base",
+            "drive_id": "resource-drive",
+        }
+        with patch.object(self.storage, "prepare", new_callable=AsyncMock,
+                          return_value=manifest), patch.object(
+                              self.storage, "save", new_callable=AsyncMock) as copy:
+            asyncio.run(self.app.state.pipeline.execute_save(child))
+        self.assertEqual(copy.call_count, 0)
+        after = self.app.state.store.get_task(child.task_id)
+        self.assertEqual(after.state, TaskState.FAILED)
+        self.assertIn("源文件 ID", str(self.app.state.store.get_task_record(child.task_id)["error"]))
         self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state, TaskState.DONE)
 
     def test_wrong_drive_and_legacy_metadata_cannot_repair(self):
