@@ -5,13 +5,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import re
 from dataclasses import asdict, replace
 from typing import Any
 
 
-from .. import messages, source_audit, subscriptions
+from .. import messages, repair, source_audit, subscriptions
 from ..media import is_video
 from ..contracts import Decision, ParsedResource, PipelineContext, TaskState
 from ..validation import MEDIA_SCHEMA, validate_resource
@@ -150,6 +151,105 @@ class TaskOpsMixin(ServiceBase):
         except Exception as exc:  # noqa: BLE001 - 订阅建议不影响批准
             log.warning("订阅建议生成失败：%s", exc)
 
+    def repair_check(self, task_id: str) -> dict[str, Any]:
+        """Read-only inspection of originally organized cloud file IDs."""
+        ctx = self._require_context(task_id)
+        if "repair_missing" not in self.task_actions(ctx):
+            raise ConflictError("只有阿里云盘已完成且未隔离的任务支持核验补转")
+        original = ctx.ns("storage").get("manifest") or {}
+        if not original.get("drive_id"):
+            raise ConflictError("旧任务没有资源库 ID，不能安全核验丢失文件")
+        storage = self.pipeline.reg.get_provider("storage", "aliyun")
+        children = [self.store.get_task(child_id)
+                    for child_id in ctx.ns("task").get("repair_children", [])]
+        try:
+            return repair.check_saved_files(
+                ctx, storage, [child for child in children if child is not None])
+        except (ValueError, RuntimeError) as exc:
+            raise ConflictError(str(exc)) from exc
+
+    def repair_missing(self, task_id: str, missing_ids: list[str]) -> dict[str, Any]:
+        """Queue *only verified missing* files as a new task, never replay DONE.
+
+        This is not a version upgrade or forced overwrite. Every file is
+        rechecked here and again by the Worker before sending a copy request.
+        """
+        if not missing_ids or len(missing_ids) > 100 or len(set(missing_ids)) != len(missing_ids):
+            raise ValueError("请选择核验为丢失的 1～100 个文件")
+        ctx = self._require_context(task_id)
+        report = self.repair_check(task_id)
+        if report["uncertain"]:
+            raise ConflictError("部分文件位置不确定，请先人工核对，禁止批量重新转存")
+        missing = {row["old_id"]: row for row in report["missing"]}
+        if any(file_id not in missing for file_id in missing_ids):
+            raise ConflictError("文件状态已变化或并未丢失，请重新核验后再补转")
+        selected = [missing[file_id] for file_id in missing_ids]
+        seasons = {row["season"] for row in selected if row["episode"] is not None}
+        if len(seasons) > 1:
+            raise ConflictError("跨多季合集请每次选择同一季的丢失文件补转")
+        new_ctx = PipelineContext(copy.deepcopy(ctx.raw))
+        new_ctx.raw.msg_id = f"{ctx.raw.msg_id}:repair:{new_ctx.task_id}"
+        new_ctx.raw.extra["repair_of"] = ctx.task_id
+        new_ctx.parsed = copy.deepcopy(ctx.parsed)
+        if seasons:
+            new_ctx.parsed.season = next(iter(seasons))
+            new_ctx.parsed.episodes = sorted({row["episode"] for row in selected})
+        new_ctx.state, new_ctx.decision = TaskState.QUEUED, Decision.SAVE
+        new_ctx.source_rule = copy.deepcopy(ctx.source_rule)
+        new_ctx.source_rule["storage"] = "aliyun"
+        new_ctx.source_rule["episodes_from"] = "message"
+        new_ctx.save_dir_alias = ctx.save_dir_alias
+        new_ctx.meta["runtime"] = copy.deepcopy(ctx.meta.get("runtime") or {})
+        new_ctx.meta["tmdb"] = copy.deepcopy(ctx.meta.get("tmdb") or {})
+        original_library = ctx.meta.get("library") or {}
+        original_mode = (original_library.get("direct_existing") or {}).get("mode")
+        # Exact old destination keeps a flat layout. Otherwise preserve the
+        # original normalized category + title + Season path under the old root.
+        mode = "exact" if original_mode in ("exact", "existing") else "repair"
+        new_ctx.meta["library"] = {
+            "relative_category": "" if mode == "exact"
+                                 else original_library.get("relative_category", ""),
+            "direct_existing": {
+                "id": report["base_cid"], "drive_id": report["drive_id"],
+                "path": report["base_path"], "provider": "aliyun",
+                "title": new_ctx.parsed.title, "media_type": new_ctx.parsed.media_type,
+                "share_code": new_ctx.parsed.share_code, "mode": mode,
+                "pairs": [list((row["season"], row["episode"])) for row in selected
+                          if row["episode"] is not None],
+            },
+        }
+        selection = ctx.meta.get("share_selection") or {}
+        new_selection = {}
+        if seasons:
+            new_selection["only_episodes"] = list(new_ctx.parsed.episodes)
+        if len(selected) == 1 and selected[0]["episode"] is not None:
+            row = selected[0]
+            original_info = next((item for item in
+                                  (ctx.ns("storage")["manifest"].get("files") or [])
+                                  if str(item.get("id")) == row["source_id"]), {})
+            new_selection.update(
+                file_id=row["source_id"], file_name=row["source_name"],
+                file_path=original_info.get("share_path") or "",
+                file_size=row["source_size"],
+                share_code=new_ctx.parsed.share_code, provider="aliyun")
+        elif selection.get("folder_id"):
+            for name in ("folder_id", "path", "share_code", "provider"):
+                if name in selection:
+                    new_selection[name] = selection[name]
+        new_ctx.meta["share_selection"] = new_selection
+        new_ctx.ns("task")["repair"] = {
+            "source_task_id": ctx.task_id, "drive_id": report["drive_id"],
+            "files": [dict(row) for row in selected],
+        }
+        new_ctx.log(f"人工确认原任务 {ctx.task_id} 缺失 {len(selected)} 个云盘文件；"
+                    "新任务仅补缺失文件，保留旧入库历史和去重表")
+        try:
+            self.store.queue_repair_task(ctx, new_ctx)
+        except ValueError as exc:
+            raise ConflictError(str(exc)) from exc
+        return {"ok": True, "task_id": new_ctx.task_id, "state": new_ctx.state.value,
+                "file_count": len(selected)}
+
     def reopen_duplicate(self, task_id: str) -> dict[str, Any]:
         """Let an operator inspect a fully skipped bundle for newly missing
         episodes. This changes only the local task state, not any cloud file.
@@ -227,6 +327,11 @@ class TaskOpsMixin(ServiceBase):
             out += ["approve", "reject"]
             if subscriptions.subscribable(ctx) and not subscriptions.subscribed(self.store.subscriptions(), ctx):
                 out.append("subscribe")
+        if (state == TaskState.DONE and storage.get("provider") == "aliyun"
+                and (ctx.result or {}).get("storage_verified")
+                and (ctx.meta.get("organize") or {}).get("plan")
+                and not (self.store.disputed_transfer(ctx.task_id) or {}).get("active")):
+            out.append("repair_missing")
         if state == TaskState.FAILED:
             out.append("retry")
         if (state in (TaskState.PENDING_APPROVAL, TaskState.FAILED)
