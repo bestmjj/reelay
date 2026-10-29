@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from .contracts import PipelineContext, TaskState
+from .media import episode_of, is_video
 from ..providers.aliyun import AliyunAPIError
 
 
@@ -160,7 +161,22 @@ def check_saved_files(ctx: PipelineContext, storage, completed_repairs=()) -> di
             else:
                 uncertain.append({**row, "reason": "目标位置存在同名但大小不同或多个文件"})
         else:
-            missing.append(row)
+            # A replacement can have a different name/extension from the
+            # old file. Treat an alternative E11 in this same verified folder
+            # as ambiguous, never blindly copy a second E11.
+            alternatives = []
+            if type(row.get("episode")) is int:
+                for item in directory_files:
+                    if item.get("is_dir") or not is_video(item.get("name", "")):
+                        continue
+                    file_season, file_ep = episode_of(item.get("name", ""))
+                    if (file_ep == row["episode"]
+                            and file_season in (None, row["season"])):
+                        alternatives.append(item)
+            if alternatives:
+                uncertain.append({**row, "reason": "原目录中还有同季同集的其他命名视频，需人工核对"})
+            else:
+                missing.append(row)
 
     return {
         "source_task_id": ctx.task_id, "drive_id": drive, "base_cid": root,
