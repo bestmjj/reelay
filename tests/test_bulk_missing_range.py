@@ -224,6 +224,74 @@ class BatchMissingApiTests(WebCase):
         self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state,
                          TaskState.FAILED)
 
+    def test_done_episode14_creates_separate_missing_range_draft(self):
+        done = self.app.state.store.get_task(self.ctx.task_id)
+        done.state, done.decision = TaskState.DONE, Decision.SAVE
+        done.result = {"storage_verified": True, "landed": [
+            {"id": "saved14", "name": "狂王 - S02E14 - 2160p.mp4"},
+        ]}
+        done.ns("storage")["provider"] = "aliyun"
+        done.ns("task").pop("skip", None)
+        self.app.state.store.save_task(done)
+        self.assertIn("force_missing_range", self.client.get(self.url).json()["actions"])
+        created = self.launch()
+        self.assertEqual(created.status_code, 200, created.text)
+        new_id = created.json()["task_id"]
+        self.assertNotEqual(new_id, done.task_id)
+        draft = self.app.state.store.get_task(new_id)
+        self.assertEqual(draft.state, TaskState.PENDING_APPROVAL)
+        self.assertEqual(draft.parsed.episodes, list(range(1, 14)))
+        self.assertFalse(draft.ns("storage").get("manifest"))
+        self.assertEqual(draft.ns("task")["force_missing_range"]["season"], 2)
+        parent = self.app.state.store.get_task(done.task_id)
+        self.assertEqual(parent.state, TaskState.DONE)
+        self.assertTrue(parent.result["storage_verified"])
+        self.assertEqual(parent.ns("task")["bulk_missing_children"], [new_id])
+        self.assertEqual(self.launch().status_code, 409)  # prevent second active draft
+        draft_url = f"/api/tasks/{new_id}"
+        selected = self.client.post(draft_url + "/share-folder", json={
+            "folder_id": "dovi-folder", "remember": False,
+        })
+        self.assertEqual(selected.status_code, 200, selected.text)
+        approve = self.client.post(draft_url + "/approve", json={
+            "existing_folder_id": "season-folder",
+            "existing_drive_id": "resource-drive", "destination_mode": "exact",
+        })
+        self.assertEqual(approve.status_code, 200, approve.text)
+        self.assertEqual(self.app.state.store.get_task(done.task_id).state, TaskState.DONE)
+        self.assertEqual(self.app.state.store.get_task(new_id).state, TaskState.QUEUED)
+
+    def test_prepared_subset_survives_worker_restart(self):
+        queued = self.choose_and_approve()
+        # The live folder gains E09 before preparation. A valid persisted
+        # manifest therefore contains only twelve of the thirteen requested
+        # episodes. Worker restart must NOT reject that legitimate subset.
+        effective = [*range(1, 9), *range(10, 14)]
+        queued.parsed.episodes = effective
+        queued.ns("share_selection")["only_episodes"] = effective
+        queued.ns("task")["force_missing_range"]["effective_episodes"] = effective
+        storage_ns = queued.ns("storage")
+        storage_ns.update({
+            "provider": "aliyun",
+            "phase": "ready", "resource_key": "test:resource:bulk",
+            "manifest": {
+                "drive_id": "resource-drive",
+                "staging_cid": "stage-bulk",
+                "files": [
+                    {"id": f"dovi-{ep}", "name": f"狂王.S02E{ep:02d}.2160p.mp4",
+                     "size": 500000000 + ep, "season": 2, "episode": ep}
+                    for ep in effective
+                ],
+                "season": 2, "episodes": effective,
+            },
+        })
+        self.app.state.store.save_task(queued)
+        with patch.object(self.app.state.store, "claim_resource", return_value=False) as claim:
+            asyncio.run(self.app.state.pipeline.execute_save(queued))
+        self.assertTrue(claim.called, "valid recovery should reach the resource claim")
+        self.assertEqual(self.app.state.store.get_task(queued.task_id).state,
+                         TaskState.QUEUED)
+
     def test_wrong_season_or_wrong_provider_cannot_use_force(self):
         wrong = self.app.state.store.get_task(self.ctx.task_id)
         wrong.source_rule["storage"] = "p115"
