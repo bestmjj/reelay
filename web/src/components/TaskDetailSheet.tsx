@@ -693,14 +693,12 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
 
           {needDirs && dirs?.dirs.length && !conflict && !existingFolder ? (
             <Section title="预设保存目录（可选）">
-              {existingFolder ? <p className="mb-2 text-xs text-primary">本次将使用上面指定的真实文件夹，下面的自动分类和预设目录不生效。</p> : null}
-              <Select value={targetDir} onValueChange={(v) => { setTargetDir(v); setExistingFolder(null); }}
+              <Select value={targetDir} onValueChange={setTargetDir}
                 options={dirs.dirs.map((d) => ({ value: d, label: dirs.paths[d] ? `${d}（${dirs.paths[d]}）` : d }))}
-                placeholder={existingFolder
-                  ? `本次指定 · /${existingFolder.path.replaceAll(' / ', '/')}`
-                  : detail.state === 'pending_approval' ? `自动 · ${detail.auto_path ?? detail.auto_dir ?? '按分类'}`
-                    : `保持当前目录「${detail.context.save_dir_alias ?? '默认'}」`}
-                fallback={existingFolder ? undefined : detail.state === 'pending_approval'
+                placeholder={detail.state === 'pending_approval'
+                  ? `自动 · ${detail.auto_path ?? detail.auto_dir ?? '按分类'}`
+                  : `保持当前目录「${detail.context.save_dir_alias ?? '默认'}」`}
+                fallback={detail.state === 'pending_approval'
                   ? { value: autoAlias ?? '', label: `${detail.auto_path ?? detail.auto_dir} · 自动` }
                   : { value: autoAlias ?? '', note: '当前' }} />
               {requireExplicitTarget ? (
