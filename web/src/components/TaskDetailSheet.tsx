@@ -162,7 +162,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     try {
       const report = await taskApi.repairCheck(detail.task_id);
       setRepairReport(report);
-      setRepairSelected(report.missing.map((item) => item.old_id));
+      setRepairSelected(report.missing.slice(0, 100).map((item) => item.old_id));
       if (!report.missing.length) {
         toast.success('云盘核验没有发现确定丢失的文件，不会重复转存');
       } else {
@@ -178,7 +178,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   };
 
   const repairMissingFiles = async () => {
-    if (!detail || !repairReport || !repairSelected.length
+    if (!detail || !repairReport || !repairSelected.length || repairSelected.length > 100
         || repairReport.uncertain.length) return;
     if (!window.confirm(
       `只补转选中的 ${repairSelected.length} 个、已核实丢失的文件？`
@@ -505,6 +505,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                 已存在 {repairReport.present.length} 个，确认丢失 {repairReport.missing.length} 个，
                 待人工核对 {repairReport.uncertain.length} 个。未丢失的不允许重复转存。
               </p>
+              {repairReport.missing.length > 100 ? (
+                <p className="text-xs text-muted-foreground">
+                  缺失文件较多，每次最多勾选 100 个；这一批完成后可再次检查剩余缺失文件。
+                </p>
+              ) : null}
               {repairReport.missing.length > 0 ? (
                 <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border p-3">
                   {repairReport.missing.map((file) => (
@@ -512,7 +517,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                       <input type="checkbox" className="mt-0.5"
                         checked={repairSelected.includes(file.old_id)}
                         onChange={(e) => setRepairSelected((prev) =>
-                          e.target.checked ? [...prev, file.old_id] : prev.filter((v) => v !== file.old_id))} />
+                          e.target.checked ? (prev.length < 100 ? [...prev, file.old_id] : prev)
+                            : prev.filter((v) => v !== file.old_id))} />
                       <span className="break-all">
                         {file.target_name}
                         <span className="block text-muted-foreground">原目录：{file.target_dir || '所选根目录'}</span>
