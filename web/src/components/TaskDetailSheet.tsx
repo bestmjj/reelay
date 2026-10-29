@@ -89,6 +89,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const [targetDir, setTargetDir] = useState('');
   const [existingPickerOpen, setExistingPickerOpen] = useState(false);
   const [existingFolder, setExistingFolder] = useState<PickedDir | null>(null);
+  const [destinationMode, setDestinationMode] = useState<'exact' | 'organized'>('exact');
   const [busy, setBusy] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [shareFolders, setShareFolders] = useState<IShareFolderPreview | null>(null);
@@ -107,6 +108,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       ? selection.only_episodes.join(', ') : '');
     setTargetDir('');  // 空值 = 审批时按自动分类、重新整理时保持当前目录
     setExistingFolder(null);
+    setDestinationMode('exact');
     setExistingPickerOpen(false);
     setChoosing(false);
     if (detail?.task_id !== shown?.task_id) {
@@ -138,7 +140,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     setBusy(true);
     try {
       const body = action === 'approve' && existingFolder
-        ? { existing_folder_id: existingFolder.id, existing_drive_id: existingFolder.driveId }
+        ? { existing_folder_id: existingFolder.id, existing_drive_id: existingFolder.driveId,
+            destination_mode: destinationMode }
         : actionBody(action, { dir: targetDir, conflict });
       await taskApi.act(detail.task_id, ACTION_ENDPOINT[action], body);
       finish(conflict ? CONFLICT_DONE[conflict] : ACTION_DONE[action]);
@@ -317,9 +320,19 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   };
 
   const parsed = detail?.context.parsed;
+  const hasVerifiedIdentity = Boolean(parsed?.title?.trim()
+    && ['movie', 'tv', 'anime'].includes(parsed.media_type ?? '')
+    && (parsed.media_type === 'movie'
+      || (parsed.season != null && (parsed.episodes?.length ?? 0) > 0)));
+  const hasPendingMetadataEdits = can('correct') && (
+    JSON.stringify(draft) !== JSON.stringify(parsed ?? {})
+    || episodesText !== (parsed?.episodes ?? []).join(', ')
+  );
   const requireExplicitTarget = detail?.context.raw.extra?.manual_import === true
     && detail?.context.raw.extra?.manual_unlabeled === true;
   const meta = (detail?.context.meta ?? {}) as TaskMeta;
+  const isAliyun = detail?.context.source_rule.storage === 'aliyun'
+    || (detail?.context.meta?.storage as { provider?: string } | undefined)?.provider === 'aliyun';
   const plan = meta.organize?.plan ?? [];
   const organizeError = meta.organize?.error;
   const partial = meta.storage?.partial;
@@ -357,7 +370,10 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       <div className="flex gap-2">
         {can('dismiss') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('dismiss')} className="text-destructive"><EyeOff />忽略</Button> : null}
         {can('reject') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reject')} className="text-destructive"><X />忽略</Button> : null}
-        {can('approve') ? <Button size="sm" disabled={busy || (requireExplicitTarget && !targetDir && !existingFolder)}
+        {can('approve') ? <Button size="sm"
+              disabled={busy || Boolean(hasPendingMetadataEdits)
+                || (requireExplicitTarget && !targetDir && !existingFolder)
+                || Boolean(existingFolder && !existingFolder.driveId)}
               onClick={() => void run('approve')}><Check />确认转存</Button> : null}
       </div>
     </div>
@@ -618,32 +634,53 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             </Section>
           ) : null}
 
-          {can('approve') && detail.context.source_rule.storage === 'aliyun'
-            && detail.context.raw.extra?.manual_import === true && parsed?.media_type
-            && parsed.episodes?.length === 1 && meta.share_selection?.file_id ? (
-            <Section title="保存到已有剧集目录（推荐）" icon={FolderSearch}>
+          {can('approve') && isAliyun ? (
+            <Section title="指定阿里云盘保存目录（本次任务）" icon={FolderSearch}>
               <p className="text-xs leading-5 text-muted-foreground">
-                请进入阿里云盘资源库，选中 E01～E246 实际所在的最终文件夹。
-                如果原来的视频直接放在「吞噬星空」，就选这个文件夹；
-                如果位于「Season 01」，请进入该季文件夹再选择。
-                本次只将 E247 放进你选中的目录，不会再创建同名作品或季目录。
+                自动识别的片名或分类不对时，先在下方「识别结果」修正片名、类型、季和集，
+                点击「保存修改」后再选择实际目标。此处只修改本条任务，不影响其他订阅。
               </p>
-              <Button variant="outline" size="sm" onClick={() => setExistingPickerOpen(true)}>
-                <FolderSearch />{existingFolder ? '重新选择已有目录' : '浏览阿里云盘已有目录'}
+              {!hasVerifiedIdentity || hasPendingMetadataEdits ? (
+                <p className="text-xs text-destructive">
+                  {!hasVerifiedIdentity
+                    ? '请先保存正确的片名、类型、季和集号，再指定目录。'
+                    : '识别信息还有未保存的修改，请先点击下方「保存修改」。'}
+                </p>
+              ) : null}
+              <Button variant="outline" size="sm"
+                disabled={busy || !hasVerifiedIdentity || Boolean(hasPendingMetadataEdits)}
+                onClick={() => setExistingPickerOpen(true)}>
+                <FolderSearch />{existingFolder ? '更换目标文件夹' : '浏览阿里云盘选择保存位置'}
               </Button>
               {existingFolder ? (
-                <div className="rounded-md border border-primary/40 bg-primary/5 p-2 text-xs">
-                  <p className="font-medium">已选最终目标：/{existingFolder.path.replaceAll(' / ', '/')}</p>
-                  <p className="mt-1 text-muted-foreground">与原有剧集放在同一个文件夹；仅重命名 E247 文件，不额外建立作品目录。</p>
-                  {!existingFolder.driveId ? <p className="text-destructive">资源库 ID 未能核验，请重新打开目录选择器。</p> : null}
+                <div className="space-y-2 rounded-md border border-primary/40 bg-primary/5 p-3 text-xs">
+                  <p className="font-medium">已选择：/{existingFolder.path.replaceAll(' / ', '/')}</p>
+                  <p className="text-muted-foreground">选择本次转存的具体保存方式：</p>
+                  <Select value={destinationMode}
+                    onValueChange={(v) => setDestinationMode(v as 'exact' | 'organized')}
+                    options={[
+                      { value: 'exact', label: '直接存入所选文件夹（不再建立作品/Season 子目录）' },
+                      { value: 'organized', label: '以所选文件夹为根，按片名/Season 整理' },
+                    ]} />
+                  <p className="text-muted-foreground">
+                    {destinationMode === 'exact'
+                      ? '新文件会在这个文件夹中按已确认的作品及集号命名；不会再次套用自动分类。'
+                      : '在选中的文件夹下建立作品及季目录，不再叠加原来的自动分类。'}
+                  </p>
+                  {!existingFolder.driveId
+                    ? <p className="text-destructive">未读到资源库 ID，请重新选择文件夹。</p> : null}
                 </div>
               ) : null}
               {existingPickerOpen ? (
-                <DirectoryPicker open initialProvider="aliyun" fixedProvider="aliyun"
+                <DirectoryPicker open initialProvider="aliyun" fixedProvider="aliyun" forbidRoot
                   onOpenChange={setExistingPickerOpen}
                   onSelect={(dir) => {
-                    if (!dir.driveId) { toast.error('无法读取阿里云盘资源库 ID，请重新打开目录'); return; }
+                    if (!dir.driveId || dir.id === '0') {
+                      toast.error('请选择阿里云盘资源库中已有的非根目录文件夹');
+                      return;
+                    }
                     setExistingFolder(dir);
+                    setDestinationMode('exact');
                     setTargetDir('');
                   }} />
               ) : null}
@@ -652,11 +689,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
 
           {needDirs && dirs?.dirs.length && !conflict ? (
             <Section title="保存到">
-              {existingFolder ? <p className="mb-2 text-xs text-primary">已选择上面的已有剧集目录，本次不会使用下面的自动分类。</p> : null}
+              {existingFolder ? <p className="mb-2 text-xs text-primary">本次将使用上面指定的真实文件夹，下面的自动分类和预设目录不生效。</p> : null}
               <Select value={targetDir} onValueChange={(v) => { setTargetDir(v); setExistingFolder(null); }}
                 options={dirs.dirs.map((d) => ({ value: d, label: dirs.paths[d] ? `${d}（${dirs.paths[d]}）` : d }))}
                 placeholder={existingFolder
-                  ? `已有剧集目录 · /${existingFolder.path.replaceAll(' / ', '/')}`
+                  ? `本次指定 · /${existingFolder.path.replaceAll(' / ', '/')}`
                   : detail.state === 'pending_approval' ? `自动 · ${detail.auto_path ?? detail.auto_dir ?? '按分类'}`
                     : `保持当前目录「${detail.context.save_dir_alias ?? '默认'}」`}
                 fallback={existingFolder ? undefined : detail.state === 'pending_approval'
