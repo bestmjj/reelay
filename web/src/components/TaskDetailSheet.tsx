@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { inboxApi, type ISaveDirs } from '@/api/inbox';
 import { subscriptionApi } from '@/api/subscriptions';
-import { taskApi, type IShareFolderPreview } from '@/api/tasks';
+import { taskApi, type IRepairReport, type IShareFolderPreview } from '@/api/tasks';
 import DirectoryPicker, { type PickedDir } from '@/components/DirectoryPicker';
 import { ErrorState } from '@/components/app/ErrorState';
 import { Field } from '@/components/app/Field';
@@ -90,6 +90,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const [existingPickerOpen, setExistingPickerOpen] = useState(false);
   const [existingFolder, setExistingFolder] = useState<PickedDir | null>(null);
   const [destinationMode, setDestinationMode] = useState<'exact' | 'organized'>('exact');
+  const [repairReport, setRepairReport] = useState<IRepairReport | null>(null);
+  const [repairSelected, setRepairSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [shareFolders, setShareFolders] = useState<IShareFolderPreview | null>(null);
@@ -110,6 +112,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     setExistingFolder(null);
     setDestinationMode('exact');
     setExistingPickerOpen(false);
+    setRepairReport(null);
+    setRepairSelected([]);
     setChoosing(false);
     if (detail?.task_id !== shown?.task_id) {
       setShareFolders(null);
@@ -147,6 +151,46 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       finish(conflict ? CONFLICT_DONE[conflict] : ACTION_DONE[action]);
     } catch (err) {
       toast.error(errorMessage(err, '操作失败'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const checkMissingFiles = async () => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const report = await taskApi.repairCheck(detail.task_id);
+      setRepairReport(report);
+      setRepairSelected(report.missing.map((item) => item.old_id));
+      if (!report.missing.length) {
+        toast.success('云盘核验没有发现确定丢失的文件，不会重复转存');
+      } else {
+        toast.success(`确认有 ${report.missing.length} 个文件丢失；请核对后选择补转`);
+      }
+    } catch (err) {
+      setRepairReport(null);
+      setRepairSelected([]);
+      toast.error(errorMessage(err, '无法实时核验已入库文件'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const repairMissingFiles = async () => {
+    if (!detail || !repairReport || !repairSelected.length
+        || repairReport.uncertain.length) return;
+    if (!window.confirm(
+      `只补转选中的 ${repairSelected.length} 个、已核实丢失的文件？`
+      + '\\n不覆盖云盘里仍存在的文件；原成功任务和历史记录不变。'
+      + '\\n转存前还会再检查，如果文件恢复则停止。'
+    )) return;
+    setBusy(true);
+    try {
+      const result = await taskApi.repairMissing(detail.task_id, repairSelected);
+      finish(`已创建独立补转任务 ${result.task_id}，将重新核验后只补缺失文件`);
+    } catch (err) {
+      toast.error(errorMessage(err, '补转未排队，请重新核验'));
     } finally {
       setBusy(false);
     }
@@ -345,6 +389,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         {can('correct') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void saveParsed()}>保存修改</Button> : null}
         {can('reparse') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reparse')}><RotateCcw />重新识别</Button> : null}
         {can('retry') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('retry')}><RefreshCw />重试</Button> : null}
+        {can('repair_missing') ? (
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => void checkMissingFiles()}>
+            <ShieldCheck />核验已入库文件
+          </Button>
+        ) : null}
         {can('reopen_duplicate') ? (
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void reopenDuplicate()}>
             <RefreshCw />手动检查缺集
@@ -447,6 +496,43 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                 ) : null}
               </div>
             </div>
+          ) : null}
+
+          {can('repair_missing') && repairReport ? (
+            <Section title="补回云盘里丢失的文件" icon={ShieldCheck}>
+              <p className="text-xs leading-5 text-muted-foreground">
+                已实时检查原文件 ID 和保存目录：{repairReport.base_path}。
+                已存在 {repairReport.present.length} 个，确认丢失 {repairReport.missing.length} 个，
+                待人工核对 {repairReport.uncertain.length} 个。未丢失的不允许重复转存。
+              </p>
+              {repairReport.missing.length > 0 ? (
+                <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border p-3">
+                  {repairReport.missing.map((file) => (
+                    <label key={file.old_id} className="flex items-start gap-2 text-xs">
+                      <input type="checkbox" className="mt-0.5"
+                        checked={repairSelected.includes(file.old_id)}
+                        onChange={(e) => setRepairSelected((prev) =>
+                          e.target.checked ? [...prev, file.old_id] : prev.filter((v) => v !== file.old_id))} />
+                      <span className="break-all">
+                        {file.target_name}
+                        <span className="block text-muted-foreground">原目录：{file.target_dir || '所选根目录'}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+              {repairReport.uncertain.length ? (
+                <p className="text-xs text-destructive">
+                  部分文件存在同名冲突或状态异常；为避免重复/错片，本次禁止自动补转，请人工核对。
+                </p>
+              ) : null}
+              {repairReport.missing.length ? (
+                <Button size="sm" disabled={busy || !repairSelected.length || Boolean(repairReport.uncertain.length)}
+                  onClick={() => void repairMissingFiles()}>
+                  <RefreshCw />确认补转选中的 {repairSelected.length} 个缺失文件
+                </Button>
+              ) : null}
+            </Section>
           ) : null}
 
           {detail.source_audit?.available ? (
