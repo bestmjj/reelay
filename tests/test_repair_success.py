@@ -50,7 +50,8 @@ class Cloud:
         if cid == "season-folder":
             return [self.files["old10"],
                     *([self.files["old11"]] if self.exists11 and not self.moved11 else []),
-                    *([self.files["new11"]] if "new11" in self.files else [])]
+                    *([self.files["new11"]] if "new11" in self.files else []),
+                    *([self.files["alternate11"]] if "alternate11" in self.files else [])]
         return []
 
 
@@ -148,6 +149,18 @@ class SuccessfulRepairWebTests(WebCase):
             self.client.post(self.api + "/repair-missing", json={"missing_ids": ["old11"]}).status_code,
             409,
         )
+
+    def test_alternative_name_same_episode_is_ambiguous_not_deleted(self):
+        self.cloud.files["alternate11"] = {
+            "id": "alternate11", "name": "K狂王.S01E11.1080p.mkv",
+            "parent_id": "season-folder", "size": 1500, "is_dir": False,
+        }
+        report = self.inspect()
+        self.assertEqual(report.status_code, 200, report.text)
+        self.assertEqual(len(report.json()["uncertain"]), 1)
+        self.assertFalse(report.json()["missing"])
+        self.assertEqual(self.client.post(
+            self.api + "/repair-missing", json={"missing_ids": ["old11"]}).status_code, 409)
 
     def test_uncertain_or_network_error_fails_closed(self):
         self.cloud.exists11 = True
