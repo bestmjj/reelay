@@ -39,6 +39,12 @@ class EpisodeSelectionPayload(BaseModel):
     episodes: list[int] = Field(default_factory=list, max_length=100)
 
 
+class RepairMissingPayload(BaseModel):
+    # Immutable file IDs returned by the read-only repair-check endpoint.
+    # The server rechecks every ID before queuing a new transfer.
+    missing_ids: list[str] = Field(min_length=1, max_length=100)
+
+
 class ParsePatchPayload(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
@@ -99,6 +105,14 @@ def router(service) -> APIRouter:
     @api.post("/api/tasks/{task_id}/episode-selection")
     async def choose_episodes(task_id: str, payload: EpisodeSelectionPayload):
         return service.set_episode_selection(task_id, payload.episodes)
+
+    @api.get("/api/tasks/{task_id}/repair-check")
+    async def repair_check(task_id: str):
+        return await asyncio.to_thread(service.repair_check, task_id)
+
+    @api.post("/api/tasks/{task_id}/repair-missing")
+    async def repair_missing(task_id: str, payload: RepairMissingPayload):
+        return await asyncio.to_thread(service.repair_missing, task_id, payload.missing_ids)
 
     @api.post("/api/tasks/{task_id}/reopen-duplicate")
     async def reopen_duplicate(task_id: str):
