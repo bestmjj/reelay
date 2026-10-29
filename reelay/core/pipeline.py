@@ -649,12 +649,19 @@ class Pipeline:
             selection = ctx.ns("share_selection")
             target = ctx.ns("library").get("direct_existing") or {}
             requested = forced_range.get("episodes") or []
+            # A prepared manifest may contain fewer files than the original
+            # request because E09 reappeared during the live cloud scan.
+            # After _adopt_manifest both parsed and source selection reflect
+            # the effective subset. Validate that subset on worker resume.
+            effective = (forced_range.get("effective_episodes") if ns.get("manifest")
+                         else requested)
             if (provider_name != "aliyun" or not ctx.parsed
                     or ctx.parsed.season != forced_range.get("season")
                     or ctx.parsed.share_code != forced_range.get("share_code")
-                    or ctx.parsed.episodes != requested
+                    or ctx.parsed.episodes != effective
                     or not requested or len(requested) > 100
-                    or selection.get("only_episodes") != requested
+                    or not effective or len(effective) > 100
+                    or selection.get("only_episodes") != effective
                     or not selection.get("folder_id") or selection.get("file_id")
                     or selection.get("provider") != "aliyun"
                     or selection.get("share_code") != ctx.parsed.share_code
@@ -984,8 +991,13 @@ class Pipeline:
                     inventory = await asyncio.to_thread(
                         repair.scan_exact_season_episodes, storage, ctx.save_dir_cid,
                         forced_range["season"], forced_range["effective_episodes"])
-                if inventory["drive_id"] != forced_range.get("drive_id", inventory["drive_id"]):
+                target = ctx.ns("library").get("direct_existing") or {}
+                if inventory["drive_id"] != target.get("drive_id"):
                     raise NeedsManual("补集过程中资源库已变化")
+                with self.scope(ctx):
+                    path = await asyncio.to_thread(storage.dir_path, ctx.save_dir_cid)
+                if path != target.get("path"):
+                    raise NeedsManual("目标 Season 文件夹路径在排队期间发生变化")
                 if inventory["present"]:
                     raise NeedsManual("有缺集在排队期间已经出现：" +
                                       ", ".join(f"E{ep:03d}" for ep in inventory["present"]))
