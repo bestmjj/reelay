@@ -19,6 +19,31 @@ class TaskRepository:
         with self._lock, self._conn:
             self._write_task(ctx, error=error)
 
+    def queue_repair_task(self, original: PipelineContext, repair: PipelineContext) -> None:
+        """Atomically keep DONE history and queue one independent repair child.
+
+        A second click cannot create another pending copy. The original
+        transfer ledger and recorded successful receipt remain untouched.
+        """
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            latest = self.get_task(original.task_id)
+            if not latest or latest.state != TaskState.DONE:
+                raise ValueError("原成功任务状态已变化，请刷新后重新核验")
+            old_children = (latest.meta.get("task") or {}).get("repair_children") or []
+            expected = (original.meta.get("task") or {}).get("repair_children") or []
+            if old_children != expected:
+                raise ValueError("其他补转任务已创建，请刷新后重新核验")
+            for child_id in old_children:
+                child = self.get_task(child_id)
+                if child and child.state not in (TaskState.DONE, TaskState.SKIPPED,
+                                                 TaskState.REJECTED):
+                    raise ValueError("已有补转任务还在排队或待处理，请先处理该任务")
+            latest.ns("task")["repair_children"] = [*old_children, repair.task_id]
+            latest.log(f"人工创建只补丢失文件的独立任务 {repair.task_id}；原成功记录保留")
+            self._write_task(latest)
+            self._write_task(repair)
+
     def _write_task(self, ctx: PipelineContext, *, error: str | None = None) -> None:
         """事务内写入；调用方负责提交，不能在这里提前 commit。"""
         snap = _dump_ctx(ctx)
