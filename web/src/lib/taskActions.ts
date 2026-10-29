@@ -6,7 +6,7 @@ import type { TaskActionName } from '@/lib/types';
 /** 走 POST /api/tasks/<id>/<endpoint> 的操作；correct（修正识别）与 subscribe（订阅）各有自己的接口。 */
 export type PostedAction = Exclude<TaskActionName,
   'correct' | 'subscribe' | 'choose_share_folder' | 'quarantine_wrong_source' | 'resolve_quarantine'
-  | 'reopen_duplicate' | 'select_episodes'>;
+  | 'reopen_duplicate' | 'select_episodes' | 'repair_missing'>;
 
 export const ACTION_ENDPOINT: Record<PostedAction, TaskEndpoint> = {
   approve: 'approve', reject: 'reject', dismiss: 'reject', retry: 'retry', reparse: 'reparse',
