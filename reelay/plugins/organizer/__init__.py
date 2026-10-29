@@ -403,12 +403,14 @@ class Organizer(_MediaLibrary):
         mapping = {f["name"]: (f.get("season"), f["episode"]) for f in manifest.get("files", [])
                    if f.get("name") and type(f.get("episode")) is int}
         ns["plan"] = build_plan(ctx.parsed, landed, relative_category, mapping)
-        if ctx.ns("library").get("direct_existing"):
-            # The operator selected the *leaf directory holding earlier episodes*.
-            # Keep the validated episode file name, but never nest another
-            # <title>/Season XX tree beneath that existing final directory.
+        destination = ctx.ns("library").get("direct_existing") or {}
+        if destination and destination.get("mode", "existing") != "organized":
+            # Explicit exact directory: retain standard filenames, but never
+            # create an extra <title>/Season tree under the user-chosen folder.
             for item in ns["plan"]:
                 item["target_dir"] = ""
+        # "organized": use chosen directory as root, building only the
+        # normal title/season tree (no AI/category prefix).
         ns["base_cid"] = ctx.save_dir_cid
         ns["relative_category"] = relative_category
         ns.pop("error", None)
