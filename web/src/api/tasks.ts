@@ -45,6 +45,26 @@ export interface ITaskFilters {
   offset?: number;
 }
 
+export interface IRepairFile {
+  old_id: string;
+  season: number | null;
+  episode: number | null;
+  source_name: string;
+  target_dir: string;
+  target_name: string;
+  note?: string;
+  reason?: string;
+}
+
+export interface IRepairReport {
+  source_task_id: string;
+  base_path: string;
+  total: number;
+  missing: IRepairFile[];
+  present: IRepairFile[];
+  uncertain: IRepairFile[];
+}
+
 export interface IBatchResult {
   done: number;
   failed: Array<{ task_id: string; error: string }>;
@@ -71,6 +91,13 @@ export const taskApi = {
   /** An auto-skipped duplicate can be manually inspected for newly missing episodes. */
   reopenDuplicate: (taskId: string) =>
     post<ITaskDetail>(`tasks/${taskId}/reopen-duplicate`),
+  /** Read-only inspection; old DONE record remains unchanged. */
+  repairCheck: (taskId: string) =>
+    get<IRepairReport>(`tasks/${taskId}/repair-check`),
+  /** Fresh server-side recheck before queueing only confirmed missing files. */
+  repairMissing: (taskId: string, missingIds: string[]) =>
+    post<{ ok: boolean; task_id: string; file_count: number }>(
+      `tasks/${taskId}/repair-missing`, { missing_ids: missingIds }),
   act: (taskId: string, endpoint: TaskEndpoint, body?: unknown) =>
     post<{ ok: boolean }>(`tasks/${taskId}/${endpoint}`, body),
   /** 修正识别结果，返回更新后的详情。 */
