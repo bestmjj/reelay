@@ -261,6 +261,37 @@ class BatchMissingApiTests(WebCase):
         self.assertEqual(self.app.state.store.get_task(done.task_id).state, TaskState.DONE)
         self.assertEqual(self.app.state.store.get_task(new_id).state, TaskState.QUEUED)
 
+    def test_new_cloud_episode_before_copy_stops_the_whole_batch(self):
+        queued = self.choose_and_approve()
+
+        async def prepare(ctx):
+            # A different actor saved E08 after initial folder scan but
+            # before the planned Aliyun share-copy request.
+            self.folder.files.append({
+                "id": "concurrent08", "name": "狂王 - S02E08 - 2160p.mp4",
+                "parent_id": "season-folder", "size": 9999, "is_dir": False,
+            })
+            return {
+                "drive_id": "resource-drive",
+                "staging_cid": "staging-new",
+                "to_cid": "season-folder",
+                "files": [
+                    {"id": f"dovi-{ep}", "name": f"狂王.S02E{ep:02d}.2160p.mp4",
+                     "size": 500000000 + ep, "season": 2, "episode": ep}
+                    for ep in range(1, 14)
+                ],
+                "season": 2, "episodes": list(range(1, 14)),
+            }
+
+        with patch.object(self.storage, "prepare", new=prepare), patch.object(
+                self.storage, "save", new_callable=AsyncMock) as copy:
+            asyncio.run(self.app.state.pipeline.execute_save(queued))
+        self.assertEqual(copy.call_count, 0, "no cloud copy after a fresh duplicate")
+        latest = self.app.state.store.get_task(queued.task_id)
+        self.assertEqual(latest.state, TaskState.FAILED)
+        self.assertEqual(self.app.state.store.get_task_record(queued.task_id)["error"].find("变化") >= 0,
+                         True)
+
     def test_prepared_subset_survives_worker_restart(self):
         queued = self.choose_and_approve()
         # The live folder gains E09 before preparation. A valid persisted
