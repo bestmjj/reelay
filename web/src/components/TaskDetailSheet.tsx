@@ -82,7 +82,17 @@ interface TaskMeta {
 }
 
 export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDetailSheetProps) {
-  const loaded = useAsync(() => (taskId ? taskApi.get(taskId) : Promise.resolve(null)), [taskId], '读取任务详情失败');
+  // DONE transfers are never reopened in place: batch recovery creates an
+  // independent child draft. Keep the sheet on that child after creation.
+  const [navigation, setNavigation] = useState<{ parent: string | null; child: string | null }>({
+    parent: taskId, child: null,
+  });
+  if (navigation.parent !== taskId) {
+    setNavigation({ parent: taskId, child: null });
+  }
+  const activeTaskId = navigation.parent === taskId ? navigation.child ?? taskId : taskId;
+  const loaded = useAsync(() => (activeTaskId ? taskApi.get(activeTaskId) : Promise.resolve(null)),
+    [activeTaskId], '读取任务详情失败');
   const detail = loaded.stale ? null : loaded.data ?? null;
   const [shown, setShown] = useState<ITaskDetail | null>(null);
   const [draft, setDraft] = useState<Partial<IParsedResource>>({});
@@ -350,7 +360,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     setBusy(true);
     try {
       const next = await taskApi.forceMissingRange(detail.task_id, episodes);
-      loaded.mutate(() => next);
+      if (next.task_id === detail.task_id) {
+        loaded.mutate(() => next);
+      } else {
+        setNavigation({ parent: taskId, child: next.task_id });
+      }
       setShareFolders(null);
       setShareFolderId('');
       setShareFileId('');
