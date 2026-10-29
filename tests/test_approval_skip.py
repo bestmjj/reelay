@@ -136,6 +136,38 @@ class ApprovalReasonAPITests(WebCase):
         detail = self.client.get(f"/api/tasks/{old.task_id}").json()
         self.assertEqual(detail["skip_kind"], "duplicate")
 
+    def test_force_reopen_only_aliyun_single_duplicate_and_requires_exact_source_destination(self):
+        item = self.new("force-duplicate", state=TaskState.SKIPPED)
+        item.parsed.season, item.parsed.episodes = 4, [13]
+        item.ns("task")["skip"] = {"kind": "duplicate", "reason": "S04E013 已入库"}
+        self.app.state.store.save_task(item)
+        url = f"/api/tasks/{item.task_id}"
+        self.assertIn("force_reopen_duplicate", self.client.get(url).json()["actions"])
+        response = self.client.post(url + "/force-reopen")
+        self.assertEqual(response.status_code, 200, response.text)
+        active = self.app.state.store.get_task(item.task_id)
+        self.assertEqual(active.state, TaskState.PENDING_APPROVAL)
+        self.assertEqual(active.ns("task")["force_single_copy"]["episode"], 13)
+        self.assertEqual(active.ns("share_selection")["only_episodes"], [13])
+        self.assertNotIn("select_episodes", self.client.get(url).json()["actions"])
+        self.assertEqual(self.client.post(url + "/episode-selection", json={"episodes": [14]}).status_code, 409)
+        self.assertEqual(self.client.post(url + "/approve", json={}).status_code, 409)
+        self.assertEqual(self.client.post(url + "/force-reopen").status_code, 409)
+        self.assertEqual(self.app.state.store.get_task(item.task_id).state, TaskState.PENDING_APPROVAL)
+
+    def test_force_reopen_does_not_allow_ordinary_or_multi_episode_task(self):
+        item = self.new("force-multi", state=TaskState.SKIPPED)
+        item.parsed.episodes = [13, 14]
+        item.ns("task")["skip"] = {"kind": "duplicate", "reason": "old"}
+        self.app.state.store.save_task(item)
+        self.assertNotIn("force_reopen_duplicate", self.client.get(f"/api/tasks/{item.task_id}").json()["actions"])
+        self.assertEqual(self.client.post(f"/api/tasks/{item.task_id}/force-reopen").status_code, 409)
+        other = self.new("force-other", state=TaskState.SKIPPED)
+        other.ns("task")["skip"] = {"kind": "duplicate", "reason": "old"}
+        other.source_rule["storage"] = "p115"
+        self.app.state.store.save_task(other)
+        self.assertEqual(self.client.post(f"/api/tasks/{other.task_id}/force-reopen").status_code, 409)
+
 
 if __name__ == "__main__":
     unittest.main()

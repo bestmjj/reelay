@@ -286,6 +286,27 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     }
   };
 
+  const forceReopenDuplicate = async () => {
+    if (!detail || !window.confirm(
+      '确定强制重新转存这一集？\\n旧的已入库记录不会删除，且不会自动覆盖云盘文件。'
+      + '\\n接下来必须精确选择分享中的单集文件，并指定阿里云盘最终保存文件夹。'
+    )) return;
+    setBusy(true);
+    try {
+      const next = await taskApi.forceReopenDuplicate(detail.task_id);
+      loaded.mutate(() => next);
+      setShareFolders(null);
+      setShareFileId('');
+      setShareFolderId('');
+      toast.success('已进入人工强制模式；先锁定源文件，再指定最终保存目录');
+      onChanged?.();
+    } catch (err) {
+      toast.error(errorMessage(err, '无法启用强制转存'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const reopenDuplicate = async () => {
     if (!detail) return;
     setBusy(true);
@@ -375,6 +396,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const requireExplicitTarget = detail?.context.raw.extra?.manual_import === true
     && detail?.context.raw.extra?.manual_unlabeled === true;
   const meta = (detail?.context.meta ?? {}) as TaskMeta;
+  const forcedCopy = Boolean((detail?.context.meta?.task as { force_single_copy?: unknown } | undefined)?.force_single_copy);
   const isAliyun = detail?.context.source_rule.storage === 'aliyun'
     || (detail?.context.meta?.storage as { provider?: string } | undefined)?.provider === 'aliyun';
   const plan = meta.organize?.plan ?? [];
@@ -399,6 +421,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             <RefreshCw />手动检查缺集
           </Button>
         ) : null}
+        {can('force_reopen_duplicate') ? (
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => void forceReopenDuplicate()}>
+            <AlertTriangle />强制转存本集
+          </Button>
+        ) : null}
         {can('reconcile') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reconcile')}><ShieldCheck />核验转存</Button> : null}
         {can('accept_partial') ? (
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('accept_partial')}>
@@ -420,10 +447,10 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         {can('dismiss') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('dismiss')} className="text-destructive"><EyeOff />忽略</Button> : null}
         {can('reject') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reject')} className="text-destructive"><X />忽略</Button> : null}
         {can('approve') ? <Button size="sm"
-              disabled={busy || Boolean(hasPendingMetadataEdits)
+              disabled={busy || (forcedCopy && (!meta.share_selection?.file_id || !existingFolder || destinationMode !== 'exact')) || Boolean(hasPendingMetadataEdits)
                 || (requireExplicitTarget && !targetDir && !existingFolder)
                 || Boolean(existingFolder && !existingFolder.driveId)}
-              onClick={() => void run('approve')}><Check />确认转存</Button> : null}
+              onClick={() => void run('approve')}><Check />{forcedCopy ? '确认强制转存本集' : '确认转存'}</Button> : null}
       </div>
     </div>
   ) : null;
@@ -593,6 +620,19 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             </Section>
           ) : null}
 
+          {forcedCopy ? (
+            <Section title="人工强制转存（只限本集）" icon={AlertTriangle}>
+              <p className="text-xs leading-5 text-muted-foreground">
+                已明确绕过本集旧的数据库入库去重。请在下方精确选择分享中的目标源文件，
+                然后浏览阿里云盘，选中已经存在的 Season 04 最终剧集文件夹。
+                保存方式必须为「直接存入」。不会自动删除、替换已有文件；
+                同名文件采用安全后缀保留两份。
+              </p>
+              <p className="text-xs text-destructive">
+                请务必核对季号、集号及源文件 ID。强制复制并不证明已有库内版本与新版本相同。
+              </p>
+            </Section>
+          ) : null}
           {can('select_episodes') ? (
             <Section title="本次只补指定集数（可选）">
               <p className="text-xs leading-5 text-muted-foreground">

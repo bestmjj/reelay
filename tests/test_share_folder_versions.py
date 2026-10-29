@@ -50,6 +50,18 @@ class FolderChoiceTests(unittest.TestCase):
             _select_video_items(files, self.parsed, scope="message",
                                 stored=[[1, 14]])
 
+
+    def test_explicit_force_never_uses_another_version_or_old_stored_pair(self):
+        files = two_versions()
+        expected = next(x for x in files if x["id"] == "dovi-folder-13")
+        chosen = _select_video_items(
+            files, self.parsed, stored=[], only_episodes=[13],
+            share_file_id=expected["id"], share_file_name=expected["name"],
+            share_file_path=expected["share_path"], share_file_size=expected["size"],
+        )
+        self.assertEqual([f["id"] for f in chosen["files"]], ["dovi-folder-13"])
+        self.assertEqual(chosen["pairs"], [[1, 13]])
+
     def test_missing_episode_single_version_is_incrementally_copied(self):
         # E13/E14 have two old versions; E15 is available only in DoVi.
         # Do not let the old branches veto automatic filling of missing E15.

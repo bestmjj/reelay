@@ -91,6 +91,9 @@ export const taskApi = {
   /** An auto-skipped duplicate can be manually inspected for newly missing episodes. */
   reopenDuplicate: (taskId: string) =>
     post<ITaskDetail>(`tasks/${taskId}/reopen-duplicate`),
+  /** Explicitly bypass only the old episode ledger for one manually selected Aliyun file. */
+  forceReopenDuplicate: (taskId: string) =>
+    post<ITaskDetail>(`tasks/${taskId}/force-reopen`),
   /** Read-only inspection; old DONE record remains unchanged. */
   repairCheck: (taskId: string) =>
     get<IRepairReport>(`tasks/${taskId}/repair-check`),
