@@ -643,6 +643,24 @@ class Pipeline:
         storage = self.reg.get_provider("storage", provider_name)
         ns["provider"] = provider_name
         repair_info = ctx.ns("task").get("repair") or {}
+        forced = ctx.ns("task").get("force_single_copy") or {}
+        if forced:
+            selected = ctx.ns("share_selection")
+            destination = ctx.ns("library").get("direct_existing") or {}
+            if (provider_name != "aliyun"
+                    or not ctx.parsed or ctx.parsed.share_code != forced.get("share_code")
+                    or ctx.episode_pairs() != [(forced.get("season"), forced.get("episode"))]
+                    or selected.get("only_episodes") != [forced.get("episode")]
+                    or not selected.get("file_id")
+                    or selected.get("share_code") != ctx.parsed.share_code
+                    or selected.get("provider") != "aliyun"
+                    or type(selected.get("file_size")) is not int
+                    or selected["file_size"] <= 0
+                    or destination.get("provider") != "aliyun"
+                    or destination.get("mode") != "exact"):
+                await self._fail(ctx, "强制转存授权不完整：必须固定唯一集数、精确源文件及最终保存文件夹",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
         if repair_info and (provider_name != "aliyun"
                             or not repair_info.get("files")
                             or not repair_info.get("source_task_id")):
@@ -772,6 +790,14 @@ class Pipeline:
                         already.update(confirmed)
                         ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
                         ctx.log(f"已实时核验网盘原有文件，跳过 {len(confirmed)} 个重复季集，不记为 Reelay 已转存")
+                if forced:
+                    # A deliberate, exact single-file copy can bypass the stale
+                    # episode ledger, but NOT quarantine or concurrent claims.
+                    only_pair = (forced["season"], forced["episode"])
+                    already.discard(only_pair)
+                    ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
+                    ctx.log(f"人工强制转存 S{only_pair[0]:02d}E{only_pair[1]:03d}："
+                            "仅本次忽略旧季集去重，其他安全校验保持有效")
                 declared = {tuple(pair) for pair in ctx.episode_pairs()}
                 if declared and already.issuperset(declared):
                     # Even a previously verified E03 is NOT proof that 第3期下
@@ -798,6 +824,16 @@ class Pipeline:
                         ctx.log(f"此分享沿用上次选择的版本「{preference.get('path') or '已选择文件夹'}」")
                 with self.scope(ctx):
                     manifest = await storage.prepare(ctx)
+                if forced:
+                    chosen = ctx.ns("share_selection")
+                    received = manifest.get("files") or []
+                    if (len(received) != 1
+                            or str(received[0].get("id")) != str(chosen["file_id"])
+                            or received[0].get("name") != chosen.get("file_name")
+                            or received[0].get("size") != chosen.get("file_size")
+                            or (received[0].get("season"), received[0].get("episode"))
+                            != (forced["season"], forced["episode"])):
+                        raise NeedsManual("强制转存只能复制人工选择的唯一源文件，分享内容已变化请重新选择")
                 if repair_info:
                     expected = sorted((str(f["source_id"]), f["source_name"], f["source_size"])
                                       for f in repair_info["files"])
@@ -1123,7 +1159,9 @@ class Pipeline:
         # A manually confirmed repair only allows already-verified-missing
         # cloud file IDs. The normal immutable DONE ledger must not veto those
         # exact files; the separate live-ID check runs immediately before copy.
-        if ctx.ns("task").get("repair"):
+        if ctx.ns("task").get("repair") or ctx.ns("task").get("force_single_copy"):
+            # Forced single-file jobs already validate the exact immutable
+            # source ID against the prepared manifest and preserve content claims.
             return True
         dedup_cid = ns.get("dedup_cid") or ctx.save_dir_cid
         reason = None

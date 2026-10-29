@@ -118,6 +118,10 @@ def router(service) -> APIRouter:
     async def reopen_duplicate(task_id: str):
         return service.reopen_duplicate(task_id)
 
+    @api.post("/api/tasks/{task_id}/force-reopen")
+    async def force_reopen(task_id: str):
+        return service.force_reopen_duplicate(task_id)
+
     @api.post("/api/tasks/{task_id}/approve")
     async def approve(task_id: str, payload: ActionPayload | None = None):
         await service.approve(

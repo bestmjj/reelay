@@ -570,6 +570,10 @@ class Organizer(_MediaLibrary):
         organize.setdefault("conflicts", [])  # 每处冲突怎么处理的（见 _record_conflict），媒体库据此排除被替换的文件
         # 人工在冲突时选的处理（删除转存文件 / 覆盖保存）优先于配置的策略，整理成功后清除
         strategy = organize.get("resolve") or runtime.get("plugins.organizer.conflict", "manual")
+        if ctx.ns("task").get("force_single_copy"):
+            # Manual force means COPY despite a stale ledger, never delete or
+            # overwrite cloud data. Coexisting editions get a safe suffix.
+            strategy = "suffix"
         no_delete = runtime.get("plugins.organizer.no_delete", True)
         if no_delete and strategy in ("skip", "upgrade", "replace"):
             # Old configurations may still request destructive strategies.

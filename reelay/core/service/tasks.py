@@ -112,6 +112,18 @@ class TaskOpsMixin(ServiceBase):
             if ctx.raw.extra.get("manual_unlabeled") and not (
                     save_dir_alias or existing_folder_id or ctx.ns("library").get("pinned")):
                 raise ConflictError("只有分享链接的手动任务必须明确选择目标保存目录，避免误存到默认路径")
+        forced = ctx.ns("task").get("force_single_copy") or {}
+        if forced:
+            selected = ctx.ns("share_selection")
+            if (ctx.source_rule.get("storage") != "aliyun"
+                    or not selected.get("file_id")
+                    or selected.get("share_code") != ctx.parsed.share_code
+                    or selected.get("provider") != "aliyun"
+                    or [list(pair) for pair in ctx.episode_pairs()]
+                    != [[forced.get("season"), forced.get("episode")]]):
+                raise ConflictError("强制转存仅支持已核对的单集；请先选择精确源文件")
+            if not existing_folder_id or destination_mode != "exact":
+                raise ConflictError("强制转存必须明确选择阿里云盘最终剧集文件夹，保存方式为直接存入")
         if existing_folder_id and save_dir_alias:
             raise ConflictError("按已有剧集目录保存与选择分类目录只能二选一")
         if bool(existing_folder_id) != bool(existing_drive_id):
@@ -279,6 +291,34 @@ class TaskOpsMixin(ServiceBase):
         self._update(ctx, expected=previous)
         return self.get_task(task_id)
 
+    def force_reopen_duplicate(self, task_id: str) -> dict[str, Any]:
+        """Explicit manual override of a stale SxxExx ledger, NOT a global dedup switch.
+
+        Requires an exact source file and an existing destination before approval.
+        It does not remove historical DONE receipts or delete cloud files.
+        """
+        ctx = self._require_context(task_id)
+        if "force_reopen_duplicate" not in self.task_actions(ctx):
+            raise ConflictError("只能对未发生转存的阿里云盘单集重复任务人工强制转存")
+        season, episode = ctx.episode_pairs()[0]
+        ctx.ns("task")["force_single_copy"] = {
+            "season": season, "episode": episode,
+            "share_code": ctx.parsed.share_code,
+        }
+        ctx.ns("task")["generation"] = ctx.ns("task").get("generation", 0) + 1
+        ctx.ns("task")["user_reopened_duplicate"] = True
+        ctx.ns("task").pop("skip", None)
+        ctx.ns("share_selection").clear()
+        ctx.ns("share_selection")["only_episodes"] = [episode]
+        ctx.ns("library").pop("direct_existing", None)
+        ctx.state, ctx.decision = TaskState.PENDING_APPROVAL, Decision.ASK
+        ctx.source_rule["approval_mode"] = "manual"
+        ctx.source_rule["episodes_from"] = "message"
+        ctx.log(f"人工选择强制重新转存 S{season:02d}E{episode:03d}："
+                "旧入库记录保留；必须选择精确分享源文件及最终目标文件夹，禁止自动覆盖或删除")
+        self._update(ctx, expected=TaskState.SKIPPED)
+        return self.get_task(task_id)
+
     def set_episode_selection(self, task_id: str, episodes: list[int]) -> dict[str, Any]:
         """Per-task subset of episodes, with mandatory existing-content dedup.
 
@@ -287,6 +327,8 @@ class TaskOpsMixin(ServiceBase):
         """
         ctx = self._require_context(task_id)
         storage = ctx.ns("storage")
+        if ctx.ns("task").get("force_single_copy"):
+            raise ConflictError("强制转存已锁定唯一集数；如需修改，请取消本次强制转存并重新提交")
         if ctx.state not in (TaskState.PENDING_APPROVAL, TaskState.FAILED):
             raise ConflictError("只能在待确认或尚未转存的失败任务中指定补集")
         if storage.get("manifest") or storage.get("landed") or storage.get("phase") == "receiving":
@@ -327,6 +369,10 @@ class TaskOpsMixin(ServiceBase):
                 and ctx.parsed and ctx.parsed.media_type in ("tv", "anime")
                 and ctx.parsed.share_code and not storage.get("manifest") and not storage.get("landed")):
             out.append("reopen_duplicate")
+            if (len(ctx.episode_pairs()) == 1
+                    and (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")) == "aliyun"
+                    and (ctx.parsed.raw_fields or {}).get("share_provider") == "aliyun"):
+                out.append("force_reopen_duplicate")
         if state == TaskState.PENDING_APPROVAL:
             out += ["approve", "reject"]
             if subscriptions.subscribable(ctx) and not subscriptions.subscribed(self.store.subscriptions(), ctx):
@@ -339,6 +385,7 @@ class TaskOpsMixin(ServiceBase):
         if state == TaskState.FAILED:
             out.append("retry")
         if (state in (TaskState.PENDING_APPROVAL, TaskState.FAILED)
+                and not ctx.ns("task").get("force_single_copy")
                 and not storage.get("manifest") and not storage.get("landed")
                 and ctx.parsed and ctx.parsed.title and ctx.parsed.media_type in ("tv", "anime")):
             out.append("select_episodes")
@@ -437,6 +484,8 @@ class TaskOpsMixin(ServiceBase):
         immutable folder ID from a freshly enumerated share listing.
         """
         ctx, provider = self._selectable_share_task(task_id)
+        if ctx.ns("task").get("force_single_copy"):
+            raise ConflictError("强制转存必须选择精确的单集源文件，不能只选择版本文件夹")
         if not folder_id or len(folder_id) > 128:
             raise ValueError("文件夹 ID 无效")
         preview = self.share_folders(task_id)
@@ -691,6 +740,13 @@ class TaskOpsMixin(ServiceBase):
         values = dict(before)
         values.update(patch)
         ctx.parsed = ParsedResource(**validate_resource(values))
+        forced = ctx.ns("task").get("force_single_copy") or {}
+        if forced and (ctx.parsed.share_code != forced["share_code"]
+                       or list(ctx.episode_pairs()) != [(forced["season"], forced["episode"])]
+                       or any(before.get(key) != getattr(ctx.parsed, key)
+                              for key in ("title", "media_type", "year", "season", "episodes"))):
+            ctx.ns("task").pop("force_single_copy", None)
+            ctx.log("修改作品身份或季集后已取消此前的强制转存授权")
         if (ctx.ns("share_selection").get("only_episodes")
                 and any(before.get(key) != getattr(ctx.parsed, key)
                         for key in ("title", "year", "media_type", "season", "episodes"))):
