@@ -102,9 +102,14 @@ class TaskOpsMixin(ServiceBase):
             if not p or not p.title or p.media_type not in ("anime", "tv", "movie"):
                 raise ConflictError("人工提交的分享请先填写真实片名、类型，保存后再确认转存")
             if p.media_type in ("anime", "tv"):
-                if len(ctx.episode_pairs()) != 1 and not ctx.ns("task").get("force_missing_range"):
+                is_bulk_recovery = bool(ctx.ns("task").get("force_missing_range"))
+                if len(ctx.episode_pairs()) != 1 and not is_bulk_recovery:
                     raise ConflictError("人工单集转存必须明确唯一季集号，禁止盲目整季复制")
-                if ctx.source_rule.get("episodes_from") != "message":
+                # Original manual-import rule applies to a single exact episode.
+                # Bulk recovery validates its immutable season/range and chosen
+                # source folder below, even if a prior "保存修改" reset the
+                # legacy episodes_from rule to "share".
+                if not is_bulk_recovery and ctx.source_rule.get("episodes_from") != "message":
                     raise ConflictError("已修正的单集范围未绑定，请先保存识别结果")
                 if not (ctx.ns("share_selection").get("file_id")
                         or ctx.ns("share_selection").get("folder_id")):
@@ -127,6 +132,9 @@ class TaskOpsMixin(ServiceBase):
                 raise ConflictError("批量补集需先选择同一季明确集号，并确认唯一的分享版本文件夹")
             if not existing_folder_id or destination_mode != "exact":
                 raise ConflictError("批量补集必须选择阿里云盘最终 Season 文件夹，保存方式为直接存入")
+            # Persist the reviewed subset as the source scope. A no-op parsed
+            # save must never turn this authorized 1-15 batch into whole-share.
+            ctx.source_rule["episodes_from"] = "message"
         forced = ctx.ns("task").get("force_single_copy") or {}
         if forced:
             selected = ctx.ns("share_selection")
@@ -879,7 +887,13 @@ class TaskOpsMixin(ServiceBase):
         # selector to that one episode, not the original whole-share scope.
         # This is a per-task source rule, never a persistent bot setting.
         if ctx.raw.extra.get("manual_import"):
-            if ctx.parsed.media_type in ("tv", "anime") and len(ctx.episode_pairs()) == 1:
+            if ctx.ns("task").get("force_missing_range"):
+                # A bulk recovery approved by a human is always restricted
+                # to its already-bound episode subset. Saving title/reason
+                # again must not silently revert the source scope to "share".
+                ctx.source_rule["episodes_from"] = "message"
+                ctx.log("人工批量补集仍锁定原已确认集数；不扩大为整个分享")
+            elif ctx.parsed.media_type in ("tv", "anime") and len(ctx.episode_pairs()) == 1:
                 ctx.source_rule["episodes_from"] = "message"
                 ctx.log(f"人工确认单集 E{ctx.parsed.episodes[0]:03d}：仅选择该集的源文件")
             else:

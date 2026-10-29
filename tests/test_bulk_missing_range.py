@@ -224,6 +224,69 @@ class BatchMissingApiTests(WebCase):
         self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state,
                          TaskState.FAILED)
 
+    def test_manual_import_saved_metadata_keeps_bulk_episode_scope(self):
+        """Regression: clicking Save changes episodes_from to share, then approve 409."""
+        origin = self.app.state.store.get_task(self.ctx.task_id)
+        origin.raw.extra.update({"manual_import": True, "manual_review": True,
+                                 "manual_unlabeled": True})
+        self.app.state.store.save_task(origin)
+        chosen = self.launch(list(range(1, 14)))
+        self.assertEqual(chosen.status_code, 200, chosen.text)
+        selected = self.client.post(self.url + "/share-folder", json={
+            "folder_id": "dovi-folder", "remember": False,
+        })
+        self.assertEqual(selected.status_code, 200, selected.text)
+
+        # Reproduce an already-saved draft whose manual_import legacy
+        # rebinding had set "share" after the user saved recognition.
+        draft = self.app.state.store.get_task(self.ctx.task_id)
+        draft.source_rule["episodes_from"] = "share"
+        self.app.state.store.save_task(draft)
+        self.assertEqual(draft.ns("task")["force_missing_range"]["episodes"], list(range(1, 14)))
+        payload = {"values": {"title": "狂王", "media_type": "anime",
+                              "year": 2026, "season": 2,
+                              "episodes": list(range(1, 14))}}
+        with patch.object(self.app.state.pipeline, "refresh_task", return_value=False):
+            saved = self.client.patch(self.url + "/parsed", json=payload)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        after_save = self.app.state.store.get_task(self.ctx.task_id)
+        self.assertEqual(after_save.source_rule["episodes_from"], "message")
+        self.assertEqual(after_save.ns("task")["force_missing_range"]["episodes"],
+                         list(range(1, 14)))
+        self.assertEqual(after_save.ns("share_selection")["folder_id"], "dovi-folder")
+        approved = self.client.post(self.url + "/approve", json={
+            "existing_folder_id": "season-folder",
+            "existing_drive_id": "resource-drive",
+            "destination_mode": "exact",
+        })
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state,
+                         TaskState.QUEUED)
+
+    def test_manual_import_legacy_share_scope_still_approves_verified_bulk(self):
+        """Previously saved review cards must work without another Save click."""
+        origin = self.app.state.store.get_task(self.ctx.task_id)
+        origin.raw.extra.update({"manual_import": True, "manual_review": True,
+                                 "manual_unlabeled": True})
+        self.app.state.store.save_task(origin)
+        self.assertEqual(self.launch().status_code, 200)
+        selected = self.client.post(self.url + "/share-folder", json={
+            "folder_id": "dovi-folder", "remember": False,
+        })
+        self.assertEqual(selected.status_code, 200, selected.text)
+        draft = self.app.state.store.get_task(self.ctx.task_id)
+        draft.source_rule["episodes_from"] = "share"
+        self.app.state.store.save_task(draft)
+        approved = self.client.post(self.url + "/approve", json={
+            "existing_folder_id": "season-folder",
+            "existing_drive_id": "resource-drive",
+            "destination_mode": "exact",
+        })
+        self.assertEqual(approved.status_code, 200, approved.text)
+        queued = self.app.state.store.get_task(self.ctx.task_id)
+        self.assertEqual(queued.state, TaskState.QUEUED)
+        self.assertEqual(queued.source_rule["episodes_from"], "message")
+
     def test_done_episode14_creates_separate_missing_range_draft(self):
         done = self.app.state.store.get_task(self.ctx.task_id)
         done.state, done.decision = TaskState.DONE, Decision.SAVE
