@@ -32,8 +32,8 @@ def _original_rows(ctx: PipelineContext) -> list[dict[str, Any]]:
     if (ctx.meta.get("organize") or {}).get("conflicts"):
         raise ValueError("旧任务存在整理冲突/覆盖记录，需先人工核对原文件")
     files = manifest.get("files") or []
-    if not files or not plan or len(files) != len(plan) or len(plan) > 100:
-        raise ValueError("缺少逐文件的原转存清单或文件过多，无法安全自动补转")
+    if not files or not plan or len(files) != len(plan) or len(plan) > 1000:
+        raise ValueError("缺少逐文件的原转存清单，或单任务文件超过 1000 个")
     by_name = {str(f.get("name") or ""): f for f in files}
     if len(by_name) != len(files):
         raise ValueError("旧转存清单存在重名文件，无法关联原文件 ID")
@@ -115,19 +115,28 @@ def check_saved_files(ctx: PipelineContext, storage, completed_repairs=()) -> di
     present, missing, uncertain = [], [], []
     for row in rows:
         expected_parent = parent_of(row["target_dir"])
+        if expected_parent not in listed:
+            listed[expected_parent] = list(library.iterdir(expected_parent))
+        directory_files = listed[expected_parent]
         current_ids = [row["old_id"], *children.get(
             (row["target_dir"], row["target_name"]), [])]
         exists = False
         changed = False
-        for file_id in set(current_ids):
+        for file_id in dict.fromkeys(current_ids):
             if not file_id:
                 continue
-            try:
-                found = library.get_attr(file_id)
-            except Exception as exc:
-                if _not_found(exc):
-                    continue
-                raise ValueError("无法核验原云盘文件 ID，禁止据此判断丢失") from exc
+            # A complete paginated folder listing verifies all surviving
+            # files at once. Only IDs absent from that directory need the
+            # extra per-file lookup to distinguish "moved" from "deleted".
+            found = next((item for item in directory_files
+                          if str(item.get("id")) == file_id), None)
+            if found is None:
+                try:
+                    found = library.get_attr(file_id)
+                except Exception as exc:
+                    if _not_found(exc):
+                        continue
+                    raise ValueError("无法核验原云盘文件 ID，禁止据此判断丢失") from exc
             if found.get("is_dir") or found.get("size") != row["size"]:
                 uncertain.append({**row, "reason": "原文件 ID 指向的类型或大小发生变化"})
                 changed = True
@@ -141,9 +150,7 @@ def check_saved_files(ctx: PipelineContext, storage, completed_repairs=()) -> di
             break
         if exists or changed:
             continue
-        if expected_parent not in listed:
-            listed[expected_parent] = list(library.iterdir(expected_parent))
-        collisions = [item for item in listed[expected_parent]
+        collisions = [item for item in directory_files
                       if not item.get("is_dir") and item.get("name") == row["target_name"]]
         if collisions:
             if len(collisions) == 1 and collisions[0].get("size") == row["size"]:
