@@ -167,6 +167,10 @@ class TaskOpsMixin(ServiceBase):
                 ctx, storage, [child for child in children if child is not None])
         except (ValueError, RuntimeError) as exc:
             raise ConflictError(str(exc)) from exc
+        except Exception as exc:  # Aliyun API/network errors are not evidence of absence
+            log.warning("任务 %s 云盘实时补存核验失败（%s），未修改任务",
+                        ctx.task_id, type(exc).__name__)
+            raise ConflictError("无法完成云盘实时核验（网络或接口错误）；未执行转存，请稍后重试") from exc
 
     def repair_missing(self, task_id: str, missing_ids: list[str]) -> dict[str, Any]:
         """Queue *only verified missing* files as a new task, never replay DONE.
