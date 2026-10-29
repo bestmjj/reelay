@@ -52,6 +52,7 @@ export interface IDashboard {
   connections: Record<string, IConnection>;
   runtime: Record<string, IRuntimeHealth>;
   deliveries: Record<string, number>;
+  failed_deliveries?: Array<Pick<IDelivery, 'id' | 'kind' | 'event' | 'target' | 'attempts' | 'error'> & { updated_at: number }>;
   /** 进行中的系统告警（如 115 凭证失效暂停转存、消息源断开）。 */
   alerts?: IAlert[];
   /** 最近 24 小时：新收消息数与入库数。 */
@@ -64,7 +65,8 @@ export interface IDashboard {
  *  dismiss 是忽略失败或待人工的任务，subscribe 是订阅这部剧这一季。 */
 export type TaskActionName =
   | 'approve' | 'reject' | 'retry' | 'reparse' | 'correct' | 'reorganize' | 'resolve_conflict'
-  | 'reconcile' | 'accept_partial' | 'abandon' | 'dismiss' | 'subscribe';
+  | 'reconcile' | 'accept_partial' | 'abandon' | 'dismiss' | 'subscribe' | 'choose_share_folder'
+  | 'quarantine_wrong_source' | 'resolve_quarantine' | 'reopen_duplicate' | 'force_reopen_duplicate' | 'force_missing_range' | 'select_episodes' | 'repair_missing';
 
 export interface IAlert {
   key: string;
@@ -100,6 +102,10 @@ export interface ITaskSummary {
   msg_id: string | null;
   title: string | null;
   error: string | null;
+  /** A deduplicated task did not result in another cloud copy. */
+  skip_kind?: 'duplicate' | 'rule' | 'user' | null;
+  skip_reason?: string | null;
+  wrong_source_quarantined?: boolean;
   retries: number;
   created_at: number;
   updated_at: number;
@@ -236,8 +242,39 @@ export interface ITaskContext {
   trail: string[];
 }
 
+export interface ISourceAuditFile {
+  file_id: string;
+  source_name: string;
+  source_path: string;
+  size: number | null;
+  share_folder_id: string | null;
+  season: number | null;
+  episode: number | null;
+  filename_episode: number | null;
+  issue: string | null;
+}
+export interface IWrongCopyQuarantine {
+  active: boolean;
+  reason: string;
+  source_name: string;
+  source_path: string | null;
+  source_size: number | null;
+  pairs: number[][];
+  created_at: number;
+  resolved_at: number | null;
+}
+export interface ISourceAudit {
+  available: boolean;
+  suspect: boolean;
+  entries: ISourceAuditFile[];
+  content_verified: false;
+  note: string;
+  quarantine: IWrongCopyQuarantine | null;
+}
+
 export interface ITaskDetail extends ITaskSummary {
   context: ITaskContext;
+  source_audit?: ISourceAudit;
   auto_dir?: string | null;
   auto_path?: string | null;
   /** 失败或待人工任务的原因与建议操作。 */

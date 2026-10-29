@@ -39,8 +39,8 @@ const fetchLists = (): Promise<Lists> => Promise.all([
   inboxApi.list('pending_approval', PENDING_ROWS), taskApi.list({ state: 'done', limit: 8 }),
 ]).then(([pending, done]) => ({ pending, recent: done.items }));
 
-function HealthRow({ label, status, detail }: { label: string; status: string; detail?: string }) {
-  const meta = connectionMeta(status);
+function HealthRow({ label, status, detail, component }: { label: string; status: string; detail?: string; component?: string }) {
+  const meta = connectionMeta(status, component);
   return (
     <div className="flex items-center justify-between gap-3 py-2.5 text-sm first:pt-0 last:pb-0">
       <span className="min-w-0 truncate text-foreground/90">{label}</span>
@@ -115,11 +115,15 @@ export default function DashboardPage() {
     setRetrying(true);
     try {
       const { items } = await dashboardApi.failedDeliveries();
+      if (items.some((item) => item.error === 'UserIsBotError')
+        && !window.confirm('部分通知因 Telegram 不允许 Bot 给 Bot 发消息而失败。\n请先确认「设置 → Telegram」中的 owner_id 是你自己的用户数字 ID，并检查「识别后转发」没有指向另一个 Bot。\n已经修复目标后，再点击确定重发；否则会再次失败。')) {
+        return;
+      }
       let accepted = 0;
       for (const item of items) {
         try { await dashboardApi.retryDelivery(item.id); accepted += 1; } catch { /* 已被其他管理端重试 */ }
       }
-      toast.success(`已重新发送 ${accepted} 条通知`);
+      toast.success(`已将 ${accepted} 条失败通知重新加入发送队列`);
       void refreshDashboard();
     } catch (err) {
       toast.error(errorMessage(err, '重试失败'));
@@ -242,7 +246,7 @@ export default function DashboardPage() {
                   <HealthRow label="后台 Worker" status={workerStatus}
                     detail={worker?.updated_at ? `最近心跳 ${fullTime(worker.updated_at)}` : undefined} />
                   {Object.entries(d.connections).map(([key, conn]) => (
-                    <HealthRow key={key} label={conn.label} status={conn.status}
+                    <HealthRow key={key} label={conn.label} status={conn.status} component={key}
                       detail={conn.error ? `最近错误：${conn.error}` : conn.observed_at ? `更新于 ${fullTime(conn.observed_at)}` : undefined} />
                   ))}
                 </div>
@@ -274,7 +278,31 @@ export default function DashboardPage() {
                 ))}
               </div>
             )}
-            {failedDeliveries > 0 ? <ToneBadge tone="danger" className="mt-3">有通知发送失败，可能是控制 Bot 不可用</ToneBadge> : null}
+            {failedDeliveries > 0 ? (
+              <div className="mt-3 space-y-2 text-xs" role="status">
+                <p className="text-destructive">存在历史发送失败记录；这不等于当前控制 Bot 已断开。</p>
+                {(d?.failed_deliveries ?? []).some((item) => item.error === 'UserIsBotError') ? (
+                  <p className="text-destructive">
+                    Telegram 拒绝 Bot 向另一个 Bot 发送消息：普通通知请检查「设置 → Telegram」的 owner_id
+                    是否为你的个人用户数字 ID；如果失败事件是 identified，请检查「识别后转发」的目标。
+                    修正接收目标后再点「重发失败」。
+                  </p>
+                ) : null}
+                {(d?.failed_deliveries ?? []).map((item) => (
+                  <div key={item.id} className="rounded-md border border-border/80 bg-background/60 px-2.5 py-2">
+                    <div className="flex flex-wrap justify-between gap-1">
+                      <span className="font-medium">#{item.id} · {item.target} · {item.event}</span>
+                      <span className="text-muted-foreground" title={fullTime(item.updated_at)}>
+                        {relativeTime(item.updated_at)} · 已尝试 {item.attempts} 次
+                      </span>
+                    </div>
+                    <p className="mt-1 text-muted-foreground">
+                      错误类型：{item.error || '未知'}；可在「工具 → 运行日志」按类型查找详细记录。
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </Panel>
         </div>
       </div>

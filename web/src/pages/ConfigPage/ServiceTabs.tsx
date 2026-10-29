@@ -157,7 +157,7 @@ function ModelFields({ llm, savedUrl, setField, keySet, apiKey, moved }: {
               <CircleAlert className="mt-0.5 size-3.5 shrink-0" /><span className="break-all">{result.error}</span>
             </p>
           )
-        ) : <p className="text-xs leading-5 text-muted-foreground">用当前填写的地址、模型与推理强度发一条很短的消息，不必先保存。</p>}
+        ) : <p className="text-xs leading-5 text-muted-foreground">仅测试简短对话的连通性，不验证影视识别所需的 JSON Schema 和字段校验；成功不代表自动识别一定成功。</p>}
       </div>
     </>
   );

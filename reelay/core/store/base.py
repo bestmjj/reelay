@@ -34,6 +34,7 @@ from ..contracts import Decision, ParsedResource, PipelineContext, RawMessage, T
 DEDUP_MESSAGE = "message"   # 消息级：这条 TG 消息处理过没（防重放/重启重复）
 DEDUP_SHARE = "share"       # 资源级：这个分享链接转存过没（防重复转存）
 DEDUP_EPISODE = "episode"   # 内容级：这一集入库过没（追更关键）
+DEDUP_VARIETY = "variety_part"  # 综艺同一期的上/下/加更/纯享分开确认
 
 
 _SCHEMA = """
@@ -136,6 +137,8 @@ CREATE TABLE IF NOT EXISTS source_fetches (
     id INTEGER PRIMARY KEY AUTOINCREMENT, -- 管理台请主进程读取来源最近的消息（监听会话只在主进程里）
     bot TEXT NOT NULL,
     max_count INTEGER NOT NULL,
+    search_query TEXT,                     -- optional read-only Telegram title query
+    message_id INTEGER,                     -- optional exact authorized message ID
     status TEXT NOT NULL DEFAULT 'pending', -- pending | running | done | failed
     result TEXT,                         -- 消息列表（JSON）
     error TEXT,
@@ -155,6 +158,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     total INTEGER,                       -- 这一季的总集数（缺集巡检用），不知道为 NULL
     tmdbid INTEGER,
     auto INTEGER NOT NULL DEFAULT 1,     -- 1：新集自动转存；0：只巡检缺集
+    save_to TEXT,                        -- NULL: 跟随来源与自动分类；否则目录别名
+    start_episode INTEGER,               -- NULL: 保留既有逐集规则；非空时只自动放行此集或之后
     finished TEXT,                       -- 一季播完且全部入库后自动结束：{"date", "episodes"}；在追为 NULL
     created_at REAL NOT NULL
 );
@@ -203,7 +208,36 @@ def _episode_work_keys(conn: sqlite3.Connection) -> None:
             conn.execute("INSERT OR IGNORE INTO resource_claims VALUES (?,?,?)", (new, task_id, created))
 
 
-MIGRATIONS = (lambda conn: None, _episode_work_keys)
+def _subscription_destinations(conn: sqlite3.Connection) -> None:
+    """v3: optional per-series destination. Idempotent for freshly-created databases."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscriptions)")}
+    if "save_to" not in columns:
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN save_to TEXT")
+
+
+def _source_fetch_search(conn: sqlite3.Connection) -> None:
+    """v4: allow the Web process to request read-only title search via Telegram listener."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(source_fetches)")}
+    if "search_query" not in columns:
+        conn.execute("ALTER TABLE source_fetches ADD COLUMN search_query TEXT")
+
+
+def _subscription_episode_floor(conn: sqlite3.Connection) -> None:
+    """v5: optional per-season auto-transfer lower bound, no changes to old rows."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscriptions)")}
+    if "start_episode" not in columns:
+        conn.execute("ALTER TABLE subscriptions ADD COLUMN start_episode INTEGER")
+
+
+def _source_fetch_exact_id(conn: sqlite3.Connection) -> None:
+    """v6: request one exact historical Telegram message on the authorized listener."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(source_fetches)")}
+    if "message_id" not in columns:
+        conn.execute("ALTER TABLE source_fetches ADD COLUMN message_id INTEGER")
+
+
+MIGRATIONS = (lambda conn: None, _episode_work_keys, _subscription_destinations,
+              _source_fetch_search, _subscription_episode_floor, _source_fetch_exact_id)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

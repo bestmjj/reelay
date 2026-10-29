@@ -4,7 +4,9 @@ import type { ConflictChoice } from '@/lib/conflict';
 import type { TaskActionName } from '@/lib/types';
 
 /** 走 POST /api/tasks/<id>/<endpoint> 的操作；correct（修正识别）与 subscribe（订阅）各有自己的接口。 */
-export type PostedAction = Exclude<TaskActionName, 'correct' | 'subscribe'>;
+export type PostedAction = Exclude<TaskActionName,
+  'correct' | 'subscribe' | 'choose_share_folder' | 'quarantine_wrong_source' | 'resolve_quarantine'
+  | 'reopen_duplicate' | 'force_reopen_duplicate' | 'force_missing_range' | 'select_episodes' | 'repair_missing'>;
 
 export const ACTION_ENDPOINT: Record<PostedAction, TaskEndpoint> = {
   approve: 'approve', reject: 'reject', dismiss: 'reject', retry: 'retry', reparse: 'reparse',
@@ -14,7 +16,7 @@ export const ACTION_ENDPOINT: Record<PostedAction, TaskEndpoint> = {
 
 /** 操作成功后的提示。 */
 export const ACTION_DONE: Record<PostedAction, string> = {
-  approve: '已确认，开始转存', reject: '已忽略这条资源', dismiss: '已忽略这个任务', retry: '已重新排队',
+  approve: '已加入转存队列；后台核验后才会转存或安全去重', reject: '已忽略这条资源', dismiss: '已忽略这个任务', retry: '已重新排队',
   reparse: '已回到识别队列', reorganize: '已回到整理队列', resolve_conflict: '已回到整理队列',
   reconcile: '已排队核验转存', accept_partial: '已排队：按已到的文件继续整理', abandon: '已排队：放弃并删除暂存目录',
 };

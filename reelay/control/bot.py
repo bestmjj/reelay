@@ -438,16 +438,21 @@ class ControlBot:
         """供 NotifyProvider 调用：把消息发给 owner（或指定 chat）。html=True 时按 HTML 解析（模板见 core/messages.py）；
         按钮见 _buttons。photo 是图片地址（如 TMDB 海报）：以图片发送、正文作为说明；说明超出 Telegram 的
         长度限制或图片发送失败时退回纯文字。"""
-        if not self._client:
-            log.info("[控制bot未启用] %s", (messages.plain(text) if html else text).replace("\n", " / "))
-            return
+        if not self._client or not self._client.is_connected():
+            # Never acknowledge an outbox delivery while the configured sender
+            # is unavailable: leave it pending for the durable retry worker.
+            raise ConnectionError("控制 Bot 当前未连接，通知保留待重试")
         target, mode = chat or int(self._owner), "html" if html else ()
         if photo and len(messages.plain(text) if html else text) <= CAPTION_LIMIT:
             try:
                 await self._client.send_file(target, photo, caption=text, buttons=self._buttons(buttons), parse_mode=mode)
                 return
-            except Exception as exc:  # noqa: BLE001 - 海报只是锦上添花，发不出就发文字
-                log.warning("海报发送失败，改发文字：%s", exc)
+            except Exception as exc:  # noqa: BLE001 - image fallback is only for image-specific failures
+                if type(exc).__name__ == "UserIsBotError":
+                    # The peer itself rejects bot messages; a text fallback
+                    # cannot work and would generate a second bad request.
+                    raise
+                log.warning("海报发送失败，改发文字：%s", type(exc).__name__)
         await self._client.send_message(target, text, buttons=self._buttons(buttons), parse_mode=mode)
 
     async def run_forever(self) -> None:

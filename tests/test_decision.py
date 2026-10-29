@@ -20,7 +20,7 @@ class TestDecision(unittest.TestCase):
         ctx = PipelineContext(raw=RawMessage(source="@b", msg_id="1", text=text,
                                              urls=["https://115.com/s/x"]))
         ctx.parsed = ParsedResource(is_media=is_media, is_ad=is_ad, confidence=conf,
-                                    share_code=share, title="T")
+                                    share_code=share, title="T", media_type="movie")
         ctx.source_rule = {"approval_mode": mode, "filters": filters or {}}
         return ctx
 

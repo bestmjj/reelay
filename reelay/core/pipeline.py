@@ -18,6 +18,7 @@ import inspect
 import json
 import logging
 import math
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,8 @@ from .registry import Registry
 from .store import Store, _load_ctx
 from .config import config_revision, load_config, merge_config, normalize_config
 from .media import pairs_label, summarize_pairs
-from . import confidence, ignored, messages, runtime, works
+from .parse_rules import prefilter_reason
+from . import confidence, existing_media, ignored, messages, repair, runtime, subscriptions, works
 
 log = logging.getLogger("reelay.pipeline")
 
@@ -61,6 +63,10 @@ class Pipeline:
         # 启动补拉期间推迟日报（见 hold_daily）；消息源完成补拉后由主进程置为 True
         self.sources_ready = True
         self._daily_hold_until: float | None = None
+        # Aggregate bursty notification failures, but keep per-message errors
+        # in the durable Outbox for review/retry. Log each error class/event
+        # at most once per minute to avoid hundreds of identical warnings.
+        self._delivery_warning_at: dict[tuple[str, str, str], float] = {}
 
     def notify_targets(self) -> list[str]:
         return list(self.cfg.get("providers", {}).get("notify", ["console"]))
@@ -178,6 +184,11 @@ class Pipeline:
 
     def target_preview(self, ctx: PipelineContext) -> str:
         """不手动改目录时任务将存入的位置（含二级分类），供审批卡片与管理台展示。"""
+        existing = ctx.meta.get("library", {}).get("direct_existing") or {}
+        if existing.get("path"):
+            path = existing["path"]
+            return (path + "/（按片名和季整理）"
+                    if existing.get("mode") == "organized" else path)
         with self.scope(ctx):
             for hook in self.reg.hooks_for("before_save", self.task_config(ctx)):
                 if hasattr(hook, "preview"):
@@ -250,6 +261,7 @@ class Pipeline:
 
     async def dispatch_deliveries(self) -> int:
         rows = self.store.claim_deliveries()
+        errors: dict[tuple[str, str, str], int] = {}
 
         async def deliver(row: dict) -> None:
             try:
@@ -291,14 +303,36 @@ class Pipeline:
                     await asyncio.wait_for(callback, timeout=30)
             except Exception as exc:
                 category = type(exc).__name__
+                # Bots cannot send Telegram messages to another bot. Retrying
+                # the exact same target cannot help and can flood the worker.
+                # Preserve the delivery as FAILED for manual replay after the
+                # owner ID / forwarding destination is corrected.
+                terminal = category == "UserIsBotError"
                 seconds = getattr(exc, "seconds", None)
                 delay = min(seconds, 86400) if type(seconds) in (int, float) and math.isfinite(seconds) and seconds > 0 else None
-                self.store.finish_delivery(row["id"], error=category, retry_after=delay)
-                log.warning("旁路投递失败 %s/%s，独立退避重试：%s", row["kind"], row["target"], category)
+                self.store.finish_delivery(row["id"], error=category,
+                                           retry_after=delay, terminal=terminal)
+                key = (row["target"], row["event"], category)
+                errors[key] = errors.get(key, 0) + 1
             else:
                 self.store.finish_delivery(row["id"])
 
         await asyncio.gather(*(deliver(row) for row in rows))
+        now = time.monotonic()
+        for (target, event, category), count in errors.items():
+            key = (target, event, category)
+            if now - self._delivery_warning_at.get(key, -1e6) < 60:
+                continue
+            self._delivery_warning_at[key] = now
+            if category == "UserIsBotError":
+                hint = ("检查 Telegram owner_id 是否填成 Bot ID"
+                        if event != "identified" else "检查识别后转发 forward.target 是否指向另一个 Bot")
+                log.error("Telegram 拒绝通知 %s/%s：%s，本批 %d 条标记为失败且停止自动重试；%s。"
+                          "原通知保留，可修正目标后在管理台手动重发",
+                          target, event, category, count, hint)
+            else:
+                log.warning("旁路投递失败 %s/%s：%s（本批 %d 条，按退避策略重试）",
+                            target, event, category, count)
         return len(rows)
 
     # ------------------------------------------------------------------ #
@@ -307,6 +341,15 @@ class Pipeline:
     async def accept(self, ctx: PipelineContext) -> PipelineContext | None:
         """快速接收新消息并落为 RECEIVED；返回 None 表示消息级重复。"""
         ctx.source_rule = self.rule_for(ctx.raw.source)
+        if ctx.raw.extra.get("manual_import") is True:
+            # Direct pasted links can include multiple unrelated episodes,
+            # quality variants, or a stale wrong-copy receipt. Keep a real
+            # review step so the source file can be chosen BEFORE copying.
+            review = bool(ctx.raw.extra.get("manual_review"))
+            ctx.source_rule["approval_mode"] = "manual" if review else "auto"
+            ctx.log("用户手动提交资源：" +
+                    ("将先核对片名、集号及分享源文件，再人工确认" if review
+                     else "已读取配置频道消息；仍执行安全过滤、清单核验与去重"))
         self.stamp_config(ctx)
         await self.emit("on_message", ctx, persist=False)
         ctx.state = TaskState.RECEIVED
@@ -330,12 +373,22 @@ class Pipeline:
             return
         if not await self.run_hooks("before_parse", ctx):
             ctx.state = TaskState.SKIPPED
+            ctx.ns("task")["skip"] = {"kind": "rule", "reason": "消息被解析前规则拦截"}
+            ctx.log("规则拦截了消息，未进入转存队列")
             self.store.save_task(ctx)
             return
 
         parser_name = ctx.source_rule.get(
             "parser", self.cfg.get("defaults", {}).get("parser", "llm")
         )
+        # A manually submitted link without a verified work title cannot be
+        # classified by an LLM. Use deterministic share-link extraction and
+        # hold the task for human metadata; never guess from the URL.
+        manual_link_only = bool(ctx.raw.extra.get("manual_import")
+                                and ctx.raw.extra.get("manual_unlabeled"))
+        if manual_link_only:
+            parser_name = "regex"
+            ctx.log("手动提交的分享缺少可靠片名：仅提取分享链接，不调用 AI 猜片名")
         parser = self.reg.get_provider("parser", parser_name)
         try:
             with self.scope(ctx):
@@ -349,6 +402,22 @@ class Pipeline:
             self.store.save_task(ctx, error=str(exc))
             return
 
+        if manual_link_only and ctx.parsed.share_code:
+            # The user deliberately requested a transfer, but the link does
+            # not prove the title, kind or episode. Even if an old cached AI
+            # answer labelled it non-media, this must become a *manual review*
+            # rather than a permanent SKIP. No remote copy is attempted.
+            p = ctx.parsed
+            p.is_media, p.is_ad, p.confidence = True, False, 0.0
+            p.title = p.media_type = p.year = p.season = None
+            p.episodes, p.genres, p.genre_ids, p.origin_country = [], [], [], []
+            p.resolution = p.size = None
+            p.release = {}
+            p.reason = "分享链接未包含可靠作品信息；请人工填写片名、类型、季集，并选择精确源视频"
+            ctx.ns("parse").update(incomplete=True, manual_link_only=True,
+                                    missing_fields=["title", "media_type"])
+            ctx.ns("tmdb").clear()
+            ctx.log("已保留网盘分享链接，不推测影视身份或集号；等待人工核对")
         ctx.state = TaskState.PARSED
         ctx.log(
             f"解析完成 is_media={ctx.parsed.is_media} is_ad={ctx.parsed.is_ad} "
@@ -358,15 +427,31 @@ class Pipeline:
 
         if not await self.run_hooks("after_parse", ctx):
             ctx.state = TaskState.SKIPPED
+            ctx.ns("task")["skip"] = {"kind": "rule", "reason": "解析后的规则检查不允许继续处理"}
+            ctx.log("解析后规则拦截了消息，未进入转存队列")
             self.store.save_task(ctx)
             return
 
         # 决策只看确定性信号算出的置信度；TMDB 等补全 Hook 已在上面跑完。
         confidence.apply(ctx)
+        # “更新至 E106” is a release announcement, not a request to copy E01-E106.
+        # Only a verified, active subscription can select the latest episode.
+        progress_scope = subscriptions.scope_latest_progress(ctx, self.store.subscriptions())
         blocked = ignored.match(self.store.ignored_works(), ctx.parsed, ctx.meta.get("tmdb", {}))
         if blocked:
             ctx.decision = Decision.SKIP
             ctx.log(f"你已设置不再接收《{blocked['title']}》，直接忽略")
+        elif manual_link_only and ctx.parsed.share_code:
+            # Metadata-dependent allow/min-resolution filters cannot decide
+            # without a title or kind. Preserve deterministic URL/keyword
+            # prefilters, but let the user enter the missing facts explicitly.
+            reason = prefilter_reason(ctx, ctx.parsed.share_code)
+            if reason:
+                ctx.decision = Decision.SKIP
+                ctx.log(f"手动分享被来源预过滤阻止：{reason}")
+            else:
+                ctx.decision = Decision.ASK
+                ctx.log("仅链接的手动分享：必须人工填写季集、精确选源和保存目录，不自动复制")
         else:
             decider = self.reg.get_provider("decision",
                                             ctx.source_rule.get("decision", self.cfg["defaults"]["decision"]))
@@ -374,6 +459,33 @@ class Pipeline:
                 ctx.decision = await decider.decide(ctx)
         if ctx.decision == Decision.SAVE and ctx.meta.get("parse", {}).get("fallback"):
             ctx.decision = Decision.ASK
+        if progress_scope == "below_floor" and ctx.decision == Decision.SAVE:
+            ctx.decision = Decision.ASK
+            ctx.log("这条更新早于订阅起始集号，不自动转存")
+        if ctx.raw.extra.get("manual_import") and ctx.parsed and (
+                ctx.raw.extra.get("manual_unlabeled") or not ctx.parsed.title):
+            # No AI output can establish a title from only a link plus a
+            # request to select a file. Ask for user-provided identity.
+            ctx.parsed.title = None
+            ctx.parsed.media_type = None
+            ctx.ns("tmdb").clear()
+            if ctx.decision != Decision.SKIP:
+                ctx.decision = Decision.ASK
+                ctx.log("手动分享只有链接或操作说明：需人工补齐真实片名、类型、季集后选择源文件")
+        if ctx.raw.extra.get("manual_import") and ctx.parsed and (
+                ctx.parsed.media_type in ("tv", "anime") or ctx.parsed.episodes):
+            # One-click historical saves must never copy an entire hidden
+            # season pack when the message identifies a single episode.
+            declared = ctx.episode_pairs()
+            if len(declared) == 1 and ctx.parsed.episodes:
+                ctx.source_rule["episodes_from"] = "message"
+                ctx.log("手动提交单集：分享清单只允许选择消息明确声明的这一集")
+            else:
+                ctx.decision = Decision.ASK
+                ctx.log("手动提交的剧集分享未能确认恰好一个季集，需人工核对，禁止盲目转存整季")
+        if ctx.raw.extra.get("manual_review") and ctx.decision != Decision.SKIP:
+            ctx.decision = Decision.ASK
+            ctx.log("人工提交的分享必须先确认来源文件；不会直接入队执行云盘复制")
         ctx.log(f"决策 = {ctx.decision.value}")
 
         if ctx.decision == Decision.SKIP:
@@ -382,6 +494,10 @@ class Pipeline:
                 if (ctx.parsed and ctx.parsed.is_ad)
                 else TaskState.SKIPPED
             )
+            if ctx.state == TaskState.SKIPPED:
+                reason = (f"该作品在不接收列表中：{blocked['title']}" if blocked
+                          else "来源决策规则判定无需转存（不是用户在审核时点击忽略）")
+                ctx.ns("task")["skip"] = {"kind": "rule", "reason": reason}
             await self.emit("on_rejected", ctx, persist=False)
             self.store.save_task(ctx)
             return
@@ -414,7 +530,14 @@ class Pipeline:
         ctx = self.store.get_task(task_id)
         if not ctx or ctx.state != TaskState.PENDING_APPROVAL:
             return False
-        return self.store.set_state(task_id, TaskState.SKIPPED, expected=TaskState.PENDING_APPROVAL)
+        ctx.ns("task")["skip"] = {"kind": "user", "reason": "用户明确点击了忽略"}
+        ctx.state = TaskState.SKIPPED
+        ctx.log("用户明确点击忽略，不会转存")
+        try:
+            self.store.update_task_context(ctx, expected=TaskState.PENDING_APPROVAL)
+        except ValueError:
+            return False
+        return True
 
     # ------------------------------------------------------------------ #
     # 阶段 3：转存 + 整理（由 worker 从队列取出后调用）
@@ -422,12 +545,82 @@ class Pipeline:
     def _resolve_directory(self, ctx: PipelineContext) -> None:
         alias = ctx.save_dir_alias or ctx.source_rule.get("save_to") \
             or self.cfg.get("defaults", {}).get("save_to", "默认")
-        if alias not in self.save_dirs:
-            raise ValueError(f"目标目录别名不存在：{alias}")
-        cid = str(self.save_dirs[alias])
-        if not cid.isdecimal():
-            raise ValueError(f"目标目录 CID 无效：{alias}")
+        # Use the immutable configuration captured when this task was received.
+        # A later alias edit must not silently redirect an already-queued transfer.
+        cfg = self.task_config(ctx)
+        save_dirs = cfg["save_dirs"]
+        provider = (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
+                    or cfg["defaults"]["storage"])
+        existing = ctx.meta.get("library", {}).get("direct_existing") or {}
+        if not existing:
+            # An explicitly picked task target is authoritative. Its cloud
+            # provider, folder and drive are verified below, without relying
+            # on an unrelated original category alias. Only automatic routing
+            # should require a matching saved alias in the task's config.
+            if alias not in save_dirs:
+                raise ValueError(f"任务接收时的目标目录别名不存在：{alias}")
+            configured = str(save_dirs[alias])
+            if configured.startswith("aliyun:"):
+                if provider != "aliyun":
+                    raise ValueError(f"目录「{alias}」属于阿里云盘，当前任务使用 {provider}，请更换保存目录")
+                cid = configured.removeprefix("aliyun:")
+            else:
+                if provider == "aliyun":
+                    raise ValueError(f"目录「{alias}」属于 115；请重新选择以 aliyun: 开头的阿里云盘目录")
+                cid = configured
+            if provider == "p115" and not cid.isdecimal():
+                raise ValueError(f"目录「{alias}」不是有效的 115 目录，请在设置中重新选择")
+            if provider == "aliyun" and not (cid.isascii() and cid.replace("_", "").replace("-", "").isalnum()):
+                raise ValueError(f"目录「{alias}」不是有效的阿里云盘目录 ID")
+        else:
+            cid = None  # replaced only by the verified chosen folder ID
+        if existing:
+            if provider != "aliyun" or existing.get("provider") != "aliyun":
+                raise ValueError("已有剧集目录仅允许用于阿里云盘任务")
+            mode = existing.get("mode", "existing")
+            if mode not in ("existing", "exact", "organized", "repair"):
+                raise ValueError("保存方式发生变化，需要重新确认目标目录")
+            if (not ctx.parsed or ctx.parsed.title != existing.get("title")
+                    or (existing.get("media_type") is not None
+                        and ctx.parsed.media_type != existing["media_type"])
+                    or (existing.get("pairs") is not None
+                        and [list(p) for p in ctx.episode_pairs()] != existing["pairs"])
+                    or (existing.get("share_code") is not None
+                        and ctx.parsed.share_code != existing["share_code"])
+                    or (mode == "existing" and
+                        (len(ctx.episode_pairs()) != 1
+                         or not ctx.ns("share_selection").get("file_id")))):
+                raise ValueError("作品、类型、季集或分享身份发生变化，不能沿用原来选定的目录")
+            storage = self.reg.get_provider("storage", "aliyun")
+            try:
+                if str(storage.client.drive_id) != existing.get("drive_id"):
+                    raise ValueError("阿里云盘资源库已变化")
+                attr = storage.library().get_attr(existing["id"])
+                path = storage.dir_path(existing["id"])
+                if (not attr.get("is_dir") or str(attr.get("id")) != existing["id"]
+                        or path != existing["path"]):
+                    raise ValueError("已有剧集目录被移动、更名或删除")
+            except Exception:
+                # A changed or unverifiable destination is not a transient
+                # safe-to-retry cloud write. Stop until the operator rechecks
+                # the real folder rather than retrying in the background.
+                ctx.ns("task")["no_auto_retry"] = True
+                raise ValueError("已有剧集目录无法再次核验，请检查资源库、路径后重新确认") from None
+            cid = existing["id"]
+            ctx.log(f"再次核验指定阿里云盘目标目录：{existing['path']}（{mode}）")
         ctx.save_dir_alias, ctx.save_dir_cid = alias, cid
+
+    def _skip_duplicate(self, ctx: PipelineContext, reason: str) -> None:
+        """No cloud write occurred: preserve *why* an approved task was skipped.
+
+        Do not present deduplication as a user rejection. Release preparatory
+        content claims, otherwise future updates on the same show can stall.
+        """
+        self.store.release_resource(ctx.task_id)
+        ctx.state = TaskState.SKIPPED
+        ctx.ns("task")["skip"] = {"kind": "duplicate", "reason": reason[:500]}
+        ctx.log("安全去重，未发送转存请求：" + reason[:500])
+        self.store.save_task(ctx)
 
     async def execute_save(self, ctx: PipelineContext) -> None:
         """转存和整理分别有持久化边界；未知写结果仅核验，绝不重发。"""
@@ -449,55 +642,289 @@ class Pipeline:
         provider_name = ns.get("provider") or ctx.source_rule.get("storage", self.cfg["defaults"]["storage"])
         storage = self.reg.get_provider("storage", provider_name)
         ns["provider"] = provider_name
+        repair_info = ctx.ns("task").get("repair") or {}
+        forced = ctx.ns("task").get("force_single_copy") or {}
+        forced_range = ctx.ns("task").get("force_missing_range") or {}
+        if forced_range:
+            selection = ctx.ns("share_selection")
+            target = ctx.ns("library").get("direct_existing") or {}
+            requested = forced_range.get("episodes") or []
+            # A prepared manifest may contain fewer files than the original
+            # request because E09 reappeared during the live cloud scan.
+            # After _adopt_manifest both parsed and source selection reflect
+            # the effective subset. Validate that subset on worker resume.
+            effective = (forced_range.get("effective_episodes") if ns.get("manifest")
+                         else requested)
+            if (provider_name != "aliyun" or not ctx.parsed
+                    or ctx.parsed.season != forced_range.get("season")
+                    or ctx.parsed.share_code != forced_range.get("share_code")
+                    or ctx.parsed.episodes != effective
+                    or not requested or len(requested) > 100
+                    or not effective or len(effective) > 100
+                    or selection.get("only_episodes") != effective
+                    or not selection.get("folder_id") or selection.get("file_id")
+                    or selection.get("provider") != "aliyun"
+                    or selection.get("share_code") != ctx.parsed.share_code
+                    or target.get("mode") != "exact"
+                    or target.get("provider") != "aliyun"):
+                await self._fail(ctx, "批量补集授权或版本/目标文件夹不完整，未发送复制",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
+        if forced:
+            selected = ctx.ns("share_selection")
+            destination = ctx.ns("library").get("direct_existing") or {}
+            if (provider_name != "aliyun"
+                    or not ctx.parsed or ctx.parsed.share_code != forced.get("share_code")
+                    or ctx.episode_pairs() != [(forced.get("season"), forced.get("episode"))]
+                    or selected.get("only_episodes") != [forced.get("episode")]
+                    or not selected.get("file_id")
+                    or selected.get("share_code") != ctx.parsed.share_code
+                    or selected.get("provider") != "aliyun"
+                    or type(selected.get("file_size")) is not int
+                    or selected["file_size"] <= 0
+                    or destination.get("provider") != "aliyun"
+                    or destination.get("mode") != "exact"):
+                await self._fail(ctx, "强制转存授权不完整：必须固定唯一集数、精确源文件及最终保存文件夹",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
+        if repair_info and (provider_name != "aliyun"
+                            or not repair_info.get("files")
+                            or not repair_info.get("source_task_id")):
+            await self._fail(ctx, "补转任务缺少可信的原始记录", retry_from=TaskState.QUEUED,
+                             auto_retry=False)
+            return
+        if ns.get("manifest") and hasattr(storage, "_assert_manifest_drive"):
+            # Explicitly reject an old backup-disk manifest before looking up
+            # saved shares or episodes; otherwise a prior dedup record could
+            # silently skip a resource-drive transfer during recovery.
+            try:
+                with self.scope(ctx):
+                    await asyncio.to_thread(storage._assert_manifest_drive, ns["manifest"])
+            except NeedsManual as exc:
+                await self._fail(ctx, f"目标网盘不匹配，禁止自动恢复：{exc}",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
         if ns.get("abandon") and ns.get("phase") == "receiving":
             await self._abandon(ctx, storage)
             return
         if not ns.get("manifest"):
+            # Old FAILED tasks keep the original parsed snapshot. Narrow again
+            # before claiming episode keys, so retry also obeys latest-only
+            # and cannot be blocked by 100 unrelated historical scan entries.
+            if ctx.decision == Decision.SAVE and not repair_info:
+                progress_scope = subscriptions.scope_latest_progress(ctx, self.store.subscriptions())
+                if progress_scope == "below_floor":
+                    await self._fail(ctx, "当前更新早于订阅起始集号，禁止自动补收历史合集",
+                                     retry_from=TaskState.QUEUED, auto_retry=False)
+                    return
+            if ctx.parsed.title:
+                held = self.store.blocked_episode_pairs(
+                    works.of(ctx.parsed, ctx.meta.get("tmdb")), provider_name)
+                ns["blocked_episodes"] = held
+                blocked = set(map(tuple, held)) & set(ctx.episode_pairs())
+                if blocked:
+                    episodes = "、".join(f"E{ep:03d}" for _, ep in sorted(blocked))
+                    await self._fail(
+                        ctx, f"{episodes} 的历史入库被人工标记为错片；请核验云盘原文件并解除隔离后再转存",
+                        retry_from=TaskState.QUEUED, auto_retry=False)
+                    return
+            if repair_info:
+                try:
+                    await self._recheck_repair(ctx, storage)
+                except NeedsManual as exc:
+                    await self._fail(ctx, f"原文件状态已变化，停止补转：{exc}",
+                                     retry_from=TaskState.QUEUED, auto_retry=False)
+                    return
             if not await self.run_hooks("before_save", ctx):
                 ctx.state = TaskState.SKIPPED
+                ctx.ns("task")["skip"] = {"kind": "rule", "reason": "转存前规则拒绝，尚未进行网盘复制"}
+                ctx.log("转存前规则拦截，未发送复制请求")
                 self.store.save_task(ctx)
                 return
             self._resolve_directory(ctx)
+            if forced_range:
+                try:
+                    with self.scope(ctx):
+                        inventory = await asyncio.to_thread(
+                            repair.scan_exact_season_episodes, storage, ctx.save_dir_cid,
+                            forced_range["season"], forced_range["episodes"])
+                    target = ctx.ns("library")["direct_existing"]
+                    if inventory["drive_id"] != target.get("drive_id"):
+                        raise NeedsManual("原云盘资源库 ID 已改变")
+                    missing = inventory["missing"]
+                except Exception as exc:
+                    await self._fail(ctx, f"无法实时确认待补集是否真正缺失：{exc}",
+                                     retry_from=TaskState.QUEUED, auto_retry=False)
+                    return
+                if not missing:
+                    self._skip_duplicate(ctx, "本次指定的所有集数均在原目标目录中存在；未复制任何文件")
+                    return
+                ctx.ns("share_selection")["only_episodes"] = missing
+                forced_range["effective_episodes"] = missing
+                ctx.log(f"读取目标 Season 目录：原申请 {len(forced_range['episodes'])} 集，"
+                        f"现有 {len(inventory['present'])} 集，本次只转存 {len(missing)} 个缺集")
+            # Namespace Aliyun dedup by the resolved resource-drive identity.
+            # Both backup and resource drive have a root folder named '0'.
+            try:
+                if hasattr(storage, "dedup_cid"):
+                    with self.scope(ctx):
+                        ns["dedup_cid"] = await asyncio.to_thread(storage.dedup_cid, ctx.save_dir_cid)
+                else:
+                    ns["dedup_cid"] = ctx.save_dir_cid
+            except Exception as exc:
+                await self._fail(ctx, f"无法确认网盘目标，停止转存：{exc}", retry_from=TaskState.QUEUED)
+                return
+            dedup_cid = ns["dedup_cid"]
             ctx.state = TaskState.SAVING
             ns["phase"] = "preparing"
-            key = f"{storage.name}:{ctx.save_dir_cid}:{ctx.parsed.share_code}"
+            key = f"{storage.name}:{dedup_cid}:{ctx.parsed.share_code}"
             # 先按消息提示的集数占位，尽早串行化同一集的不同分享；清单确定后再按实际集数占位。
             if not self.store.claim_resource(ctx, key, content_keys=self._content_keys(storage.name, ctx)):
                 ctx.state = TaskState.QUEUED
                 self.store.save_task(ctx)  # 移到轮询末尾，避免等待资源的任务阻塞新任务
                 return
             # 剧集分享链接常在追更中原地增加新集：剧集按集去重，其他按分享去重。
-            if not self._episodic(ctx) and self.store.saved_share(
-                    ctx.parsed.share_code, ctx.save_dir_cid, provider_name):
-                ctx.state = TaskState.SKIPPED
-                ctx.log("执行前去重命中，分享已转存到该目录")
-                self.store.save_task(ctx)
+            if not repair_info and not self._episodic(ctx) and self.store.saved_share(
+                    ctx.parsed.share_code, dedup_cid, provider_name):
+                self._skip_duplicate(ctx, "该分享链接此前已在目标目录核验保存；没有重复发送复制请求")
                 return
             # work 是作品身份（TMDB ID、规范片名与年份）：同名的不同作品不会互相当成已入库
             ns["identity"] = {
                 "provider": provider_name,
-                "cid": ctx.save_dir_cid, "share_code": ctx.parsed.share_code,
+                "cid": dedup_cid, "share_code": ctx.parsed.share_code,
                 "title": ctx.parsed.title, "season": ctx.parsed.season,
                 "episodes": list(ctx.parsed.episodes), "work": works.of(ctx.parsed, ctx.meta.get("tmdb")),
             }
-            ns["stored_episodes"] = (self.store.stored_episode_pairs(ns["identity"]["work"], ctx.save_dir_cid,
-                                                                     provider_name) if ctx.parsed.title else [])
+            if ctx.parsed.title:
+                work = ns["identity"]["work"]
+                already = {tuple(pair) for pair in self.store.stored_episode_pairs(
+                    work, dedup_cid, provider_name)}
+                # Verified copies in another folder on the SAME physical drive
+                # also count: different links/hashes must not copy E106 again.
+                drive = str(storage.client.drive_id) if provider_name == "aliyun" else None
+                already.update(tuple(pair) for pair in self.store.stored_episode_pairs_in_drive(
+                    work, provider_name, drive))
+                if repair_info:
+                    # The DONE ledger remains immutable. Only file IDs that
+                    # were just confirmed missing may bypass its old episode keys.
+                    allowed = {(int(f["season"]), int(f["episode"]))
+                               for f in repair_info["files"] if type(f.get("episode")) is int}
+                    already.difference_update(allowed)
+                ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
+                ns["stored_variety_parts"] = self.store.stored_variety_parts_in_drive(
+                    work, provider_name, drive)
+                observed = existing_media.apply_associations(
+                    existing_media.scan_observations(self.store),
+                    self.store.state_get("media_associations", "confirmed", {}) or {})
+                if ctx.episode_pairs() and observed and not forced_range:
+                    try:
+                        with self.scope(ctx):
+                            guard = await asyncio.to_thread(
+                                existing_media.check, storage, observed,
+                                ctx.parsed, ctx.meta.get("tmdb", {}), provider=provider_name)
+                    except Exception as exc:
+                        self.store.release_resource(ctx.task_id)
+                        await self._fail(ctx, f"已有文件去重预检失败（{type(exc).__name__}），请稍后重试或人工核对",
+                                         retry_from=TaskState.QUEUED, auto_retry=False)
+                        return
+                    if guard["uncertain"]:
+                        self.store.release_resource(ctx.task_id)
+                        await self._fail(ctx, guard["uncertain"],
+                                         retry_from=TaskState.QUEUED, auto_retry=False)
+                        return
+                    confirmed = {tuple(pair) for pair in guard["covered"]}
+                    if confirmed:
+                        already.update(confirmed)
+                        ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
+                        ctx.log(f"已实时核验网盘原有文件，跳过 {len(confirmed)} 个重复季集，不记为 Reelay 已转存")
+                if forced_range:
+                    # Only episodes *physically absent* from the explicit final
+                    # folder may bypass historical DONE records.
+                    for ep in forced_range["effective_episodes"]:
+                        already.discard((forced_range["season"], ep))
+                    ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
+                if forced:
+                    # A deliberate, exact single-file copy can bypass the stale
+                    # episode ledger, but NOT quarantine or concurrent claims.
+                    only_pair = (forced["season"], forced["episode"])
+                    already.discard(only_pair)
+                    ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
+                    ctx.log(f"人工强制转存 S{only_pair[0]:02d}E{only_pair[1]:03d}："
+                            "仅本次忽略旧季集去重，其他安全校验保持有效")
+                declared = {tuple(pair) for pair in ctx.episode_pairs()}
+                if declared and already.issuperset(declared):
+                    # Even a previously verified E03 is NOT proof that 第3期下
+                    # or 第3期加更 exists. The link may also have grown in place.
+                    # Always inspect its current files to dedup each edition.
+                    ctx.log("消息中集号已有记录；仍需读取分享，检查是否新增上下期、加更或其它集数")
+            else:
+                ns["stored_episodes"] = []
             try:
+                # A selected version is scoped to one share/provider; if the
+                # share URL was corrected it must be chosen again.
+                selection = ctx.ns("share_selection")
+                if selection.get("folder_id") or selection.get("file_id"):
+                    if (selection.get("share_code") not in (None, ctx.parsed.share_code)
+                            or selection.get("provider") not in (None, provider_name)):
+                        raise NeedsManual("分享链接或网盘已变化，请重新选择源文件或版本文件夹")
+                else:
+                    key = f"{provider_name}:{ctx.parsed.share_code}"
+                    preference = (self.store.state_get("share_folder_preferences", "items", {}) or {}).get(key)
+                    if preference:
+                        selection.update(folder_id=preference["folder_id"],
+                                         path=preference.get("path"),
+                                         share_code=ctx.parsed.share_code, provider=provider_name)
+                        ctx.log(f"此分享沿用上次选择的版本「{preference.get('path') or '已选择文件夹'}」")
                 with self.scope(ctx):
                     manifest = await storage.prepare(ctx)
+                if forced_range:
+                    effective = forced_range.get("effective_episodes") or []
+                    source_files = manifest.get("files") or []
+                    actual_pairs = [(f.get("season"), f.get("episode")) for f in source_files]
+                    required_pairs = [(forced_range["season"], ep) for ep in effective]
+                    if (len(source_files) != len(required_pairs)
+                            or sorted(actual_pairs) != required_pairs
+                            or len({str(f.get("id")) for f in source_files}) != len(source_files)
+                            or any(not f.get("id") or type(f.get("size")) is not int
+                                   or f["size"] <= 0 for f in source_files)):
+                        raise NeedsManual("分享版本的实际文件与需补集数不一致，禁止整季误转存")
+                if forced:
+                    chosen = ctx.ns("share_selection")
+                    received = manifest.get("files") or []
+                    if (len(received) != 1
+                            or str(received[0].get("id")) != str(chosen["file_id"])
+                            or received[0].get("name") != chosen.get("file_name")
+                            or received[0].get("size") != chosen.get("file_size")
+                            or (received[0].get("season"), received[0].get("episode"))
+                            != (forced["season"], forced["episode"])):
+                        raise NeedsManual("强制转存只能复制人工选择的唯一源文件，分享内容已变化请重新选择")
+                if repair_info:
+                    expected = sorted((str(f["source_id"]), f["source_name"], f["source_size"])
+                                      for f in repair_info["files"])
+                    actual = sorted((str(f.get("id")), f.get("name"), f.get("size"))
+                                    for f in manifest.get("files") or [])
+                    if actual != expected:
+                        raise NeedsManual("原分享源文件 ID、名称或大小已变，不能自动选择另一版本补转")
             except AlreadyStored as exc:
-                ctx.state = TaskState.SKIPPED
-                ctx.log(f"执行前去重命中：{exc}")
-                self.store.save_task(ctx)
+                version = ctx.ns("share_selection").get("path")
+                detail = (f"；本次选择的来源文件夹是「{version}」，但去重按已保存的作品/季集判断，"
+                          "不代表已有文件与此版本的 HDR 格式完全相同；不会自动洗版"
+                          if version else "")
+                self._skip_duplicate(
+                    ctx, f"{exc}；本次未复制任何文件{detail}。"
+                    "如认为原有文件不正确，请先核实已入库记录，切勿直接重复转存")
                 return
             except ShareUnavailable as exc:
                 # 读不到分享就无法按清单去重；消息写明的集都已入库时，这条只是重复消息，不算失败
                 declared = ctx.episode_pairs()
                 stored = {tuple(pair) for pair in ns.get("stored_episodes") or []}
-                if self._episodic(ctx) and declared and stored.issuperset(declared):
-                    ctx.state = TaskState.SKIPPED
-                    ctx.log(f"执行前去重命中：分享不可用（{exc}），但消息写明的 {pairs_label(declared)} 均已入库")
-                    self.store.save_task(ctx)
+                if (self._episodic(ctx) and declared and stored.issuperset(declared)
+                        and not ctx.ns("share_selection").get("folder_id")
+                        and not re.search(r"第\s*\d{1,4}\s*期", ctx.raw.text or "")):
+                    self._skip_duplicate(
+                        ctx, f"分享当前不可用（{exc}），仅根据相同作品的已保存季集记录"
+                             f"判断 {pairs_label(declared)} 均已入库；无法核验这条分享的具体版本，"
+                             "未发送任何复制请求")
                     return
                 await self._fail(ctx, f"分享不可用，无法转存：{exc}", retry_from=TaskState.QUEUED, auto_retry=False)
                 return
@@ -513,6 +940,8 @@ class Pipeline:
                 return
             finally:
                 ns.pop("stored_episodes", None)
+                ns.pop("stored_variety_parts", None)
+                ns.pop("blocked_episodes", None)
             self._adopt_manifest(ctx, manifest)
             ns["manifest"] = manifest
             ns["phase"] = "ready"
@@ -541,6 +970,41 @@ class Pipeline:
 
         auto_recheck = ns.pop("auto_recheck_run", False)  # 这一轮是 Worker 的后台自动复查
         sending = ns["phase"] == "ready"
+        if sending and repair_info:
+            try:
+                await self._recheck_repair(ctx, storage)
+            except NeedsManual as exc:
+                # The cloud may have been restored after the manifest was
+                # prepared. Do not send any copy request from a stale decision.
+                await self._fail(ctx, f"复制前再次核验不通过：{exc}",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
+        if sending and forced_range:
+            try:
+                in_manifest = [(f["season"], f["episode"])
+                               for f in (ns.get("manifest") or {}).get("files") or []]
+                expected = [(forced_range["season"], ep)
+                            for ep in forced_range.get("effective_episodes") or []]
+                if not expected or sorted(in_manifest) != expected:
+                    raise NeedsManual("待复制的实际文件清单与本次补集申请不一致")
+                with self.scope(ctx):
+                    inventory = await asyncio.to_thread(
+                        repair.scan_exact_season_episodes, storage, ctx.save_dir_cid,
+                        forced_range["season"], forced_range["effective_episodes"])
+                target = ctx.ns("library").get("direct_existing") or {}
+                if inventory["drive_id"] != target.get("drive_id"):
+                    raise NeedsManual("补集过程中资源库已变化")
+                with self.scope(ctx):
+                    path = await asyncio.to_thread(storage.dir_path, ctx.save_dir_cid)
+                if path != target.get("path"):
+                    raise NeedsManual("目标 Season 文件夹路径在排队期间发生变化")
+                if inventory["present"]:
+                    raise NeedsManual("有缺集在排队期间已经出现：" +
+                                      ", ".join(f"E{ep:03d}" for ep in inventory["present"]))
+            except Exception as exc:
+                await self._fail(ctx, f"复制前复核发现变化，未发送任何新复制请求：{exc}",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
         try:
             if sending:
                 ns["phase"] = "receiving"
@@ -713,8 +1177,24 @@ class Pipeline:
     @staticmethod
     def _content_keys(storage_name: str, ctx: PipelineContext) -> list[str]:
         title = ctx.parsed.title
-        return [f"{storage_name}:{ctx.save_dir_cid}:episode:{works.claim_key(title, season, ep)}"
-                for season, ep in ctx.episode_pairs() if title]
+        cid = str(ctx.ns("storage").get("dedup_cid") or ctx.save_dir_cid)
+        if storage_name == "aliyun":
+            match = re.match(r"resource_([a-f0-9]{64})_", cid)
+            scope = "resource_" + match.group(1) if match else cid
+        else:
+            scope = "account"  # all directories of the same 115 account
+        work = works.of(ctx.parsed, ctx.meta.get("tmdb"))
+        tmdb_id = work.get("tmdb")
+        claims = []
+        for season, ep in ctx.episode_pairs():
+            if not title:
+                continue
+            claims.append(f"{storage_name}:{scope}:episode:{works.claim_key(title, season, ep)}")
+            # Concurrent posts may use Chinese/English aliases with different
+            # filenames and hashes. Lock both on authoritative TMDB+season+ep.
+            if tmdb_id:
+                claims.append(f"{storage_name}:{scope}:episode:{tmdb_id}|S{season or 1:02d}|E{ep:02d}")
+        return claims
 
     @staticmethod
     def _adopt_manifest(ctx: PipelineContext, manifest: dict) -> None:
@@ -738,17 +1218,75 @@ class Pipeline:
             identity.update(episodes=list(p.episodes), season=p.season)
             if manifest.get("pairs"):
                 identity["pairs"] = [list(pair) for pair in manifest["pairs"]]
+            if manifest.get("variety_parts"):
+                identity["variety_parts"] = [dict(row) for row in manifest["variety_parts"]]
+
+    async def _recheck_repair(self, ctx: PipelineContext, storage) -> None:
+        """Fail closed if any old file came back before a repair cloud write."""
+        info = ctx.ns("task").get("repair") or {}
+        parent = self.store.get_task(info.get("source_task_id", ""))
+        if not parent or parent.state != TaskState.DONE:
+            raise NeedsManual("原成功任务已变化")
+        completed = [self.store.get_task(cid) for cid in
+                     parent.ns("task").get("repair_children", [])
+                     if cid != ctx.task_id]
+        try:
+            report = await asyncio.to_thread(
+                repair.check_saved_files, parent, storage,
+                [child for child in completed if child is not None])
+        except Exception as exc:
+            raise NeedsManual(f"原文件实时核验失败：{exc}") from exc
+        if report["drive_id"] != info.get("drive_id") or report["uncertain"]:
+            raise NeedsManual("云盘资源库或文件状态无法确认")
+        missing = {row["old_id"] for row in report["missing"]}
+        expected = {row["old_id"] for row in info["files"]}
+        if not expected or not expected.issubset(missing):
+            raise NeedsManual("待补文件已经恢复或移动；禁止重复复制，请重新检查成功任务")
 
     async def _recheck_manifest(self, ctx: PipelineContext, storage, provider_name: str) -> bool:
         ns = ctx.ns("storage")
         manifest = ns["manifest"]
+        # A manually confirmed repair only allows already-verified-missing
+        # cloud file IDs. The normal immutable DONE ledger must not veto those
+        # exact files; the separate live-ID check runs immediately before copy.
+        if (ctx.ns("task").get("repair") or ctx.ns("task").get("force_single_copy")
+                or ctx.ns("task").get("force_missing_range")):
+            # Forced single-file jobs already validate the exact immutable
+            # source ID against the prepared manifest and preserve content claims.
+            return True
+        dedup_cid = ns.get("dedup_cid") or ctx.save_dir_cid
         reason = None
         if not manifest.get("episodes") and self.store.saved_share(
-                ctx.parsed.share_code, ctx.save_dir_cid, provider_name):
+                ctx.parsed.share_code, dedup_cid, provider_name):
             reason = "分享已转存到该目录"
+        elif manifest.get("variety_parts") and ctx.parsed.title:
+            # Verified editions are tracked independently: E03 上 does not
+            # suppress E03 下, 加更 or 纯享 while waiting for a transfer slot.
+            work = ns.get("identity", {}).get("work") or works.of(ctx.parsed, ctx.meta.get("tmdb"))
+            drive = str(storage.client.drive_id) if provider_name == "aliyun" else None
+            stored_parts = {tuple(row) for row in self.store.stored_variety_parts_in_drive(
+                work, provider_name, drive)}
+            remaining = [file for file in manifest["files"]
+                         if (file["season"], file["episode"], file["variant"]) not in stored_parts]
+            if not remaining:
+                reason = "这些综艺期数的上/下/加更/纯享均已有核验的文件"
+            elif len(remaining) < len(manifest["files"]):
+                manifest["files"] = remaining
+                manifest["variety_parts"] = [
+                    {"season": file["season"], "episode": file["episode"], "variant": file["variant"]}
+                    for file in remaining]
+                manifest["pairs"] = [list(pair) for pair in sorted(
+                    {(file["season"], file["episode"]) for file in remaining})]
+                manifest["season"], manifest["episodes"] = summarize_pairs(manifest["pairs"])
+                self._adopt_manifest(ctx, manifest)
+                ctx.log("同一期的已保存版本已逐文件跳过，保留新出现的综艺分段与加更")
+                self.store.save_task(ctx)
         elif manifest.get("episodes") and ctx.parsed.title:
             work = ns.get("identity", {}).get("work") or works.of(ctx.parsed, ctx.meta.get("tmdb"))
-            stored = {tuple(pair) for pair in self.store.stored_episode_pairs(work, ctx.save_dir_cid, provider_name)}
+            stored = {tuple(pair) for pair in self.store.stored_episode_pairs(work, dedup_cid, provider_name)}
+            drive = str(storage.client.drive_id) if provider_name == "aliyun" else None
+            stored.update(tuple(pair) for pair in self.store.stored_episode_pairs_in_drive(
+                work, provider_name, drive))
             remaining = [f for f in manifest["files"] if (f.get("season"), f.get("episode")) not in stored]
             if not remaining:
                 reason = "分享内的集数均已由其他任务入库"
@@ -779,7 +1317,8 @@ class Pipeline:
         ns = ctx.ns("storage")
         if not exc.permanent:
             ns["phase"] = "ready"
-            await self._fail(ctx, f"115 拒绝转存：{exc}，稍后重试", retry_from=TaskState.QUEUED)
+            cloud = "115" if storage.name == "p115" else getattr(storage, "ui_label", storage.name)
+            await self._fail(ctx, f"{cloud} 拒绝转存：{exc}，稍后重试", retry_from=TaskState.QUEUED)
             return
         if hasattr(storage, "discard"):
             try:

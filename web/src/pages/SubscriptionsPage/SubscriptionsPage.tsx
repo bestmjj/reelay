@@ -1,8 +1,9 @@
-import { Ban, BellPlus, BellRing, CircleAlert, Flag, Lightbulb, Loader2, Search, Trash2, Undo2 } from 'lucide-react';
+import { Ban, BellPlus, BellRing, CircleAlert, Flag, FlaskConical, FolderSearch, Lightbulb, Loader2, RefreshCw, Search, Trash2, Undo2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
-import { subscriptionApi, type IIgnoredWork, type IResolveResp, type IShowCandidate, type ISubscription } from '@/api/subscriptions';
+import { subscriptionApi, type IExistingPreview, type IIgnoredWork, type IResolveResp, type IShowCandidate, type ISubscription, type ISubscriptionSimulation } from '@/api/subscriptions';
+import DirectoryPicker, { type PickedDir } from '@/components/DirectoryPicker';
 import { ErrorState } from '@/components/app/ErrorState';
 import { MediaCover } from '@/components/app/MediaCover';
 import { Page } from '@/components/app/Page';
@@ -12,11 +13,14 @@ import { Select } from '@/components/app/Select';
 import { ToneBadge } from '@/components/app/StatusBadge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAsync } from '@/hooks/useAsync';
-import { compactEpisodes } from '@/lib/format';
+import { compactEpisodes, relativeTime } from '@/lib/format';
 import { MEDIA_TYPE_LABELS } from '@/lib/status';
 import { announceSubscription } from '@/lib/subscriptions';
+import { filterSubscriptionItems, pageSubscriptionItems, type SubscriptionSort, type SubscriptionStatusFilter } from '@/lib/subscriptionView';
 import { cn, errorMessage } from '@/lib/utils';
 
 function CandidateCard({ candidate, wanted, onSubscribe, busy }: {
@@ -54,17 +58,17 @@ function CandidateCard({ candidate, wanted, onSubscribe, busy }: {
   );
 }
 
-function SubscriptionRow({ item, busy, onRemove, onReopen }: {
-  item: ISubscription; busy: boolean; onRemove: () => void; onReopen: () => void;
+function SubscriptionRow({ item, busy, onRemove, onReopen, onTest, onStart, onExisting }: {
+  item: ISubscription; busy: boolean; onRemove: () => void; onReopen: () => void; onTest: () => void; onStart: () => void; onExisting: () => void;
 }) {
   const finished = item.finished;
   return (
-    <div className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+    <div className="flex flex-wrap items-start gap-x-3 gap-y-2 py-3 first:pt-0 last:pb-0">
       <span className={cn('grid size-9 shrink-0 place-items-center rounded-lg',
         finished ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary')}>
         {finished ? <Flag className="size-4" /> : <BellRing className="size-4" />}
       </span>
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-[1_1_16rem]">
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="truncate text-sm font-medium">《{item.title}》第 {item.season} 季</span>
           <ToneBadge tone="neutral">{item.category}</ToneBadge>
@@ -72,15 +76,52 @@ function SubscriptionRow({ item, busy, onRemove, onReopen }: {
             : item.auto ? <ToneBadge tone="success">新集自动转存</ToneBadge> : <ToneBadge tone="neutral">只提醒缺集</ToneBadge>}
           {!item.tmdbid ? <ToneBadge tone="warning" className="max-sm:hidden">按片名匹配</ToneBadge> : null}
         </div>
-        <p className="mt-0.5 truncate text-xs text-muted-foreground">
-          {finished ? `${finished.episodes} 集全部入库，${finished.date} 自动结束订阅` : <>
-            已入库 {item.have.length}{item.total ? ` / ${item.total}` : ''} 集
+        <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+          {finished ? `已结束订阅 · ${finished.episodes} 集登记完成（${finished.date}）` : <>
+            Reelay 已登记 {item.have.length}{item.total ? `/${item.total}` : ''} 集
             {item.have.length ? `（${compactEpisodes(item.have)}）` : ''}
-            {item.missing.length ? ` · 缺 ${compactEpisodes(item.missing)}` : ''}
+            {item.missing.length ? ` · 尚未登记 ${item.missing.length} 集（${compactEpisodes(item.missing)}）` : ''}
+            {item.missing_truncated ? ' · 集数范围过大，仅展示前 5000 集' : ''}
             {item.aired ? ` · TMDB 已播 ${item.aired} 集` : ''}
           </>}
         </p>
+        {!finished && item.quarantined?.length ? (
+          <p className="mt-0.5 text-xs font-medium text-destructive" role="alert">
+            错片隔离中：{compactEpisodes(item.quarantined)}。请先核对已入库任务，再解除隔离并重新接收。
+          </p>
+        ) : null}
+        {!finished && item.observed?.length ? (
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            网盘索引发现 {item.observed.length} 集候选（{compactEpisodes(item.observed)}），尚未确认属于该作品。
+            这些不能算作 Reelay 已转存，转存前仍需核验文件。
+            {!item.scan_complete ? ' 网盘扫描未完成，不能据此判断哪些集确实不存在。' : ''}
+          </p>
+        ) : null}
+        {!finished && item.start_episode !== null ? (
+          <p className="mt-0.5 text-xs text-primary">仅从 E{item.start_episode} 起自动转存（含本集）</p>
+        ) : null}
+        {!finished && item.discovery ? (
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            自动检索：{item.discovery.checked_at
+              ? `上次 ${relativeTime(item.discovery.checked_at)}`
+              : '尚未完成'}
+            {item.discovery.source ? ` · ${item.discovery.source}` : ''}
+            {item.discovery.checked_at ? ` · 候选 ${item.discovery.matches ?? 0} 条` : ''}
+            {item.discovery.error ? ` · ${item.discovery.error}` : ''}
+          </p>
+        ) : null}
       </div>
+      <div className="flex w-full flex-wrap items-center justify-end gap-2 pl-12 sm:w-auto sm:pl-0">
+      <Button size="sm" variant="outline" disabled={busy} onClick={onExisting} title="预览并确认云盘已有文件，不移动、不删除、不转存">
+        关联旧集
+      </Button>
+      <Button size="sm" variant="outline" disabled={busy} onClick={onStart} title="设置本订阅最早自动转存的集号">
+        起始集
+      </Button>
+      <Button size="sm" variant="outline" disabled={busy} onClick={onTest}
+        title="用实际识别与订阅规则模拟，不会提交转存任务">
+        <FlaskConical />模拟测试
+      </Button>
       {finished ? (
         <Button variant="outline" size="sm" disabled={busy} onClick={onReopen} title="恢复自动转存与缺集巡检（如出了特别篇）">
           <Undo2 />继续订阅
@@ -91,6 +132,7 @@ function SubscriptionRow({ item, busy, onRemove, onReopen }: {
         className="size-9 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive sm:size-8">
         <Trash2 />
       </Button>
+      </div>
     </div>
   );
 }
@@ -105,6 +147,28 @@ export default function SubscriptionsPage() {
   const [searching, setSearching] = useState(false);
   const [busy, setBusy] = useState(false);
   const [category, setCategory] = useState('');  // 空 = 全部类型
+  const [listQuery, setListQuery] = useState('');
+  const [listStatus, setListStatus] = useState<SubscriptionStatusFilter>('all');
+  const [listSort, setListSort] = useState<SubscriptionSort>('recent');
+  const [listPageSize, setListPageSize] = useState(10);
+  const [listPage, setListPage] = useState(1);
+  const [testItem, setTestItem] = useState<ISubscription | null>(null);
+  const [testText, setTestText] = useState('');
+  const [testResult, setTestResult] = useState<ISubscriptionSimulation | null>(null);
+  const [testBusy, setTestBusy] = useState(false);
+  const [existingItem, setExistingItem] = useState<ISubscription | null>(null);
+  const [existingData, setExistingData] = useState<IExistingPreview | null>(null);
+  const [existingOffset, setExistingOffset] = useState(0);
+  const [existingBusy, setExistingBusy] = useState(false);
+  const [existingPicker, setExistingPicker] = useState(false);
+  const [existingSelected, setExistingSelected] = useState<string[]>([]);
+  const [startOnAdd, setStartOnAdd] = useState('');
+  const [startItem, setStartItem] = useState<ISubscription | null>(null);
+  const [startInput, setStartInput] = useState('');
+  const [startBusy, setStartBusy] = useState(false);
+  const [resourceText, setResourceText] = useState('');
+  const [resourceSource, setResourceSource] = useState('');
+  const [resourceBusy, setResourceBusy] = useState(false);
 
   /** 操作后两份列表都重新读取。 */
   const load = () => { subs.reload(); ignoredWorks.reload(); };
@@ -135,12 +199,18 @@ export default function SubscriptionsPage() {
   };
 
   const subscribe = async (item: { title: string; season: number; tmdbid?: number | null; total?: number | null }) => {
+    const threshold = startOnAdd.trim() ? Number(startOnAdd) : null;
+    if (threshold !== null && (!Number.isInteger(threshold) || threshold < 1 || threshold > 100000)) {
+      toast.error('起始集必须是 1–100000 的整数');
+      return;
+    }
     setBusy(true);
     try {
-      const r = await subscriptionApi.add(item);
+      const r = await subscriptionApi.add({ ...item, start_episode: threshold });
       announceSubscription(r.subscription, r.pending);
       setResolved(null);
       setQuery('');
+      setStartOnAdd('');
       load();
     } catch (e) {
       toast.error(errorMessage(e, '订阅失败'));
@@ -160,13 +230,131 @@ export default function SubscriptionsPage() {
   const restore = (item: IIgnoredWork) => run(() => subscriptionApi.unignoreWork(item), `已恢复接收《${item.title}》`, '恢复失败');
 
   const categories = [...new Set((data?.items ?? []).map((i) => i.category))];
-  const shown = (data?.items ?? []).filter((i) => !category || i.category === category);
-  const active = shown.filter((i) => !i.finished);
-  const finished = shown.filter((i) => i.finished);
+  const shown = filterSubscriptionItems(data?.items ?? [], {
+    query: listQuery, category, status: listStatus, sort: listSort,
+  });
+  const paged = pageSubscriptionItems(shown, listPage, listPageSize);
+  const active = paged.items.filter((i) => !i.finished);
+  const finished = paged.items.filter((i) => i.finished);
   const row = (item: ISubscription) => (
     <SubscriptionRow key={`${item.tmdbid ?? item.title}-${item.season}`} item={item} busy={busy}
-      onRemove={() => void remove(item)} onReopen={() => void reopen(item)} />
+      onRemove={() => void remove(item)} onReopen={() => void reopen(item)}
+      onTest={() => {
+        setTestItem(item);
+        setTestText('');
+        setTestResult(null);
+      }}
+      onStart={() => {
+        setStartItem(item);
+        setStartInput(item.start_episode?.toString() ?? '');
+      }}
+      onExisting={() => {
+        setExistingItem(item);
+        setExistingData(null);
+        setExistingSelected([]);
+        setExistingOffset(0);
+        void loadExisting(item.id, 0);
+      }} />
   );
+  const loadExisting = async (id: number, offset: number) => {
+    setExistingBusy(true);
+    setExistingSelected([]);
+    try {
+      const preview = await subscriptionApi.existing(id, offset);
+      setExistingData(preview);
+      setExistingOffset(offset);
+    } catch (e) {
+      toast.error(errorMessage(e, '读取网盘历史文件失败'));
+    } finally {
+      setExistingBusy(false);
+    }
+  };
+  const scanSelectedFolder = async (picked: PickedDir) => {
+    if (!existingItem || existingBusy) return;
+    if (picked.id === '0' || picked.id === 'root') {
+      toast.error('请进入保存旧视频的具体文件夹，不要扫描整个网盘根目录');
+      return;
+    }
+    setExistingBusy(true);
+    setExistingPicker(false);
+    setExistingSelected([]);
+    try {
+      const scan = await subscriptionApi.scanExistingFolder(existingItem.id, picked.provider, picked.id);
+      setExistingData(await subscriptionApi.existing(existingItem.id, 0));
+      setExistingOffset(0);
+      toast.success(`已检查 ${scan.file_count} 个视频，其中 ${scan.eligible} 个有可识别集号${scan.has_more ? '；目录较多，可继续扫描' : ''}`);
+      if (scan.errors.length) toast.warning(scan.errors[0]);
+      subs.reload();
+    } catch (e) {
+      toast.error(errorMessage(e, '扫描所选网盘文件夹失败'));
+    } finally {
+      setExistingBusy(false);
+    }
+  };
+  const associateExisting = async () => {
+    if (!existingItem || !existingSelected.length || existingBusy) return;
+    setExistingBusy(true);
+    try {
+      const result = await subscriptionApi.associateExisting(existingItem.id, existingSelected);
+      toast.success(`已经核验并关联 ${result.associated} 个历史文件；没有执行移动或转存`);
+      setExistingSelected([]);
+      setExistingData(await subscriptionApi.existing(existingItem.id, existingOffset));
+      subs.reload();
+    } catch (e) {
+      toast.error(errorMessage(e, '关联旧文件失败；请重新扫描后重试'));
+    } finally {
+      setExistingBusy(false);
+    }
+  };
+  const saveStart = async () => {
+    if (!startItem || startBusy) return;
+    const floor = startInput.trim() ? Number(startInput) : null;
+    if (floor !== null && (!Number.isInteger(floor) || floor < 1 || floor > 100000)) {
+      toast.error('起始集必须是 1–100000 的整数');
+      return;
+    }
+    setStartBusy(true);
+    try {
+      await subscriptionApi.setStart(startItem.id, floor);
+      toast.success(floor ? `从 E${floor} 开始自动转存（含本集）` : '已清除集数下限');
+      setStartItem(null);
+      subs.reload();
+    } catch (e) {
+      toast.error(errorMessage(e, '保存起始集失败'));
+    } finally {
+      setStartBusy(false);
+    }
+  };
+  const submitResource = async () => {
+    if (!resourceText.trim() || resourceBusy) return;
+    setResourceBusy(true);
+    try {
+      const sourceChoices = data?.sources ?? [];
+      const chosen = resourceSource || (sourceChoices.length === 1 ? sourceChoices[0] : '');
+      if (!chosen) {
+        toast.error('请先选择本次资源使用的 Telegram 来源');
+        return;
+      }
+      const result = await subscriptionApi.submitManual(resourceText.trim(), chosen);
+      setResourceText('');
+      toast.success(`已创建任务 ${result.task_id}，后台将自动识别并核验资源`);
+    } catch (e) {
+      toast.error(errorMessage(e, '提交资源失败'));
+    } finally {
+      setResourceBusy(false);
+    }
+  };
+  const runSimulation = async () => {
+    if (!testItem || testBusy) return;
+    setTestBusy(true);
+    try {
+      setTestResult(await subscriptionApi.simulate(testItem.id, testText.trim() || undefined));
+    } catch (e) {
+      toast.error(errorMessage(e, '模拟测试失败'));
+    } finally {
+      setTestBusy(false);
+    }
+  };
 
   return (
     <Page
@@ -187,9 +375,44 @@ export default function SubscriptionsPage() {
         </div>
       ) : null}
 
+      <div className="mb-4 rounded-lg border border-border bg-card px-4 py-3 text-xs leading-5 text-muted-foreground">
+        自动追剧已使用现有 Telegram 来源；后台定时搜索最近的订阅资源消息，
+        命中后仍经过 TMDB 匹配、过滤、去重及转存核验。无需每集人工操作。
+        <span className="ml-1">如需检查某部剧为什么没有自动放行，点击该行「模拟测试」。</span>
+      </div>
       <div className="grid gap-5 lg:grid-cols-5 lg:items-start">
         <div className="min-w-0 space-y-5 lg:col-span-3">
-          <Panel icon={Search} title="添加订阅" description="用一句话说在追哪部剧，AI 帮你对应到 TMDB 条目和季。">
+          <Panel icon={Search} title="立即转存已有分享"
+            description="粘贴 Telegram 频道中的完整资源正文（包含阿里云盘或 115 分享链接），不必等待该资源再次发布。仅本次直接提交，仍执行原有识别、过滤、去重和网盘验证。">
+            <div className="space-y-3">
+              <Textarea rows={3} maxLength={12000} value={resourceText}
+                onChange={(e) => setResourceText(e.target.value)} disabled={resourceBusy}
+                placeholder="例如：https://t.me/shareAliyun/123456 或 牧神记 (2024) 第106集；https://www.alipan.com/s/..." />
+              <div className="space-y-1">
+                <label htmlFor="manual-resource-source" className="text-xs font-medium">本次使用的监听来源</label>
+                <Select id="manual-resource-source"
+                  value={resourceSource || ((data?.sources?.length ?? 0) === 1 ? data!.sources[0] : '')}
+                  placeholder="选择 Telegram 来源"
+                  options={(data?.sources ?? []).map((source) => ({ value: source, label: source }))}
+                  onValueChange={setResourceSource} disabled={resourceBusy} />
+              </div>
+              <div className="flex items-center gap-3">
+                <Button disabled={resourceBusy || !resourceText.trim() || !(resourceSource || (data?.sources?.length === 1))}
+                  onClick={() => void submitResource()}>
+                  {resourceBusy ? <Loader2 className="animate-spin" /> : <BellPlus />}
+                  {resourceBusy ? '正在提交' : '立即加入转存队列'}
+                </Button>
+                <Link to="/tasks" className="text-xs text-primary hover:underline">查看任务</Link>
+              </div>
+              <p className="text-xs leading-5 text-muted-foreground">
+                可粘贴已配置频道的 t.me/频道名/消息ID、完整资源消息或网盘分享链接。
+                单独网盘链接若无法识别作品会进入人工处理；同一链接重复提交不会重复建立任务。
+                仅允许使用你已经登录且有读取权限的 Telegram 来源。
+                不会改变现有监听来源的「人工确认」设置。
+              </p>
+            </div>
+          </Panel>
+          <Panel icon={Search} title="添加订阅" description="按 TMDB 选剧并可指定从哪一集开始，防止首次订阅转存旧集。">
             <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); void search(); }}>
               <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="如：我在追《一瓯春》第二季"
                 className="bg-card" aria-label="在追的剧" />
@@ -197,6 +420,13 @@ export default function SubscriptionsPage() {
                 {searching ? <Loader2 className="animate-spin" /> : <Search />}查找
               </Button>
             </form>
+            <div className="mt-3 flex flex-col gap-1.5">
+              <label htmlFor="new-sub-start" className="text-xs font-medium">最早自动接收集号（可选）</label>
+              <Input id="new-sub-start" type="number" inputMode="numeric" min={1} max={100000}
+                value={startOnAdd} onChange={(e) => setStartOnAdd(e.target.value)}
+                placeholder="如：当前最新 E100，则填写 100" className="bg-card" />
+              <p className="text-xs text-muted-foreground">填写 100：只自动接收 E100 及后续新集；填写 101：从下一集开始。留空沿用单集追更规则，不表示已经核实当前最新集。</p>
+            </div>
             {resolved ? (
               <div className="mt-4 space-y-3">
                 {resolved.candidates.length ? resolved.candidates.map((c) => (
@@ -221,28 +451,72 @@ export default function SubscriptionsPage() {
           </Panel>
 
           <Panel icon={BellRing} title="已订阅"
+            actions={<Button size="sm" variant="outline" onClick={subs.reload} disabled={subs.loading}>
+              <RefreshCw className={subs.loading ? 'animate-spin' : ''} />刷新检索状态
+            </Button>}
             description={data ? `共 ${data.items.length} 部${data.items.some((i) => i.finished)
               ? `，其中 ${data.items.filter((i) => i.finished).length} 部已完结` : ''}` : undefined}>
             {!data ? (subs.error ? <p className="text-sm text-muted-foreground">读取失败，见页面上方。</p>
               : <div className="space-y-3">{[0, 1].map((i) => <Skeleton key={i} className="h-12" />)}</div>)
               : data.items.length ? (
                 <div className="space-y-4">
-                  {categories.length > 1 ? (
-                    <Segmented label="类型" size="md" value={category} onChange={setCategory}
-                      options={['', ...categories].map((c) => ({
-                        value: c,
-                        label: <>{c || '全部'}<span className="text-xs tabular-nums text-muted-foreground">
-                          {data.items.filter((i) => !c || i.category === c).length}</span></>,
-                      }))} />
-                  ) : null}
-                  {active.length ? <div className="divide-y divide-border/70">{active.map(row)}</div>
-                    : <p className="text-sm text-muted-foreground">这个类型没有在追的剧。</p>}
-                  {finished.length ? (
-                    <div>
-                      <p className="mb-1 text-xs font-medium text-muted-foreground">已完结 · 播完且全部入库后自动结束</p>
-                      <div className="divide-y divide-border/70">{finished.map(row)}</div>
+                  <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_10rem]">
+                    <Input aria-label="搜索已订阅片名" value={listQuery}
+                      onChange={(e) => { setListQuery(e.target.value); setListPage(1); }}
+                      placeholder="搜索片名、别名或 TMDB ID" />
+                    <Select aria-label="订阅状态筛选" value={listStatus}
+                      onValueChange={(value) => { setListStatus(value as SubscriptionStatusFilter); setListPage(1); }}
+                      options={[
+                        { value: 'all', label: '全部状态' },
+                        { value: 'active', label: '正在追更' },
+                        { value: 'finished', label: '已完结' },
+                      ]} />
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    {categories.length > 1 ? (
+                      <Segmented label="类型" size="md" value={category}
+                        onChange={(value) => { setCategory(value); setListPage(1); }}
+                        options={['', ...categories].map((value) => ({
+                          value,
+                          label: <>{value || '全部'}<span className="text-xs tabular-nums text-muted-foreground">
+                            {data.items.filter((item) => !value || item.category === value).length}</span></>,
+                        }))} />
+                    ) : null}
+                    <Select aria-label="订阅排序" value={listSort}
+                      className="w-40"
+                      onValueChange={(value) => { setListSort(value as SubscriptionSort); setListPage(1); }}
+                      options={[
+                        { value: 'recent', label: '最近检索' },
+                        { value: 'name', label: '片名排序' },
+                        { value: 'unrecorded', label: '未登记集数最多' },
+                      ]} />
+                  </div>
+                  {paged.total ? (
+                    <>
+                      {active.length ? <div className="divide-y divide-border/70">{active.map(row)}</div> : null}
+                      {finished.length ? (
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-muted-foreground">已完结 · 自动结束追更</p>
+                          <div className="divide-y divide-border/70">{finished.map(row)}</div>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : <p className="py-4 text-sm text-muted-foreground" role="status">
+                    没有匹配的订阅；可以修改搜索词或筛选条件。
+                  </p>}
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-3 text-xs text-muted-foreground">
+                    <span role="status">显示 {paged.start}–{paged.end} 条，共 {paged.total} 条</span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Select aria-label="订阅每页条数" value={String(listPageSize)} className="w-32"
+                        onValueChange={(value) => { setListPageSize(Number(value)); setListPage(1); }}
+                        options={[10, 20, 50].map((size) => ({ value: String(size), label: `每页 ${size} 条` }))} />
+                      <Button size="sm" variant="outline" aria-label="订阅上一页"
+                        disabled={paged.page <= 1} onClick={() => setListPage(paged.page - 1)}>上一页</Button>
+                      <span className="tabular-nums">{paged.page}/{paged.pages}</span>
+                      <Button size="sm" variant="outline" aria-label="订阅下一页"
+                        disabled={paged.page >= paged.pages} onClick={() => setListPage(paged.page + 1)}>下一页</Button>
                     </div>
-                  ) : null}
+                  </div>
                 </div>
               ) : <p className="text-sm text-muted-foreground">还没有订阅。在待审批里点「追这部剧」，或在上面用一句话添加。</p>}
           </Panel>
@@ -297,6 +571,183 @@ export default function SubscriptionsPage() {
           </Panel>
         </div>
       </div>
+      <Dialog open={Boolean(existingItem)} onOpenChange={(open) => {
+        if (!open && !existingBusy && !existingPicker) {
+          setExistingItem(null); setExistingData(null); setExistingSelected([]);
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>关联已有文件 · {existingItem?.title} 第 {existingItem?.season} 季</DialogTitle>
+            <DialogDescription>
+              直接从阿里云盘或 115 浏览并选择已有视频的文件夹，无需去设置保存目录。
+              扫描后勾选确实属于这部作品的集数，确认只核验文件，不移动、覆盖或转存。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" disabled={existingBusy} onClick={() => setExistingPicker(true)}>
+              <FolderSearch />选择已有视频文件夹
+            </Button>
+            {existingData?.folder?.snapshot.has_more ? (
+              <Button variant="outline" disabled={existingBusy || !existingItem}
+                onClick={() => existingItem && existingData?.folder &&
+                  void scanSelectedFolder({ id: existingData.folder.cid, name: existingData.folder.path,
+                    path: existingData.folder.path, provider: existingData.folder.provider })}>
+                <RefreshCw />继续扫描
+              </Button>
+            ) : null}
+          </div>
+          {existingData?.folder ? (
+            <p className="text-xs leading-5 text-muted-foreground">
+              已选择 {existingData.folder.provider === 'aliyun' ? '阿里云盘' : '115'} / {existingData.folder.path}；
+              累计扫描 {existingData.folder.snapshot.file_count} 个视频，
+              {existingData.folder.skipped} 个无法确认集号或不属于本季。
+              {existingData.folder.snapshot.has_more ? '尚有目录未扫描。' : ''}
+              {existingData.folder.snapshot.errors?.map((message, i) =>
+                <span key={i} className="block text-destructive">{message}</span>)}
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">还没有选择旧视频目录；您可以直接点击上方按钮浏览网盘。</p>
+          )}
+          {existingData ? (
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">
+                共 {existingData.total} 个候选；{existingData.items.length ? `本页显示第 ${existingOffset + 1}–${existingOffset + existingData.items.length} 个。` : '暂无匹配集数。'}
+                {existingData.scan_complete ? '' : ' 索引可能不完整。'}
+              </p>
+              <div className="max-h-64 space-y-1 overflow-auto rounded-lg border border-border p-2">
+                {existingData.items.map((file) => {
+                  const checked = existingSelected.includes(file.file_key);
+                  return (
+                    <label key={file.file_key} className="flex items-start gap-2 rounded-md px-2 py-2 text-xs hover:bg-muted/60">
+                      <input type="checkbox" className="mt-0.5" checked={checked} disabled={existingBusy || file.associated}
+                        onChange={(event) => setExistingSelected((old) => event.target.checked
+                          ? [...old, file.file_key] : old.filter((key) => key !== file.file_key))}/>
+                      <span className="min-w-0 flex-1 break-all">
+                        <span className="font-medium">{file.name} · E{file.episode}</span>
+                        <span className="block text-muted-foreground">
+                          {file.provider === 'aliyun' ? '阿里云盘' : '115'} / {file.alias} / {file.path}
+                        </span>
+                      </span>
+                      {file.associated ? <span className="shrink-0 text-success">已关联</span> : null}
+                    </label>
+                  );
+                })}
+                {!existingData.items.length ? <p className="p-3 text-sm text-muted-foreground">
+                  暂无可关联文件。请点「选择已有视频文件夹」定位到《{existingItem?.title}》实际存放的目录，再扫描。
+                </p> : null}
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" disabled={existingBusy || existingOffset === 0}
+                    onClick={() => existingItem && void loadExisting(existingItem.id, Math.max(0, existingOffset - 50))}>
+                    上一页
+                  </Button>
+                  <Button variant="outline" size="sm" disabled={existingBusy || existingData.next_offset === null}
+                    onClick={() => existingItem && existingData.next_offset !== null
+                      && void loadExisting(existingItem.id, existingData.next_offset)}>
+                    下一页
+                  </Button>
+                </div>
+                <Button variant="outline" size="sm" disabled={existingBusy || !existingData.items.some((file) => !file.associated)}
+                  onClick={() => setExistingSelected(existingData.items.filter((file) => !file.associated).map((file) => file.file_key))}>
+                  选择本页未关联项
+                </Button>
+              </div>
+              <Button disabled={existingBusy || !existingSelected.length} onClick={() => void associateExisting()}>
+                {existingBusy ? '核验中' : `确认关联 ${existingSelected.length} 个文件`}
+              </Button>
+              <p className="text-xs leading-5 text-muted-foreground">
+                关联表示你确认这些文件属于当前 TMDB 作品，不代表 Reelay 曾经转存成功。
+                如果远端文件已变动，本次关联会被拒绝；再次去重时也会实时读取文件，无法确认的转人工。
+              </p>
+            </div>
+          ) : <p className="text-sm text-muted-foreground">{existingBusy ? '读取索引中…' : '没有可显示的候选文件'}</p>}
+        </DialogContent>
+      </Dialog>
+      <DirectoryPicker open={existingPicker && Boolean(existingItem)}
+        initialCid="0" initialProvider="aliyun"
+        onOpenChange={setExistingPicker}
+        onSelect={(folder) => { void scanSelectedFolder(folder); }} />
+      <Dialog open={Boolean(startItem)} onOpenChange={(open) => { if (!open && !startBusy) setStartItem(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>设置起始集 · {startItem?.title}</DialogTitle>
+            <DialogDescription>只影响今后自动放行的单集，不补历史合集，也不改变正在排队的任务。</DialogDescription>
+          </DialogHeader>
+          <label className="text-sm font-medium" htmlFor="edit-sub-start">最早自动接收集号（含本集）</label>
+          <Input id="edit-sub-start" type="number" min={1} max={100000}
+            value={startInput} disabled={startBusy} onChange={(e) => setStartInput(e.target.value)}
+            placeholder="例如：100（留空则取消限制）" />
+          <p className="text-xs text-muted-foreground">当前 E100：填写 100 可以接收 E100；填写 101 则从 E101 开始。仍会检查季集、现有文件和去重，无法确认的交给人工。</p>
+          <Button onClick={() => void saveStart()} disabled={startBusy}>
+            {startBusy ? '保存中' : '保存起始集'}
+          </Button>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={Boolean(testItem)} onOpenChange={(open) => { if (!open && !testBusy) setTestItem(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>订阅模拟测试 · {testItem?.title} 第 {testItem?.season} 季</DialogTitle>
+            <DialogDescription>
+              优先读取最近已接收的对应频道消息；也可以粘贴一条真实资源消息。
+              仅运行识别和订阅决策，不产生任务、不访问或修改网盘文件。
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea value={testText} onChange={(event) => setTestText(event.target.value)}
+            rows={5} maxLength={12000} disabled={testBusy}
+            placeholder="可留空：自动选择已接收的匹配消息。或者粘贴频道中的完整资源消息（含分享链接）。" />
+          <Button disabled={testBusy} onClick={() => void runSimulation()}>
+            {testBusy ? <Loader2 className="animate-spin" /> : <FlaskConical />}
+            {testBusy ? '分析中' : '开始模拟测试'}
+          </Button>
+          {testResult ? (
+            <div role="status" className="max-h-72 space-y-2 overflow-auto rounded-lg border border-border bg-background/60 p-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <ToneBadge tone={testResult.status === 'automatic' ? 'success' :
+                  testResult.status === 'blocked' ? 'danger' : 'warning'}>
+                  {testResult.status === 'automatic' ? '预计自动放行' :
+                   testResult.status === 'no_sample' ? '尚无匹配样例' :
+                   testResult.status === 'manual' ? '需要人工处理' :
+                   testResult.status === 'not_matched' ? '未匹配该订阅' :
+                   testResult.status === 'no_source' ? '没有监听来源' : '被规则阻止'}
+                </ToneBadge>
+                {testResult.source ? <span className="text-xs text-muted-foreground">{testResult.source}</span> : null}
+                {testResult.example_origin ? (
+                  <span className="text-xs text-muted-foreground">
+                    {testResult.example_origin === 'telegram_search' ? '· Telegram 频道历史' :
+                     testResult.example_origin === 'pasted' ? '· 粘贴的消息' : '· 已接收的消息'}
+                  </span>
+                ) : null}
+              </div>
+              <p>{testResult.reason}</p>
+              {testResult.parsed ? (
+                <p className="text-muted-foreground">
+                  识别：{testResult.parsed.title || '未知'} · 第 {testResult.parsed.season ?? '?'} 季
+                  {testResult.parsed.episodes?.length
+                    ? ` · 第 ${compactEpisodes(testResult.parsed.episodes)} 集` : ''}
+                </p>
+              ) : null}
+              {testResult.routing ? <p className="text-muted-foreground">
+                目标网盘：{testResult.routing.target_storage === 'aliyun' ? '阿里云盘' : '115'}
+                {testResult.routing.compatible ? '' : '（与分享网盘不一致）'}
+              </p> : null}
+              {testResult.target_preview ? <p className="text-muted-foreground">预计目录：{testResult.target_preview}</p> : null}
+              {testResult.trail?.length ? (
+                <details className="rounded-md border border-border/70 px-2 py-1">
+                  <summary className="cursor-pointer text-xs">查看识别与决策轨迹</summary>
+                  <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                    {testResult.trail.map((step, i) => <p key={i}>{step}</p>)}
+                  </div>
+                </details>
+              ) : null}
+              <p className="text-xs text-muted-foreground">
+                本次测试没有创建任务，也未检查真实分享是否有效及目标是否已存在。
+              </p>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </Page>
   );
 }

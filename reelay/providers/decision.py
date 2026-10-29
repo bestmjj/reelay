@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
-from ..core import ai, rules, runtime, subscriptions, works
+from ..core import ai, rules, runtime, subscriptions
 from ..core.contracts import ApprovalMode, Decision, PipelineContext
 from ..core.media import pairs_label, planned_pairs
 from ..core.registry import register
@@ -59,7 +59,15 @@ class DefaultDecision:
             ctx.log(f"过滤：{verdict[1]}")
             return Decision.SKIP
 
-        # 2) 低置信度转人工
+        # 2) Never approve without a trustworthy identity, regardless of a
+        # custom confidence threshold (including 0) or subscription policy.
+        # A valid LLM JSON result is allowed to omit title/type; that means
+        # "needs human metadata", not "safe to save".
+        if not p.title or not p.title.strip() or p.media_type not in ("movie", "tv", "anime"):
+            ctx.log("识别信息不足：缺少可靠片名或影视类型，需人工确认")
+            return Decision.ASK
+
+        # 3) 低置信度转人工
         if ctx.meta.get("parse", {}).get("fallback"):
             ctx.log("LLM 降级结果只允许人工确认")
             return Decision.ASK
@@ -99,6 +107,9 @@ class SubscriptionDecision(DefaultDecision):
     @staticmethod
     def promote(ctx: PipelineContext, decision: Decision) -> Decision:
         p, rule = ctx.parsed, ctx.source_rule or {}
+        if (not p or not p.title or not p.title.strip()
+                or p.media_type not in ("movie", "tv", "anime")):
+            return decision
         if decision != Decision.ASK or ctx.meta.get("parse", {}).get("fallback"):
             return decision
         if p.confidence < rule.get("confidence_threshold", CONFIDENCE_ASK_THRESHOLD):
@@ -124,13 +135,30 @@ class SubscriptionDecision(DefaultDecision):
             return decision
         season = seasons.pop()
         episodes = {ep for s, ep in pairs if s == season}
-        if episodes:
-            have = works.episodes(runtime.services().stored_series(), works.of(p, ctx.meta.get("tmdb")), season)
-            if episodes <= have:
-                ctx.log(f"订阅《{item['title']}》：消息里的集都已入库，仍交给你确认")
-                return decision
+        # Never automatically copy a whole historical season when a subscriber
+        # first sees a share that contains E01-E100. One explicitly verified
+        # episode may proceed; a pack or unknown episode list needs review.
+        if len(episodes) != 1 or len(pairs) != 1:
+            ctx.log(f"订阅《{item['title']}》：资源包含 {len(pairs)} 个季集或无法确认具体集号，"
+                    "自动追更只处理明确的单集；合集进入人工审核以免误收整季")
+            return decision
+        # An explicitly configured starting episode prevents a late repost
+        # of an old single episode from being mistaken for a new release.
+        floor = item.get("start_episode")
+        if floor is not None and any(ep < floor for ep in episodes):
+            ctx.log(f"订阅《{item['title']}》：仅从 E{floor} 起自动接收，旧集不自动放行")
+            return decision
+        # Do not reject a subscriber's episode using the GLOBAL stored-series
+        # list: E106 on 115 does not prove E106 exists on the target Aliyun
+        # account. The storage pipeline checks the actual provider/drive and
+        # existing cloud files immediately before any copy; duplicates are
+        # skipped there, without flooding the manual approval inbox.
         record = ctx.ns("subscription")
-        record.update(title=item["title"], season=season, tmdbid=item["tmdbid"])
+        record.update(id=item["id"], title=item["title"], season=season, tmdbid=item["tmdbid"])
+        # The share itself may contain an entire old season. Restrict
+        # the storage selector to the one explicitly matched episode.
+        p.episodes = sorted(episodes)
+        ctx.source_rule["episodes_from"] = "message"
         if p.season is None:
             p.season, record["pinned"] = season, True
             ctx.log(f"订阅《{item['title']}》：消息没写季号，记为第 {season} 季，转存时只取这一季")

@@ -35,6 +35,21 @@ class SettingsMixin(ServiceBase):
         """按保存时的规则校验（不写入），返回规整后的配置；不合格抛 ValueError。"""
         config = normalize_config(config)
         self.pipeline.reg.validate_config(config)
+        from ..config import directory_matches_storage
+        for i, rule in enumerate([config["defaults"], *config["sources"]]):
+            effective = {**config["defaults"], **rule}
+            alias = effective["save_to"]
+            provider = effective["storage"]
+            if not directory_matches_storage(config["save_dirs"][alias], provider):
+                label = "默认规则" if i == 0 else f"监听来源「{effective['bot']}」"
+                raise ValueError(f"{label}使用 {provider}，但保存目录「{alias}」属于另一网盘；"
+                                 "请先选择匹配的网盘目录")
+        # Saved subscriptions use aliases too: prevent orphaning their destinations.
+        for subscription in self.store.subscriptions():
+            alias = subscription.get("save_to")
+            if alias and alias not in config["save_dirs"]:
+                raise ValueError(f"订阅《{subscription['title']}》第 {subscription['season']} 季使用目录「{alias}」，"
+                                 "请先修改该订阅的保存位置再删除目录")
         return config
 
     @contextmanager

@@ -6,7 +6,7 @@ import types
 import unittest
 
 from reelay.control.bot import ControlBot
-from reelay.core import messages, release
+from reelay.core import messages, release, runtime
 from reelay.core.contracts import ParsedResource, PipelineContext, RawMessage, TaskState
 from reelay.core.registry import Registry
 from reelay.core.service import ConflictError
@@ -185,11 +185,110 @@ class TestDelivery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<code>t1</code>", sent[1]["text"])
         self.assertEqual(sent[1]["buttons"], [[("🔍 核验转存", "rc:t1"), ("🗑 放弃并删除", "cf:t1:abandon")]])
 
+    async def test_saved_notification_uses_aliyun_prefixed_cache_instead_of_default(self):
+        ctx = tv(title="吞噬星空", year=2020, media_type="anime", episodes=[247])
+        ctx.save_dir_alias, ctx.save_dir_cid = "默认", "folder-id"
+        ctx.source_rule["storage"] = "aliyun"
+        ctx.ns("organize")["plan"] = [{
+            "target_dir": "国产动漫/吞噬星空 (2020) [tmdbid=101172]/Season 01",
+            "target_name": "吞噬星空 - S01E247 - 第 247 集 - 2160p.mp4",
+        }]
+        stored = {"默认": {"cid": "aliyun:folder-id", "path": "/影视/动漫"}}
+        store = types.SimpleNamespace(state_get=lambda *args: stored)
+        class NoNetwork:
+            def dir_path(self, cid):
+                raise AssertionError("Cached, matched destination should not require network")
+        services = types.SimpleNamespace(store=store, storage=lambda name: NoNetwork())
+        sent = []
+        async def sender(**kwargs):
+            sent.append(kwargs)
+        console = ConsoleNotify()
+        console.configure(sender=sender)
+        with runtime.scope({"defaults": {"storage": "aliyun"}}, services):
+            await console.notify(ctx, "saved")
+        self.assertIn(
+            "📂 位置：<code>/影视/动漫/国产动漫/吞噬星空 (2020) "
+            "[tmdbid=101172]/Season 01</code>",
+            sent[0]["text"],
+        )
+        self.assertNotIn("位置：<code>默认</code>", sent[0]["text"])
+
+    async def test_saved_notification_uses_exact_existing_episode_directory(self):
+        ctx = tv(title="吞噬星空", year=2020, media_type="anime", episodes=[247])
+        ctx.save_dir_alias, ctx.save_dir_cid = "默认", "real-season"
+        ctx.source_rule["storage"] = "aliyun"
+        ctx.ns("library")["direct_existing"] = {
+            "id": "real-season", "provider": "aliyun",
+            "path": "/影视/动漫/Dad/吞噬星空/Season 01",
+        }
+        ctx.ns("organize")["plan"] = [{
+            "target_dir": "", "target_name": "吞噬星空 - S01E247.mp4",
+        }]
+        console, sent = ConsoleNotify(), []
+        async def sender(**kwargs):
+            sent.append(kwargs)
+        console.configure(sender=sender)
+        await console.notify(ctx, "saved")
+        self.assertIn("📂 位置：<code>/影视/动漫/Dad/吞噬星空/Season 01</code>",
+                      sent[0]["text"])
+        self.assertNotIn("Season 01/吞噬星空 (2020)", sent[0]["text"])
+
+    async def test_saved_notification_reads_target_if_cache_missing_and_marks_unknown(self):
+        ctx = tv(title="吞噬星空", year=2020, media_type="anime", episodes=[247])
+        ctx.source_rule["storage"] = "aliyun"
+        ctx.save_dir_alias, ctx.save_dir_cid = "默认", "target-123"
+        ctx.ns("organize")["plan"] = [{
+            "target_dir": "国产动漫/吞噬星空 (2020)/Season 01",
+            "target_name": "吞噬星空 - S01E247.mp4",
+        }]
+        calls = []
+        class Storage:
+            fail = False
+            def dir_path(self, cid):
+                calls.append(cid)
+                if self.fail:
+                    raise RuntimeError("NotFound.File")
+                return "/影视"
+        provider = Storage()
+        services = types.SimpleNamespace(
+            store=types.SimpleNamespace(state_get=lambda *args: {
+                "默认": {"cid": "aliyun:old-id", "path": "/旧目录"},
+            }),
+            storage=lambda name: provider,
+        )
+        console, sent = ConsoleNotify(), []
+        async def sender(**kwargs):
+            sent.append(kwargs)
+        console.configure(sender=sender)
+        with runtime.scope({"defaults": {"storage": "aliyun"}}, services):
+            await console.notify(ctx, "saved")
+            provider.fail = True
+            await console.notify(ctx, "saved")
+        self.assertEqual(calls, ["target-123", "target-123"])
+        self.assertIn("📂 位置：<code>/影视/国产动漫/吞噬星空 (2020)/Season 01</code>",
+                      sent[0]["text"])
+        self.assertIn("位置：实际路径暂无法核验（目录别名：默认）", sent[1]["text"])
+        self.assertIn("📁 整理子目录：<code>国产动漫/吞噬星空 (2020)/Season 01</code>",
+                      sent[1]["text"])
+        self.assertNotIn("📂 位置：<code>/旧目录", sent[1]["text"])
+
+    def test_root_drive_path_remains_absolute(self):
+        ctx = tv()
+        ctx.ns("organize")["plan"] = [{
+            "target_dir": "国产动漫/吞噬星空 (2020)/Season 01",
+            "target_name": "吞噬星空 - S01E247.mp4",
+        }]
+        text = messages.saved_message(ctx, "/")
+        self.assertIn("📂 位置：<code>/国产动漫/吞噬星空 (2020)/Season 01</code>", text)
+
     async def test_bot_sends_posters_and_falls_back_to_text(self):
         calls = []
 
         class Client:
             fail = False
+
+            def is_connected(self):
+                return True
 
             async def send_file(self, chat, file, **kwargs):
                 if self.fail:
@@ -208,6 +307,28 @@ class TestDelivery(unittest.IsolatedAsyncioTestCase):
         await bot.send("没有海报", html=True)
         self.assertEqual([kind for kind, _, _ in calls], ["photo", "text", "text", "text"])
         self.assertEqual(calls[0][1:], ("https://x/p.jpg", "卡片"))
+
+    async def test_bot_to_bot_photo_rejection_does_not_try_text_again(self):
+        class UserIsBotError(Exception):
+            pass
+
+        class RejectedPeer:
+            photo_attempts = 0
+            text_attempts = 0
+            def is_connected(self):
+                return True
+            async def send_file(self, *args, **kwargs):
+                self.photo_attempts += 1
+                raise UserIsBotError("Bots cannot send messages to other bots")
+            async def send_message(self, *args, **kwargs):
+                self.text_attempts += 1
+
+        peer = RejectedPeer()
+        bot = ControlBot.__new__(ControlBot)
+        bot._client, bot._owner, bot._Button = peer, "1", None
+        with self.assertRaises(UserIsBotError):
+            await bot.send("卡片", html=True, photo="https://example.org/photo.png")
+        self.assertEqual((peer.photo_attempts, peer.text_attempts), (1, 0))
 
     def test_button_rows_and_links(self):
         bot = ControlBot.__new__(ControlBot)

@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 
-from .. import ai, library
+from .. import ai, library, subscriptions
 from ..config import config_revision, merge_config, normalize_config
 from ..contracts import PipelineContext
 from .base import ConflictError, ServiceBase
@@ -38,6 +38,79 @@ class SourceMixin(ServiceBase):
         self.pipeline.reg.validate_config(normalize_config(candidate))
         return merge_config({**copy.deepcopy(cfg["defaults"]), "forward": copy.deepcopy(cfg["forward"])}, draft)
 
+    async def submit_manual_resource(self, text: str, *, source: str | None = None) -> dict[str, Any]:
+        """Explicit user action to enqueue one existing share using the normal pipeline.
+
+        This is NOT a direct cloud copy. The worker will run normal parser,
+        provider routing, content dedup and duplicate-safe recovery first.
+        """
+        import hashlib
+        import re
+        from urllib.parse import urlsplit
+        from ..contracts import RawMessage
+        from ..parse_rules import parse_share_url, regex_fields
+
+        text = ai.text_field(text, limit=12000, label="资源消息")
+        configured = [rule["bot"] for rule in self.get_config().get("sources", [])]
+        urls: list[str] = []
+        # A Telegram permalink is not a cloud share. Retrieve exactly this
+        # post through the already authenticated listener, only if its channel
+        # is explicitly configured. Never fetch arbitrary t.me/c private IDs.
+        parsed_link = urlsplit(text.strip()) if text else None
+        telegram_id = None
+        if (parsed_link and parsed_link.scheme in ("https", "http")
+                and parsed_link.hostname in ("t.me", "www.t.me")):
+            match = re.fullmatch(r"/(?:s/)?([A-Za-z][A-Za-z0-9_]{4,31})/([0-9]{1,18})/?",
+                                 parsed_link.path)
+            if not match:
+                raise ValueError("仅支持已配置公开频道的 t.me/频道名/消息ID 链接；私有频道请粘贴完整资源消息")
+            source_name = "@" + match.group(1)
+            if source and source.casefold() != source_name.casefold():
+                raise ValueError("消息链接频道与所选来源不一致")
+            source = source_name
+            telegram_id = int(match.group(2))
+            if telegram_id < 1:
+                raise ValueError("Telegram 消息 ID 必须是正整数")
+            if not any(name.casefold() == source.casefold() for name in configured):
+                raise ValueError("此 Telegram 频道尚未配置为监听来源，不能读取或提交其消息")
+            fetched = await self.source_messages(source, limit=1, message_id=telegram_id)
+            rows = fetched.get("messages") or []
+            if not rows:
+                raise ConflictError("该频道消息不存在或当前监听账号没有读取权限")
+            text, urls = rows[0]["text"], rows[0].get("urls") or []
+        if not text or not parse_share_url(text, urls)[0]:
+            raise ValueError("没有检测到支持的网盘分享链接；请粘贴频道完整资源消息或有效阿里云盘/115 分享链接")
+        if not configured:
+            raise ValueError("请先添加 Telegram 监听来源并配置目标网盘")
+        selected = next((name for name in configured if source and name.casefold() == source.casefold()), None)
+        if source and not selected:
+            raise ValueError("立即转存只能选择已经配置的监听来源")
+        if not selected:
+            if len(configured) != 1:
+                raise ValueError("有多个监听来源时请明确选择要使用的来源配置")
+            selected = configured[0]
+        key = f"tg:{selected.casefold()}:{telegram_id}" if telegram_id else text
+        # Deterministic ID: double-clicks and repeated manual submissions must
+        # not generate endless duplicate tasks. Failed tasks can be retried.
+        msg_id = "manual-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+        # A share link by itself carries no verified title/season/episode.
+        # Parsers may mistakenly interpret its URL as a movie title.
+        unlabeled = not bool(regex_fields(text).get("title"))
+        raw = RawMessage(source=selected, msg_id=msg_id,
+                         text=text, urls=urls,
+                         extra={"manual_import": True, "manual_unlabeled": unlabeled,
+                                # A direct paste may select an exact source file;
+                                # never auto-copy before the user has verified it.
+                                "manual_review": telegram_id is None or unlabeled})
+        ctx = PipelineContext(raw=raw)
+        accepted = await self.pipeline.accept(ctx)
+        if not accepted:
+            raise ConflictError("这条消息已在转存队列中")
+        return {"task_id":accepted.task_id, "state":accepted.state.value,
+                "note":("资源已提交；未提供可验证片名的分享需先人工确认片名、集数和源文件，"
+                        "不会仅凭链接自动转存。" if telegram_id is None or unlabeled
+                        else "原频道消息已提交给后台；仍会经过分享清单与去重安全检查。")}
+
     async def test_parse(self, text: str, urls: list[str] | None = None, source: str | None = None,
                          rule: dict | None = None) -> dict[str, Any]:
         """与真实管线一致：合并默认规则 → 解析 → after_parse 扩展 → 确定性置信度 → 决策；不落库。
@@ -60,8 +133,21 @@ class SourceMixin(ServiceBase):
             "decision", ctx.source_rule.get("decision", cfg["defaults"]["decision"]))
         with self.pipeline.scope(ctx):
             decision = await decider.decide(ctx)
+        share_provider = (ctx.parsed.raw_fields.get("share_provider") if ctx.parsed else None)
+        target_storage = ctx.source_rule.get("storage") or cfg["defaults"]["storage"]
+        matched = subscriptions.match(
+            self.store.subscriptions(), ctx.parsed, ctx.meta.get("tmdb", {}),
+            seasons=subscriptions.seasons_of(ctx), auto_only=False)
+        target = self.pipeline.target_preview(ctx) if ctx.parsed and ctx.parsed.is_media else None
         return {"parsed": ctx.parsed.__dict__ if ctx.parsed else None,
                 "decision": getattr(decision, "value", str(decision)),
+                "routing": {"share_provider": share_provider, "target_storage": target_storage,
+                            "compatible": share_provider in (None, target_storage)},
+                "matched_subscription": {
+                    "id": matched["id"], "title": matched["title"], "season": matched["season"]
+                } if matched else None,
+                "released_by_subscription": bool(ctx.meta.get("subscription")),
+                "target_preview": target,
                 "confidence": ctx.meta.get("confidence"), "trail": ctx.trail}
 
     async def draft_source(self, bot: str, samples: list[str]) -> dict[str, Any]:
@@ -152,27 +238,55 @@ class SourceMixin(ServiceBase):
     # ------------------------------------------------------------------ #
     # 来源的识别规则（core/parse_rules.py）：取样例消息、AI 起草、试跑
     # ------------------------------------------------------------------ #
-    async def source_messages(self, bot: str, limit: int = 10) -> dict[str, Any]:
+    async def source_messages(self, bot: str, limit: int = 10, *, search: str | None = None,
+                              message_id: int | None = None) -> dict[str, Any]:
         """来源最近的消息：主进程在线时请它用监听会话实时读取，读不到时用这个来源已经收到的消息。"""
         bot = ai.text_field(bot, limit=100, label="来源")
         if not bot:
             raise ValueError("请先填写来源（Bot 或频道的用户名）")
         limit = max(1, min(int(limit), 20))
+        if message_id is not None:
+            if type(message_id) is not int or not 1 <= message_id <= 2 ** 63 - 1:
+                raise ValueError("Telegram 消息 ID 无效")
+            if bot.casefold() not in {item["bot"].casefold() for item in self.get_config().get("sources", [])}:
+                raise ValueError("只能读取已配置监听来源的消息")
+        if search is not None:
+            search = ai.text_field(search, limit=100, label="订阅片名")
+            if not search or bot.casefold() not in {
+                item["bot"].casefold() for item in self.get_config().get("sources", [])
+            }:
+                raise ValueError("订阅模拟只能检索已经配置的来源与非空片名")
         source = self.store.health_status().get("source", {})
         if source.get("status") == "connected" and not source.get("stale", True):
-            fetch_id = self.store.request_source_fetch(bot, limit)
+            fetch_id = self.store.request_source_fetch(bot, limit, search=search, message_id=message_id)
             deadline, problem = time.monotonic() + 25, "主进程没有及时响应"
             while time.monotonic() < deadline:
                 await asyncio.sleep(0.5)
                 row = self.store.source_fetch(fetch_id) or {}
                 if row.get("status") == "done":
-                    return {"messages": row["messages"], "origin": "telegram", "problem": None}
+                    if message_id is not None and not row["messages"]:
+                        raise ConflictError("找不到指定 Telegram 消息；可能已删除或无权访问")
+                    return {"messages": row["messages"],
+                            "origin": "telegram_search" if search else "telegram",
+                            "problem": None if row["messages"] else
+                            "频道搜索未找到该作品的网盘分享消息（不代表频道从未发布）"}
                 if row.get("status") == "failed":
                     problem = row["error"]
                     break
         else:
             problem = "监听服务没有运行或还没连上 Telegram"
-        messages = self.store.source_messages(bot, limit)
+        if message_id is not None:
+            raise ConflictError(f"无法通过监听账号读取指定消息：{problem}；不会用其他消息代替")
+        messages = self.store.source_messages(bot, max(limit, 200) if search else limit)
+        if search:
+            from ..discovery import contains_title
+            from ..parse_rules import parse_share_url
+            messages = [m for m in messages
+                        if contains_title(m["text"], search)
+                        and parse_share_url(m["text"], m["urls"])[0]][:limit]
+            if not messages:
+                return {"messages": [], "origin": "history",
+                        "problem": f"频道历史查询不可用（{problem}），本地也没有匹配的分享消息"}
         if not messages:
             raise ConflictError(f"读取不到 {bot} 的消息（{problem}），这个来源也还没有收到过消息，请手动粘贴几条")
         return {"messages": messages, "origin": "history", "problem": problem}

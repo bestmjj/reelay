@@ -61,14 +61,24 @@ function TaskRow({ item, onOpen }: { item: ITaskSummary; onOpen: () => void }) {
         </div>
         <MediaMeta mediaType={item.media_type} season={item.season} episodes={item.episodes} pairs={item.episode_pairs}
           resolution={item.resolution} size={item.size} className="mt-0.5" />
+        {item.wrong_source_quarantined ? (
+          <p className="mt-0.5 truncate text-xs font-semibold text-destructive">
+            <span aria-label="错片隔离">来源存疑，已暂停该集自动转存</span>
+          </p>
+        ) : null}
         {item.error ? <p className="mt-0.5 truncate text-xs text-destructive">{item.error}</p> : null}
+        {item.state === 'skipped' && item.skip_reason ? (
+          <p className="mt-0.5 truncate text-xs text-muted-foreground" title={item.skip_reason}>
+            {item.skip_kind === 'duplicate' ? '没有再次转存：' : '跳过原因：'}{item.skip_reason}
+          </p>
+        ) : null}
         <p className="mt-0.5 truncate text-xs text-muted-foreground md:hidden">
           {item.source} · {relativeTime(item.updated_at)}
         </p>
       </div>
       <span className="hidden w-44 shrink-0 truncate text-xs text-muted-foreground md:block">{item.source}</span>
       <span className="hidden w-16 shrink-0 truncate text-xs text-muted-foreground lg:block">{item.save_dir_alias ?? '—'}</span>
-      <span className="flex w-[72px] shrink-0 justify-end"><StatusBadge state={item.state} /></span>
+      <span className="flex w-[88px] shrink-0 justify-end"><StatusBadge state={item.state} skipKind={item.skip_kind} /></span>
       <span className="hidden w-20 shrink-0 text-right text-xs tabular-nums text-muted-foreground md:block" title={fullTime(item.updated_at)}>
         {relativeTime(item.updated_at)}
       </span>
@@ -195,7 +205,7 @@ export default function TasksPage() {
           <span className="flex-1">资源</span>
           <span className="w-44 shrink-0">来源</span>
           <span className="hidden w-16 shrink-0 lg:block">目录</span>
-          <span className="w-[72px] shrink-0 text-right">状态</span>
+          <span className="w-[88px] shrink-0 text-right">状态</span>
           <span className="w-20 shrink-0 text-right">更新</span>
           <span className="w-4 shrink-0" />
         </div>

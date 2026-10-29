@@ -19,6 +19,54 @@ class TaskRepository:
         with self._lock, self._conn:
             self._write_task(ctx, error=error)
 
+    def queue_repair_task(self, original: PipelineContext, repair: PipelineContext) -> None:
+        """Atomically keep DONE history and queue one independent repair child.
+
+        A second click cannot create another pending copy. The original
+        transfer ledger and recorded successful receipt remain untouched.
+        """
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            latest = self.get_task(original.task_id)
+            if not latest or latest.state != TaskState.DONE:
+                raise ValueError("原成功任务状态已变化，请刷新后重新核验")
+            old_children = (latest.meta.get("task") or {}).get("repair_children") or []
+            expected = (original.meta.get("task") or {}).get("repair_children") or []
+            if old_children != expected:
+                raise ValueError("其他补转任务已创建，请刷新后重新核验")
+            for child_id in old_children:
+                child = self.get_task(child_id)
+                if child and child.state not in (TaskState.DONE, TaskState.SKIPPED,
+                                                 TaskState.REJECTED):
+                    raise ValueError("已有补转任务还在排队或待处理，请先处理该任务")
+            latest.ns("task")["repair_children"] = [*old_children, repair.task_id]
+            latest.log(f"人工创建只补丢失文件的独立任务 {repair.task_id}；原成功记录保留")
+            self._write_task(latest)
+            self._write_task(repair)
+
+    def queue_bulk_missing_draft(self, original: PipelineContext, draft: PipelineContext) -> None:
+        """Create a separate manual batch draft atomically; never rewrite DONE.
+
+        The original receipt and content ledger remain intact. Only the
+        parent-child pointer is appended to the historical task snapshot.
+        Repeated clicks cannot create two concurrent bulk copies.
+        """
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            latest = self.get_task(original.task_id)
+            if not latest or latest.state != TaskState.DONE or not (latest.result or {}).get("storage_verified"):
+                raise ValueError("原成功任务已经变化，请刷新并重新核对")
+            children = list(latest.ns("task").get("bulk_missing_children") or [])
+            for child_id in children:
+                existing = self.get_task(child_id)
+                if existing and existing.state not in (
+                        TaskState.DONE, TaskState.SKIPPED, TaskState.REJECTED):
+                    raise ValueError("已有批量补集草稿或执行中任务，请先处理，避免重复复制")
+            latest.ns("task")["bulk_missing_children"] = [*children, draft.task_id]
+            latest.log(f"仅创建人工缺集草稿 {draft.task_id}；原成功回执、状态和去重记录不变")
+            self._write_task(latest)
+            self._write_task(draft)
+
     def _write_task(self, ctx: PipelineContext, *, error: str | None = None) -> None:
         """事务内写入；调用方负责提交，不能在这里提前 commit。"""
         snap = _dump_ctx(ctx)
@@ -179,7 +227,9 @@ class TaskRepository:
             "json_extract(snapshot,'$.parsed.size') AS size, "
             "json_extract(snapshot,'$.parsed.raw_fields.poster_path') AS poster_path, "
             "json_extract(snapshot,'$.save_dir_alias') AS save_dir_alias, "
-            "json_extract(snapshot,'$.meta.storage.manifest.pairs') AS episode_pairs "
+            "json_extract(snapshot,'$.meta.storage.manifest.pairs') AS episode_pairs, "
+            "json_extract(snapshot,'$.meta.task.skip.kind') AS skip_kind, "
+            "json_extract(snapshot,'$.meta.task.skip.reason') AS skip_reason "
             f"FROM tasks{where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
             tuple(params),
         ).fetchall()

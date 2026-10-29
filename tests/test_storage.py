@@ -333,6 +333,37 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done_b.state, TaskState.SKIPPED)
         self.assertEqual(len(self.cloud.receives()), 1)
 
+    async def test_approved_matching_episode_is_recorded_as_duplicate_not_user_rejection(self):
+        # The administrator approved a new share, but the same episode was
+        # already VERIFIED on this cloud account. Never copy it again and
+        # never label the result as the user's deliberate "ignore" action.
+        self.cloud.add_share("old", "小城良方.S01E14.mkv")
+        self.cloud.add_share("new", "小城良方.S01E14.mkv")
+        first = await self.execute(self.task("old", title="小城良方", episodes=(14,)))
+        self.assertEqual(first.state, TaskState.DONE)
+        pending = self.task("new", title="小城良方", episodes=(14,))
+        pending.state = TaskState.PENDING_APPROVAL
+        self.store.save_task(pending)
+        await self.service.approve(pending.task_id)
+        approved = self.store.get_task(pending.task_id)
+        self.assertEqual(approved.state, TaskState.QUEUED)
+        self.assertTrue(approved.ns("task")["user_approved"])
+        # Confirming the form must not issue a cloud transfer immediately.
+        self.assertEqual(len(self.cloud.receives()), 1)
+        skipped = await self.execute(pending)
+        self.assertEqual(skipped.state, TaskState.SKIPPED)
+        self.assertEqual(skipped.ns("task")["skip"]["kind"], "duplicate")
+        self.assertIn("均已入库", skipped.ns("task")["skip"]["reason"])
+        self.assertTrue(skipped.ns("task")["user_approved"])
+        self.assertEqual(len(self.cloud.receives()), 1)
+        self.assertFalse(skipped.ns("storage").get("manifest"))
+        # No stale resource claim should block a later new episode.
+        claimed = self.store._conn.execute(
+            "SELECT count(*) AS count FROM resource_claims WHERE task_id=?",
+            (pending.task_id,),
+        ).fetchone()["count"]
+        self.assertEqual(claimed, 0)
+
     async def test_different_shares_of_same_episode_are_serialized(self):
         self.cloud.add_share('a', 'S01E01.mkv')
         self.cloud.add_share('b', 'S01E01.mkv')
@@ -402,7 +433,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((done.parsed.season, done.parsed.episodes), (3, [1]))
         self.assertEqual(self.path_of(int(done.ns('storage')['landed'][0]['id'])),
                          '剧集 (2026)/Season 03/剧集 - S03E01 - 第 1 集.mkv')
-        self.assertEqual(done.ns('storage')['content_keys'], ['p115:1:episode:剧集|S03|E01'])
+        self.assertEqual(done.ns('storage')['content_keys'], ['p115:account:episode:剧集|S03|E01'])
 
     async def test_message_scope_only_receives_new_declared_episodes(self):
         self.cloud.add_share('share', 'S01E01.mkv', 'S01E02.mkv')
@@ -415,6 +446,46 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.parsed.episodes, [2])
         self.assertEqual([x[3] for x in self.cloud.receives()], [['500'], ['501']])
         self.assertEqual(done.state, TaskState.DONE)
+
+    async def test_variety_bundle_editions_transfer_once_and_new_bonus_only(self):
+        """Mock cloud: upper/lower/bonus/pure survive rename and live dedup."""
+        titles = [
+            "20261026.第3期加更.mp4", "20261025.第3期下.mkv",
+            "20261024.第3期上.mp4", "20261020.第2期还有加更.mp4",
+            "20261019.第2期加更.mp4", "20261018.第2期下.mp4",
+            "20261017.第2期上.mp4", "20261010.纯享 第01期上·慢速目击证人纯享.mp4",
+        ]
+        self.cloud.add_share('variety', *titles)
+        one = self.task('variety', title='某综艺', episodes=(1, 2, 3))
+        one.raw.text = '某综艺 第3期 2026年'
+        self.store.save_task(one)
+        stored = await self.execute(one)
+        self.assertEqual(stored.state, TaskState.DONE, stored.trail)
+        self.assertEqual(len(stored.ns('storage')['landed']), 8)
+        self.assertEqual(len(self.cloud.receives()), 1)
+        self.assertEqual(len(self.cloud.receives()[0][3]), 8)
+        paths = [self.path_of(int(f['id'])) for f in stored.ns('storage')['landed']]
+        self.assertEqual(len(set(paths)), 8)
+        self.assertTrue(any('第 3 期（上）' in path for path in paths))
+        self.assertTrue(any('第 3 期（下）' in path for path in paths))
+        self.assertTrue(any('第 3 期（加更）' in path for path in paths))
+        self.assertTrue(any('第 1 期（纯享上）' in path for path in paths))
+        self.assertEqual(self.store.stored_episode_pairs(works.identity('某综艺'), '1'), [])
+        self.assertEqual(len(self.store.stored_variety_parts_in_drive(
+            works.identity('某综艺'), 'p115')), 8)
+
+        self.cloud.shares['variety'].append({
+            'id': '1600', 'parent_id': 0, 'name': '20261027.第3期还有加更.mp4',
+            'size': 456, 'sha1': 'A' * 40, 'is_dir': False,
+        })
+        second = await self.execute(self.task('variety', title='某综艺', episodes=(3,)))
+        self.assertEqual(second.state, TaskState.DONE, second.trail)
+        self.assertEqual([x[3] for x in self.cloud.receives()][1], ['1600'])
+        self.assertEqual(len(second.ns('storage')['landed']), 1)
+
+        repeated = await self.execute(self.task('variety', title='某综艺', episodes=(3,)))
+        self.assertEqual(repeated.state, TaskState.SKIPPED, repeated.trail)
+        self.assertEqual(len(self.cloud.receives()), 2)
 
     async def test_unresolvable_episode_stops_before_transfer_without_auto_retry(self):
         self.cloud.add_share('share', 'video.mkv')
@@ -526,7 +597,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         a, b = self.task('a', episodes=()), self.task('b', episodes=())
         # a 先占住 E02：b 拿到清单后无法占位，释放全部占位重新排队（不持有任何键等待）。
         self.store.claim_resource(self.store.get_task(a.task_id), 'p115:1:a',
-                                  content_keys=['p115:1:episode:' + works.claim_key('剧集', 1, 2)])
+                                  content_keys=['p115:account:episode:' + works.claim_key('剧集', 1, 2)])
         waiting = await self.execute(b)
         self.assertEqual(waiting.state, TaskState.QUEUED)
         self.assertEqual(waiting.ns('storage')['manifest']['episodes'], [2, 3])
@@ -553,9 +624,14 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         season = self.cloud.add(Cloud.directory(0, show['id'], 'Season 01'), show['id'])
         return self.cloud.add({'name': name, 'size': size, 'is_dir': False}, season['id']), season['id']
 
-    def use_conflict(self, strategy):
-        self.cfg = {**self.cfg, 'plugins': {'organizer': {'conflict': strategy}}}
+    def use_conflict(self, strategy, *, allow_delete=False):
+        # Destructive legacy tests must opt in explicitly. Production's
+        # no_delete=True default must remain safe, even after this CI fix.
+        self.cfg = {**self.cfg, 'plugins': {'organizer': {
+            'conflict': strategy, 'no_delete': not allow_delete,
+        }}}
         self.pipeline = Pipeline(self.reg, self.store, self.cfg)
+        self.service.pipeline = self.pipeline
 
     async def test_conflict_manual_keeps_both_files_for_review(self):
         self.cloud.add_share('share', 'Show.S01E01.2160p.mkv')
@@ -595,7 +671,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.ns('organize')['conflicts'], [])
 
     async def test_conflict_skip_discards_new_copy_and_finishes(self):
-        self.use_conflict('skip')
+        self.use_conflict('skip', allow_delete=True)
         self.cloud.add_share('share', 'Show.S01E01.2160p.mkv')
         existing, season = self.existing_library_file()
         done = await self.execute(self.task())
@@ -604,7 +680,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertIn(('delete', [int(done.ns('storage')['landed'][0]['id'])]), self.cloud.calls)
 
     async def test_conflict_upgrade_replaces_lower_quality_file(self):
-        self.use_conflict('upgrade')
+        self.use_conflict('upgrade', allow_delete=True)
         self.cloud.add_share('share', 'Show.S01E01.2160p.mkv')
         existing, season = self.existing_library_file(size=500)
         self.store.state_set('organizer', f"file:{existing['id']}", {'rank': 3, 'size': 500})  # 曾入库 1080p
@@ -616,7 +692,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.ns('organize')['conflicts'][0]['action'], 'upgrade')
 
     async def test_conflict_upgrade_keeps_better_existing_file(self):
-        self.use_conflict('upgrade')
+        self.use_conflict('upgrade', allow_delete=True)
         self.cloud.add_share('share', 'Show.S01E01.720p.mkv')
         existing, season = self.existing_library_file(name='剧集 - S01E01.mkv', size=10**9)
         self.store.state_set('organizer', f"file:{existing['id']}", {'rank': 4})
@@ -624,13 +700,15 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.state, TaskState.DONE)
         self.assertEqual([x['id'] for x in self.cloud.children(season)], [existing['id']])
 
-    async def test_dedup_is_scoped_to_target_directory(self):
+    async def test_dedup_is_scoped_to_physical_drive_not_target_folder(self):
+        # A verified E01 anywhere on the same physical drive is already
+        # available, even when the new subscription uses another save alias.
         self.cloud.add_share('share', 'S01E01.mkv')
-        await self.execute(self.task())
-        done = await self.execute(self.task(alias='新目录'))
-        self.assertEqual(done.state, TaskState.DONE)
-        self.assertEqual(len(self.cloud.receives()), 2)
-        self.assertEqual(done.result['to_cid'], 2)
+        first = await self.execute(self.task())
+        self.assertEqual(first.state, TaskState.DONE)
+        repeated = await self.execute(self.task(alias='新目录'))
+        self.assertEqual(repeated.state, TaskState.SKIPPED)
+        self.assertEqual(len(self.cloud.receives()), 1)
 
     async def test_timeout_after_receive_is_reconciled_without_resending(self):
         self.cloud.add_share('share', 'S01E01.mkv')
@@ -1008,6 +1086,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         return ctx, existing, season, landed
 
     async def test_conflict_choice_delete_new_copy(self):
+        self.use_conflict('manual', allow_delete=True)
         ctx, existing, season, landed = await self.conflict_task()
         await self.service.requeue_organize(ctx.task_id, conflict='skip')
         done = await self.execute(ctx)
@@ -1019,6 +1098,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.cloud.receives()), 1)
 
     async def test_conflict_choice_overwrite_library_file(self):
+        self.use_conflict('manual', allow_delete=True)
         ctx, existing, season, landed = await self.conflict_task()
         await self.service.requeue_organize(ctx.task_id, conflict='replace')
         done = await self.execute(ctx)
@@ -1045,6 +1125,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
             await self.service.requeue_organize(ctx.task_id, conflict='skip', save_dir_alias='新目录')
 
     async def test_overwrite_with_lost_delete_response_resumes_without_deleting_again(self):
+        self.use_conflict('manual', allow_delete=True)
         ctx, existing, season, landed = await self.conflict_task()
         await self.service.requeue_organize(ctx.task_id, conflict='replace')
         self.cloud.fail_delete = 'after'
@@ -1058,6 +1139,7 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cloud.calls.count(('delete', [existing['id']])), 1)
 
     async def test_delete_new_copy_is_verified_and_retried_when_unclear(self):
+        self.use_conflict('manual', allow_delete=True)
         ctx, existing, season, landed = await self.conflict_task()
         await self.service.requeue_organize(ctx.task_id, conflict='skip')
         self.cloud.fail_delete = 'ignore'  # 返回成功却没删：读回发现

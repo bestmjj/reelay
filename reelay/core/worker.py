@@ -61,6 +61,20 @@ class Worker:
         self._next_dir_paths = 0.0
         self._next_recheck = 0.0
 
+    def _used_storages(self) -> set[str]:
+        """Use configured source overrides instead of requiring the default 115 cloud."""
+        cfg = self.pipeline.cfg
+        rules = cfg.get("sources") or [cfg["defaults"]]
+        return {rule.get("storage") or cfg["defaults"]["storage"] for rule in rules}
+
+    def _blocked_for(self, ctx) -> bool:
+        """A missing 115 login or 115 rate limit must not block Aliyun jobs."""
+        if not self.storage_paused:
+            return False
+        provider = (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")
+                    or self.pipeline.cfg["defaults"]["storage"])
+        return provider == "p115"
+
     @property
     def storage_paused(self) -> str | None:
         """转存与整理暂停时的原因（多个原因用分号连接）；没有暂停时为 None。"""
@@ -103,18 +117,32 @@ class Worker:
         """
         revision, cfg = self.pipeline.revision, self.pipeline.cfg
         paths = {}
-        try:
-            storage = self.pipeline.reg.get_provider("storage", cfg["defaults"].get("storage", "p115"))
-            for alias, cid in cfg["save_dirs"].items() if hasattr(storage, "dir_path") else ():
-                path = await asyncio.to_thread(storage.dir_path, str(cid))
+        incomplete = False
+        for alias, reference in cfg["save_dirs"].items():
+            reference = str(reference)
+            if reference.startswith("aliyun:"):
+                name, cid = "aliyun", reference.removeprefix("aliyun:")
+            else:
+                name, cid = cfg["defaults"].get("storage", "p115"), reference
+            try:
+                storage = self.pipeline.reg.get_provider("storage", name)
+                if not hasattr(storage, "dir_path"):
+                    continue
+                path = await asyncio.to_thread(storage.dir_path, cid)
                 if path:
-                    paths[alias] = {"cid": str(cid), "path": path}
-        except Exception as exc:  # noqa: BLE001 - 只影响展示
-            if self._next_dir_paths == 0.0:
-                log.warning("读取保存目录的网盘路径失败，页面暂时显示目录别名：%s", exc)
+                    paths[alias] = {"cid": reference, "path": path}
+                else:
+                    incomplete = True
+            except Exception as exc:  # display-only, other aliases still usable
+                incomplete = True
+                if self._next_dir_paths == 0.0:
+                    log.warning("读取保存目录「%s」的网盘路径失败（%s）；不影响其他目录",
+                                alias, type(exc).__name__)
+        self.store.state_set("kernel", "save_dir_paths", paths)
+        if incomplete:
+            # Retry unresolved aliases without throwing away the valid paths.
             self._next_dir_paths = time.time() + 60
             return
-        self.store.state_set("kernel", "save_dir_paths", paths)
         self._dir_paths_revision, self._next_dir_paths = revision, 0.0
 
     async def _refresh_metadata(self) -> None:
@@ -149,7 +177,7 @@ class Worker:
                 await self.check_auth()
             if self._dir_paths_revision != self.pipeline.revision and time.time() >= self._next_dir_paths:
                 await self.record_dir_paths()
-            if not self.storage_paused and time.time() >= self._next_recheck:
+            if time.time() >= self._next_recheck:
                 self._next_recheck = time.time() + RECHECK_SCAN_SEC
                 try:
                     await self.recheck_transfers()
@@ -175,7 +203,7 @@ class Worker:
         for row in self.store.list_by_state(TaskState.NEED_MANUAL, 500):
             ctx = self.store.get_task(row["task_id"])
             ns = ctx.ns("storage") if ctx else {}
-            if not ctx or ns.get("phase") != "receiving" or not ns.get("manifest"):
+            if not ctx or ns.get("phase") != "receiving" or not ns.get("manifest") or self._blocked_for(ctx):
                 continue
             record = ns.get("auto_recheck") or {}
             since = record.get("since", row["updated_at"])
@@ -237,7 +265,9 @@ class Worker:
         )
         self.store.heartbeat("p115_oauth", status=oauth_state, error=auth.oauth_error,
                              configured=auth.has_oauth)
-        if self.pipeline.cfg["defaults"].get("storage", "p115") == "p115" and not auth.has_cookie:
+        if "p115" not in self._used_storages():
+            self.resume_storage()
+        elif not auth.has_cookie:
             self.pause_storage("未配置 115 cookie，转存与整理已暂停；请在管理台「设置 → 115 网盘」扫码登录")
         elif cookie_state == AuthState.EXPIRED:
             self.pause_storage(f"115 cookie 已失效（{auth.cookie_error or '需要重新登录'}），转存与整理已暂停；"
@@ -281,8 +311,11 @@ class Worker:
             if until != self._cooldown_saved:
                 self.store.state_set(*COOLDOWN_STATE, {"until": until, "reason": reason})
                 self._cooldown_saved = until
-            self.pause_storage(f"115 触发风控（{reason[:60]}），转存与整理暂停到 {time.strftime('%H:%M', time.localtime(until))}，"
-                               "之后自动继续", kind="cooldown")
+            if "p115" in self._used_storages():
+                self.pause_storage(f"115 触发风控（{reason[:60]}），115 转存与整理暂停到 {time.strftime('%H:%M', time.localtime(until))}，"
+                                   "之后自动继续", kind="cooldown")
+            else:
+                self.resume_storage("cooldown")
         elif starting or "cooldown" in self._paused:
             self.resume_storage("cooldown")
 
@@ -299,9 +332,11 @@ class Worker:
     async def _poll(self, *, drain: bool) -> None:
         while not self._stop.is_set():
             for state in (TaskState.STORED, TaskState.RECEIVED, TaskState.QUEUED):
-                if self.storage_paused and state in STORAGE_STATES:
-                    continue
                 for row in self.store.list_by_state(state, limit=100, due_only=True):
+                    if self.storage_paused and state in STORAGE_STATES:
+                        queued_ctx = self.store.get_task(row["task_id"])
+                        if queued_ctx and self._blocked_for(queued_ctx):
+                            continue
                     await self._enqueue(row["task_id"], state)
             if drain and not self._seen_inflight and self._queue.empty():
                 return
@@ -328,8 +363,8 @@ class Worker:
         ctx = self.store.get_task(task_id)
         if not ctx or ctx.state != expected_state:
             return
-        if self.storage_paused and expected_state in STORAGE_STATES:
-            return  # 已入队但随后暂停：保持原状态，恢复后再领取
+        if expected_state in STORAGE_STATES and self._blocked_for(ctx):
+            return  # 仅对应网盘被暂停；不影响其他 Provider 的任务
         try:
             if expected_state == TaskState.RECEIVED:
                 await self.pipeline.process_received(ctx)
@@ -359,7 +394,9 @@ class Worker:
         except ValueError:
             retry_from = expected_state
         error = self.store.get_task_record(task_id)["error"]
-        if retry_from in STORAGE_STATES and is_auth_failure(error):
+        provider = (fresh.ns("storage").get("provider") or fresh.source_rule.get("storage")
+                    or self.pipeline.cfg["defaults"]["storage"])
+        if retry_from in STORAGE_STATES and provider == "p115" and is_auth_failure(error):
             # 鉴权失效不是任务本身的问题：回到原阶段等待恢复，不消耗重试次数。
             self.pause_storage("115 返回鉴权失败（需要重新登录），转存与整理已暂停；"
                                "请在管理台「设置 → 115 网盘」重新扫码，恢复后自动继续")

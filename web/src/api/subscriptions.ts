@@ -10,13 +10,33 @@ export interface ISubscription {
   tmdbid: number | null;
   /** false 只做缺集提醒，不自动放行新集。 */
   auto: boolean;
+  /** Smallest episode number eligible for future auto-transfer, inclusive. */
+  start_episode: number | null;
+  /** Verified Reelay transfer ledger only, not necessarily all cloud media. */
   have: number[];
+  /** Historical titles tied to the same TMDB ID; for client-side search. */
+  aliases?: string[];
+  /** Quarantined wrong-source episodes must never count as successfully transferred. */
+  quarantined?: number[];
+  /** Scan observations only; never count as a completed Reelay transfer. */
+  observed?: number[];
+  scan_complete?: boolean;
+  /** Unrecorded by Reelay; not proof that a file is missing from the drive. */
   missing: number[];
+  missing_truncated?: boolean;
   aired: number | null;
   /** 电视剧 / 动漫 / 综艺 / 纪录片 / 少儿（按 TMDB 题材）。 */
   category: string;
   /** 播完且全部入库后由每日巡检标记：不再自动转存与巡检缺集。 */
   finished: { date: string; episodes: number } | null;
+  discovery?: {
+    source?: string;
+    checked_at?: number;
+    matches?: number;
+    emitted?: number;
+    error?: string | null;
+    next_at?: number;
+  } | null;
 }
 
 export interface ISubscriptionSuggestion {
@@ -40,6 +60,8 @@ export interface ISubscriptionsResp {
   suggestions: ISubscriptionSuggestion[];
   /** 转存方式不支持订阅放行的规则（「默认规则」或来源名）。 */
   inactive: string[];
+  /** Configured sources, used to route one-off shares to the correct cloud. */
+  sources: string[];
 }
 
 export interface IShowCandidate {
@@ -68,12 +90,73 @@ export interface IAddSubscriptionResp {
 /** 一部剧的一季：已有订阅带上 id；订阅建议只有片名、季与 tmdbid。 */
 type ShowKey = { id?: number; title: string; season: number; tmdbid: number | null };
 
+export interface ISubscriptionSimulation {
+  status: 'no_source' | 'no_sample' | 'not_matched' | 'blocked' | 'automatic' | 'manual';
+  reason: string;
+  source?: string;
+  example_origin?: 'pasted' | 'local' | 'telegram_search' | 'history';
+  subscription: { id: number; title: string; season: number };
+  parsed?: { title?: string; media_type?: string; season?: number; episodes?: number[];
+             share_code?: string; raw_fields?: Record<string, unknown> } | null;
+  matched_subscription?: { id: number; title: string; season: number } | null;
+  decision?: string;
+  routing?: { share_provider: string | null; target_storage: string; compatible: boolean };
+  target_preview?: string | null;
+  trail?: string[];
+  task_created: false;
+  share_checked?: false;
+  dedup_checked?: false;
+}
+
+export interface IExistingVideo {
+  file_key: string;
+  provider: 'aliyun' | 'p115';
+  alias: string;
+  drive_id: string;
+  name: string;
+  path: string;
+  season: number;
+  episode: number;
+  size?: number | null;
+  associated: boolean;
+}
+export interface IExistingPreview {
+  items: IExistingVideo[];
+  total: number;
+  next_offset: number | null;
+  scan_complete: boolean;
+  folder?: {
+    provider: 'p115' | 'aliyun'; cid: string; path: string; drive_id: string;
+    skipped: number; snapshot: {
+      complete: boolean; has_more: boolean; file_count: number; errors: string[];
+    };
+  } | null;
+  subscription: { id: number; title: string; season: number; tmdbid: number | null };
+}
+export interface IFolderScanResult {
+  ok: boolean; provider: 'p115' | 'aliyun'; path: string;
+  file_count: number; eligible: number; skipped: number;
+  complete: boolean; has_more: boolean; errors: string[];
+}
+
 export const subscriptionApi = {
   list: () => get<ISubscriptionsResp>('subscriptions'),
+  simulate: (id: number, text?: string) =>
+    post<ISubscriptionSimulation>('subscriptions/simulate', { id, text: text || null }),
+  submitManual: (text: string, source?: string) =>
+    post<{ task_id: string; state: string; note: string }>('resources/submit', { text, source: source || null }),
   resolve: (text: string) => post<IResolveResp>('subscriptions/resolve', { text }),
-  add: (item: { title: string; season?: number | null; tmdbid?: number | null; total?: number | null; auto?: boolean }) =>
+  add: (item: { title: string; season?: number | null; tmdbid?: number | null; total?: number | null; auto?: boolean; start_episode?: number | null }) =>
     post<IAddSubscriptionResp>('subscriptions', item),
   addFromTask: (taskId: string) => post<IAddSubscriptionResp>(`subscriptions/from-task/${taskId}`),
+  existing: (id: number, offset = 0) =>
+    get<IExistingPreview>(`subscriptions/existing?id=${id}&offset=${offset}`),
+  scanExistingFolder: (id: number, provider: 'p115' | 'aliyun', cid: string) =>
+    post<IFolderScanResult>('subscriptions/existing/scan-folder', { id, provider, cid }),
+  associateExisting: (id: number, fileKeys: string[]) =>
+    post<{ ok: boolean; associated: number; note: string }>('subscriptions/existing/associate', { id, file_keys: fileKeys }),
+  setStart: (id: number, startEpisode: number | null) =>
+    post<ISubscription>('subscriptions/start', { id, start_episode: startEpisode }),
   remove: (item: ShowKey) => post<{ ok: boolean }>('subscriptions/remove', item),
   reopen: (item: ShowKey) => post<{ ok: boolean }>('subscriptions/reopen', item),
   /** 订阅建议「不用了」：这部剧这一季不再出现在建议里（Telegram 上同样不再提示）。 */

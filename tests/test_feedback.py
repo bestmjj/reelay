@@ -194,16 +194,19 @@ class TestAssistBeforeManual(ServiceCase):
         with self.pl.scope(self.pl.cfg):
             return await storage.select(ctx, listing), storage
 
-    async def test_unrecognised_filenames_are_mapped_by_ai_and_validated(self):
-        listing = [{"id": "1", "name": "剧 一.mp4"}, {"id": "2", "name": "剧 二.mp4"}, {"id": "3", "name": "剧.E03.mp4"}]
+    async def test_unrecognised_filenames_cannot_be_assigned_episodes_by_ai(self):
+        # Security regression: E247 from message cannot make arbitrary
+        # '4K.mp4' or '剧 一.mp4' belong to that episode.
+        listing = [{"id": "1", "name": "剧 一.mp4"}, {"id": "2", "name": "剧 二.mp4"},
+                   {"id": "3", "name": "剧.E03.mp4"}]
         ctx = self.ctx()
-        selection, storage = await self.select(ctx, listing, {"episodes": [
-            {"name": "剧 一.mp4", "season": 1, "episode": 1}, {"name": "剧 二.mp4", "season": None, "episode": 2}]})
-        self.assertEqual(selection["episodes"], [1, 2, 3])
-        self.assertTrue(ctx.meta["assist"]["accepted"])
-        payload = json.loads(storage._client.calls[0]["messages"][1]["content"])
-        self.assertIn("无法从文件名识别集号", payload["problem"])
-        self.assertNotIn("115.com", payload["message"])
+        with self.assertRaisesRegex(NeedsManual, "AI 方案未通过校验") as error:
+            await self.select(ctx, listing, {"episodes": [
+                {"name": "剧 一.mp4", "season": 1, "episode": 1},
+                {"name": "剧 二.mp4", "season": None, "episode": 2}]})
+        self.assertIn("AI 不能根据消息集号", str(error.exception))
+        self.assertFalse(ctx.meta["assist"]["accepted"])
+        self.assertIn("无法从文件名识别集号", ctx.meta["assist"]["problem"])
         self.assertEqual(self.service.llm_usage()["purposes"][0]["purpose"], "assist")
 
     async def test_proposals_that_contradict_filenames_still_need_manual(self):

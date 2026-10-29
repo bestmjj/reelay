@@ -50,12 +50,18 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
   const sources = rows(config.sources);
   const aliases = Object.keys(dirs);
   const [newAlias, setNewAlias] = useState('');
-  const [newDir, setNewDir] = useState<{ id: string; name: string } | null>(null);
+  const [newDir, setNewDir] = useState<{ id: string; name: string; provider: 'p115' | 'aliyun' } | null>(null);
   const [addError, setAddError] = useState('');
-  const [picker, setPicker] = useState<{ alias?: string; cid: string; name: string } | null>(null);
+  const [picker, setPicker] = useState<{ alias?: string; cid: string; name: string; provider: 'p115' | 'aliyun' } | null>(null);
   const templateRef = useRef<HTMLTextAreaElement>(null);
 
-  const dirLabel = (cid: string): string | undefined => (cid === '0' ? '根目录' : dirNames[cid]);
+  const rawCid = (ref: string) => ref.startsWith('aliyun:') ? ref.slice('aliyun:'.length) : ref;
+  const qualified = (provider: string, id: string) => provider === 'aliyun' ? `aliyun:${id}` : id;
+  // Both providers use 0 for root; only the explicit aliyun: prefix identifies Aliyun.
+  const inferredProvider = (ref: string): 'p115' | 'aliyun' =>
+    ref.startsWith('aliyun:') ? 'aliyun' : 'p115';
+  const dirLabel = (ref: string): string | undefined =>
+    rawCid(ref) === '0' ? '根目录' : dirNames[ref];
   const usage = (alias: string) => ({
     isDefault: text(defaults.save_to) === alias,
     sources: sources.filter(s => s.save_to === alias).length,
@@ -65,8 +71,8 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
     const alias = newAlias.trim();
     if (!alias) { setAddError('请给目录取个名字'); return; }
     if (Object.hasOwn(dirs, alias)) { setAddError(`已经有名为「${alias}」的目录`); return; }
-    if (!newDir) { setAddError('请从 115 网盘中选择对应的目录'); return; }
-    update('save_dirs', { ...dirs, [alias]: newDir.id });
+    if (!newDir) { setAddError('请先选择网盘和保存目录'); return; }
+    update('save_dirs', { ...dirs, [alias]: qualified(newDir.provider, newDir.id) });
     setNewAlias(''); setNewDir(null); setAddError('');
   };
   const removeDir = (alias: string) => {
@@ -93,7 +99,7 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
       <Panel
         icon={FolderPlus}
         title="保存目录"
-        description="给 115 网盘里的常用目录取个好记的名字，之后选择保存位置时直接选名字即可。"
+        description="为 115 或阿里云盘中的目录设置别名，保存时绑定网盘，避免把文件转存到另一家网盘。"
         bodyClassName="p-4 sm:p-5"
       >
         <div className="grid gap-3 md:grid-cols-2">
@@ -111,21 +117,21 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
                     {u.isDefault ? <Tag>默认</Tag> : null}
                     {u.sources ? <Tag muted>{u.sources} 个来源</Tag> : null}
                   </div>
-                  <p className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground" title={`115 目录编号 ${text(cid)}`}>
-                    <span className="truncate">{name === undefined ? `目录编号 ${text(cid)}` : `115 / ${name}`}</span>
+                  <p className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground" title={`网盘目录 ID ${text(cid)}`}>
+                    <span className="truncate">{name === undefined ? `${inferredProvider(text(cid)) === 'aliyun' ? '阿里云盘' : '115'} · 目录编号 ${rawCid(text(cid))}` : `${inferredProvider(text(cid)) === 'aliyun' ? '阿里云盘' : '115'} / ${name}`}</span>
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center">
                   <Button
                     variant="ghost" size="icon" className="size-9 text-muted-foreground hover:text-primary sm:size-8"
                     aria-label={`更换「${alias}」对应的目录`} title="更换目录"
-                    onClick={() => setPicker({ alias, cid: text(cid), name: name?.split(' / ').at(-1) || alias })}
+                    onClick={() => setPicker({ alias, cid: rawCid(text(cid)), provider: inferredProvider(text(cid)), name: name?.split(' / ').at(-1) || alias })}
                   >
                     <FolderSearch />
                   </Button>
                   <Button
                     variant="ghost" size="icon" className="size-9 text-muted-foreground hover:bg-destructive/10 hover:text-destructive sm:size-8"
-                    aria-label={`删除目录「${alias}」`} title="删除"
+                    aria-label={`移除目录别名「${alias}」`} title="仅移除保存目录别名，不删除网盘文件"
                     onClick={() => removeDir(alias)}
                   >
                     <Trash2 />
@@ -142,6 +148,11 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
           </p>
         ) : null}
 
+        <p className="mt-3 text-xs leading-5 text-muted-foreground">
+          保存目录只规定今后转存到哪里；不会自动导入该目录里原有的视频。
+          如果要在媒体库看到现有文件，请到 <Link to="/library" className="font-medium text-primary hover:underline">媒体库 → 网盘已有文件</Link> 手动执行只读扫描。
+        </p>
+
         <div className="mt-4 rounded-lg border border-dashed border-border p-3 sm:p-4">
           <p className="mb-2.5 text-[13px] font-medium">添加目录</p>
           <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_auto]">
@@ -152,10 +163,10 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
             />
             <Button
               type="button" variant="outline" className="min-w-0 justify-start bg-card font-normal"
-              onClick={() => setPicker({ cid: newDir?.id ?? '0', name: newDir?.name ?? '根目录' })}
+              onClick={() => setPicker({ cid: newDir?.id ?? '0', provider: newDir?.provider ?? (text(defaults.storage) === 'aliyun' ? 'aliyun' : 'p115'), name: newDir?.name ?? '根目录' })}
             >
               <FolderSearch className="text-primary" />
-              <span className={cn('truncate', !newDir && 'text-muted-foreground')}>{newDir ? `115 / ${newDir.name}` : '选择 115 目录'}</span>
+              <span className={cn('truncate', !newDir && 'text-muted-foreground')}>{newDir ? `${newDir.provider === 'aliyun' ? '阿里云盘' : '115'} / ${newDir.name}` : '选择网盘目录'}</span>
             </Button>
             <Button type="button" onClick={addDir}><Plus />添加</Button>
           </div>
@@ -250,12 +261,14 @@ export function BasicTab({ config, catalog, update, setField, dirNames, remember
         <DirectoryPicker
           open
           initialCid={picker.cid}
+          initialProvider={picker.provider}
           initialName={picker.name}
           onOpenChange={open => { if (!open) setPicker(null); }}
           onSelect={dir => {
-            rememberDir(dir.id, dir.path);
-            if (picker.alias) setField('save_dirs', picker.alias, dir.id);
-            else { setNewDir({ id: dir.id, name: dir.path }); setAddError(''); }
+            const ref = qualified(dir.provider, dir.id);
+            rememberDir(ref, dir.path);
+            if (picker.alias) setField('save_dirs', picker.alias, ref);
+            else { setNewDir({ id: dir.id, name: dir.path, provider: dir.provider }); setAddError(''); }
           }}
         />
       ) : null}

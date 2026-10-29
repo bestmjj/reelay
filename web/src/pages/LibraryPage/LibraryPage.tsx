@@ -1,6 +1,10 @@
-import { FolderTree, LayoutGrid, LibraryBig, List, Search } from 'lucide-react';
+import { FolderTree, LayoutGrid, LibraryBig, List, RefreshCw, Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { libraryApi, type ITitleGroup } from '@/api/library';
+import { configApi } from '@/api/config';
+import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
+import { errorMessage } from '@/lib/utils';
 import { EmptyState } from '@/components/app/EmptyState';
 import { ErrorState } from '@/components/app/ErrorState';
 import { MediaCover } from '@/components/app/MediaCover';
@@ -17,13 +21,15 @@ import { MEDIA_TYPE_LABELS } from '@/lib/status';
 
 type Sort = 'recent' | 'title' | 'size';
 type View = 'grid' | 'list';
+type Origin = 'transfers' | 'scanned';
+const ORIGINS = [{ value: 'transfers', label: 'Reelay 已入库' }, { value: 'scanned', label: '网盘已有文件' }];
 
 const TYPES = [
   { value: '', label: '全部' },
   ...['tv', 'movie', 'anime'].map((value) => ({ value, label: MEDIA_TYPE_LABELS[value] })),
 ];
 const SORTS: Array<{ value: Sort; label: string }> = [
-  { value: 'recent', label: '最近入库' },
+  { value: 'recent', label: '最近更新' },
   { value: 'title', label: '按片名' },
   { value: 'size', label: '按体积' },
 ];
@@ -33,7 +39,7 @@ const VIEWS = [
 ];
 
 /** 同名作品（如翻拍）按 TMDB 编号区分。 */
-const groupKey = (group: ITitleGroup) => `${group.media_type ?? ''}:${group.tmdbid ?? group.title}`;
+const groupKey = (group: ITitleGroup) => `${group.origin ?? 'transfer'}:${group.provider ?? ''}:${group.save_dir_alias ?? ''}:${group.media_type ?? ''}:${group.tmdbid ?? group.title}`;
 
 function gbText(bytes: number): string {
   const gb = bytes / 1024 ** 3;
@@ -66,7 +72,7 @@ function GroupSheet({ group, onClose }: { group: ITitleGroup | null; onClose: ()
       open={group !== null}
       onOpenChange={(open) => { if (!open) onClose(); }}
       title={group?.title ?? ''}
-      description={group ? `${mediaTypeLabel(group.media_type)}${group.year ? ` · ${group.year}` : ''}` : undefined}
+      description={group ? `${group.origin === 'scanned' ? '网盘扫描发现 · ' : 'Reelay 已入库 · '}${mediaTypeLabel(group.media_type)}${group.year ? ` · ${group.year}` : ''}` : undefined}
     >
       {group ? (
         <div className="space-y-6">
@@ -76,8 +82,9 @@ function GroupSheet({ group, onClose }: { group: ITitleGroup | null; onClose: ()
               <dt className="text-muted-foreground">保存目录</dt><dd>{group.save_dir_alias ?? '—'}</dd>
               {group.resolution ? <><dt className="text-muted-foreground">清晰度</dt><dd>{group.resolution}</dd></> : null}
               <dt className="text-muted-foreground">估算体积</dt><dd className="tabular-nums">{gbText(group.bytes)}</dd>
-              <dt className="text-muted-foreground">转存次数</dt><dd className="tabular-nums">{group.tasks}</dd>
-              <dt className="text-muted-foreground">最近入库</dt>
+              <dt className="text-muted-foreground">{group.origin === 'scanned' ? '扫描视频' : '转存次数'}</dt>
+              <dd className="tabular-nums">{group.origin === 'scanned' ? (group.file_count ?? 0) : group.tasks}</dd>
+              <dt className="text-muted-foreground">{group.origin === 'scanned' ? '扫描时间' : '最近入库'}</dt>
               <dd title={fullTime(group.updated_at)}>{relativeTime(group.updated_at)}</dd>
             </dl>
           </div>
@@ -90,7 +97,7 @@ function GroupSheet({ group, onClose }: { group: ITitleGroup | null; onClose: ()
           ) : null}
           {group.media_type !== 'movie' && group.episodes.length ? (
             <section className="space-y-2">
-              <h3 className="text-[13px] font-semibold">已收录 {episodeCount(group)} 集</h3>
+              <h3 className="text-[13px] font-semibold">{group.origin === 'scanned' ? '扫描发现' : '已收录'} {episodeCount(group)} 集</h3>
               {seasonGroups(group).map(([season, eps]) => (
                 <div key={season ?? 'all'} className="flex items-start gap-2">
                   {season !== null ? (
@@ -121,7 +128,7 @@ function GroupSheet({ group, onClose }: { group: ITitleGroup | null; onClose: ()
                   );
                 })}
               </ul>
-            ) : <p className="text-xs text-muted-foreground">没有整理记录。</p>}
+            ) : <p className="text-xs text-muted-foreground">{group.origin === 'scanned' ? '尚无扫描路径记录。' : '没有整理记录。'}</p>}
           </section>
         </div>
       ) : null}
@@ -131,14 +138,51 @@ function GroupSheet({ group, onClose }: { group: ITitleGroup | null; onClose: ()
 
 export default function LibraryPage() {
   const [query, setQuery] = useState('');
+  const [origin, setOrigin] = useState<Origin>('transfers');
+  const [scanning, setScanning] = useState(false);
   const submitted = useDebounced(query);
   const [type, setType] = useState('');
+  const [directory, setDirectory] = useState('');
   const [sort, setSort] = useState<Sort>('recent');
   const [view, setView] = useState<View>(() => (localStorage.getItem('reelay-library-view') as View) || 'grid');
   const [open, setOpen] = useState<ITitleGroup | null>(null);
 
-  const library = useAsync(() => libraryApi.list(submitted || undefined, type || undefined), [submitted, type], '读取媒体库失败');
-  const result = library.stale ? undefined : library.data;
+  // Directory aliases are configuration, not media types: show empty aliases too.
+  const config = useAsync(() => configApi.get(), [], '读取保存目录失败');
+  const directoryOptions = useMemo(() => {
+    const aliases = config.data?.config.save_dirs;
+    const names = aliases && typeof aliases === 'object' && !Array.isArray(aliases)
+      ? Object.keys(aliases)
+      : [];
+    return [{ value: '', label: '全部保存目录' }, ...names.map((value) => ({ value, label: value }))];
+  }, [config.data]);
+
+  const library = useAsync(
+    () => libraryApi.list(submitted || undefined, type || undefined, directory || undefined),
+    [submitted, type, directory], '读取媒体库失败');
+  const scanned = useAsync(
+    () => libraryApi.scanned(submitted || undefined, type || undefined, directory || undefined),
+    [submitted, type, directory], '读取网盘已有文件索引失败');
+  const result = origin === 'scanned'
+    ? (scanned.stale ? undefined : scanned.data)
+    : (library.stale ? undefined : library.data);
+  const active = origin === 'scanned' ? scanned : library;
+  const scanNow = async () => {
+    setScanning(true);
+    try {
+      const snapshot = await libraryApi.scan();
+      scanned.reload();
+      toast.success(snapshot.complete
+        ? `扫描完成：发现 ${snapshot.file_count} 个视频文件`
+        : snapshot.has_more
+          ? `本次扫描累计 ${snapshot.file_count} 个视频；进度已保存，可继续扫描`
+          : `已扫描 ${snapshot.file_count} 个视频；部分目录可能无法访问`);
+    } catch (e) {
+      toast.error(errorMessage(e, '扫描失败，保留上次索引'));
+    } finally {
+      setScanning(false);
+    }
+  };
 
   const groups = useMemo(() => {
     const list = [...(result?.groups ?? [])];
@@ -153,7 +197,7 @@ export default function LibraryPage() {
   return (
     <Page
       title="媒体库"
-      description="已入库的影视作品，按片名汇总。"
+      description="Reelay 已完成的转存与网盘原有文件分开统计；扫描不会移动、删除或转存任何文件。"
       actions={result ? (
         <span className="text-sm text-muted-foreground">
           <b className="font-semibold tabular-nums text-foreground">{result.groups.length}</b> 部 ·
@@ -161,8 +205,46 @@ export default function LibraryPage() {
         </span>
       ) : null}
     >
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <Segmented label="媒体库来源" value={origin} onChange={(v) => setOrigin(v as Origin)}
+          options={ORIGINS} className="shrink-0" />
+        {origin === 'scanned' ? (
+          <Button size="sm" variant="outline" disabled={scanning} onClick={() => void scanNow()}>
+            <RefreshCw className={scanning ? 'animate-spin' : ''} />
+            {scanning ? '正在扫描' : scanned.data?.has_more ? '继续扫描剩余目录' : '扫描已配置目录'}
+          </Button>
+        ) : null}
+      </div>
+      {origin === 'scanned' ? (
+        <div className="mb-4 space-y-1 text-xs leading-5 text-muted-foreground">
+          <p>
+            {scanned.data?.scanned_at
+              ? `上次扫描：${fullTime(scanned.data.scanned_at)} · ${scanned.data.scanned_roots} 个目录入口 · ${scanned.data.file_count} 个视频`
+              : '尚未扫描。点击「扫描已配置目录」读取现有网盘文件，不会改变 Reelay 的转存记录。'}
+          </p>
+          {scanned.data?.has_more ? (
+            <p className="text-warning">扫描进度已保存，还有目录尚未遍历；点击「继续扫描剩余目录」即可从中断位置继续。</p>
+          ) : scanned.data?.truncated ? (
+            <p className="text-warning">部分目录读取失败或超过深度限制；以下索引不代表全部网盘文件。</p>
+          ) : null}
+          {scanned.data?.errors.map((err, i) => (
+            <p key={i} role="status">未扫描完整：{err}</p>
+          ))}
+          <p>这是只读文件索引，不能证明已完成 Reelay 转存，也不会自动修改重复转存判断。</p>
+        </div>
+      ) : null}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
+          <FolderTree className="size-4" />保存目录
+        </span>
+        <Select aria-label="按保存目录筛选" value={directory} onValueChange={setDirectory}
+          options={directoryOptions} className="w-full sm:w-48" />
+        <span className="text-xs text-muted-foreground">
+          与媒体类型独立；新增的「动漫电影」等目录会出现在这里，即使暂无影片。
+        </span>
+      </div>
       <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center">
-        <Segmented label="类型" size="md" value={type} onChange={setType} options={TYPES} className="shrink-0 self-start" />
+        <Segmented label="媒体类型" size="md" value={type} onChange={setType} options={TYPES} className="shrink-0 self-start" />
         <div className="flex flex-1 gap-2">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -173,9 +255,22 @@ export default function LibraryPage() {
         </div>
       </div>
 
+      {directory && result?.groups.length === 0 && !submitted && !type ? (
+        <p className="mb-4 rounded-lg border border-border bg-card px-4 py-3 text-xs leading-5 text-muted-foreground">
+          「{directory}」已在保存目录中配置，但{origin === 'transfers'
+            ? '目前没有 Reelay 完成的入库记录。' : '当前扫描索引还没有属于此目录的作品。'}
+          {origin === 'scanned' ? '如需发现网盘已有影视文件，请点击「扫描已配置目录」。' : ''}
+        </p>
+      ) : null}
+      {config.error ? (
+        <p role="status" className="mb-3 text-xs text-muted-foreground">
+          保存目录列表暂时无法读取，<button type="button" className="text-primary underline"
+            onClick={config.reload}>重试加载</button>。
+        </p>
+      ) : null}
       {!result ? (
-        library.error ? (
-          <ErrorState title="读取媒体库失败" error={library.error} onRetry={library.reload} retrying={library.loading} />
+        active.error ? (
+          <ErrorState title="读取媒体库失败" error={active.error} onRetry={active.reload} retrying={active.loading} />
         ) : (
           <div className="grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
             {Array.from({ length: 12 }, (_, i) => <Skeleton key={i} className="aspect-[2/3] rounded-lg" />)}
@@ -183,9 +278,9 @@ export default function LibraryPage() {
         )
       ) : groups.length === 0 ? (
         <EmptyState
-          icon={submitted || type ? Search : LibraryBig}
-          title={submitted || type ? '没有匹配的作品' : '媒体库还是空的'}
-          description={submitted || type ? '换个关键词或类型试试。' : '资源转存并整理完成后，会按片名汇总到这里。'}
+          icon={submitted || type || directory ? Search : LibraryBig}
+          title={submitted || type || directory ? '这个筛选下暂无作品' : origin === 'scanned' ? '还没有扫描到网盘视频' : '媒体库还是空的'}
+          description={submitted || type || directory ? '可以切换媒体类型或保存目录；空目录不会被当作已入库作品。' : origin === 'scanned' ? '点击「扫描已配置目录」获取网盘中已有的影视文件。' : '资源转存并整理完成后，会按片名汇总到这里。'}
         />
       ) : view === 'grid' ? (
         <div className="grid grid-cols-3 gap-x-3 gap-y-5 sm:grid-cols-4 sm:gap-x-4 md:grid-cols-5 lg:grid-cols-6">

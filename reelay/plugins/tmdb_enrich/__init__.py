@@ -95,6 +95,10 @@ class TmdbEnrich:
             ctx.log(f"TMDB 无可信匹配「{p.title}」，保留原标题")
             return True
 
+        # TMDB 综合分包含年份 +0.1 奖励，最大可能为 1.1；
+        # 给用户展示时不能把这个数叫作相似度百分比。
+        title_match = tmdb.title_similarity(p.title, hit)
+        year_bonus = bool(p.year and tmdb.candidate_year(hit) == p.year)
         # 回填规范元数据
         canonical = hit.get("title") or hit.get("name")
         year = tmdb.candidate_year(hit) or p.year
@@ -137,5 +141,7 @@ class TmdbEnrich:
         # 电影搜索结果没有 origin_country：保留 AI 从正文「地区」得到的值，不能清空。
         if countries:
             p.origin_country = countries
-        ctx.log(f"TMDB 匹配：{canonical} ({year}) tmdbid={hit.get('id')} 相似度 {hit['_score']}")
+        ctx.log(f"TMDB 匹配：{canonical} ({year}) tmdbid={hit.get('id')} "
+                f"片名相似度 {title_match:.0%}，综合匹配分 {hit['_score']:.2f}"
+                + ("（含同年加分）" if year_bonus else ""))
         return True

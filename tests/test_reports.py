@@ -135,7 +135,8 @@ class TestDailyAndEpisodeTracker(PipelineCase):
         with self.assertRaises(ValueError):
             subscriptions.normalize({"season": 1})
         self.assertEqual(subscriptions.normalize({"title": " 剧 ", "total": 12}),
-                         {"title": "剧", "season": 1, "total": 12, "tmdbid": None, "auto": True})
+                         {"title": "剧", "season": 1, "total": 12, "tmdbid": None,
+                          "auto": True, "save_to": None, "start_episode": None})
 
 
 class TestDailyNarrative(ServiceCase):

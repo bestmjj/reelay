@@ -9,9 +9,10 @@ from reelay.control import manage
 from reelay.core import messages, secret_store, subscriptions
 from reelay.core.contracts import Decision, TaskState
 from reelay.core.service import ConflictError
+from reelay.core.service.follow import subscription_unrecorded
 from reelay.providers.decision import LLMDecision, SubscriptionDecision
 
-from tests.fakes import FakeAI, ServiceCase, bot_for, tv_ctx
+from tests.fakes import FakeAI, ServiceCase, bot_for, done_task, tv_ctx
 
 
 class TestSubscriptionDecision(ServiceCase):
@@ -26,6 +27,23 @@ class TestSubscriptionDecision(ServiceCase):
         self.assertEqual(await self.decide(ctx), Decision.SAVE)
         self.assertEqual(ctx.meta["subscription"]["tmdbid"], 100)
         self.assertTrue(any("新集自动放行" in line for line in ctx.trail))
+        self.assertEqual(ctx.source_rule["episodes_from"], "message")
+        self.assertEqual(ctx.parsed.episodes, [3])
+
+    async def test_explicit_episode_floor_blocks_old_reposts_but_includes_current_latest(self):
+        sub = self.store.subscriptions()[0]
+        self.assertTrue(self.store.set_subscription_start(sub["id"], 100))
+        self.assertEqual(self.store.subscription(sub["id"])["start_episode"], 100)
+        self.assertEqual(await self.decide(tv_ctx(msg_id="old", episodes=(99,))), Decision.ASK)
+        now = tv_ctx(msg_id="latest", episodes=(100,))
+        self.assertEqual(await self.decide(now), Decision.SAVE)
+        self.assertEqual(now.parsed.episodes, [100])
+        self.assertEqual(await self.decide(tv_ctx(msg_id="next", episodes=(101,))), Decision.SAVE)
+        self.assertTrue(self.store.set_subscription_start(sub["id"], 101))
+        self.assertEqual(await self.decide(tv_ctx(msg_id="no100", episodes=(100,))), Decision.ASK)
+        # Clearing the floor restores the normal single-episode policy.
+        self.assertTrue(self.store.set_subscription_start(sub["id"], None))
+        self.assertIsNone(self.store.subscription(sub["id"])["start_episode"])
 
     async def test_finished_subscription_no_longer_auto_releases_and_can_be_reopened(self):
         first = self.store.subscriptions()[0]
@@ -62,8 +80,18 @@ class TestSubscriptionDecision(ServiceCase):
                                             "title": stored.parsed.title, "season": 1, "episodes": [3]}
         self.store.save_task(stored)
         self.store.finish_transfer(stored)
-        self.assertEqual(await self.decide(tv_ctx(msg_id="2", episodes=(3,))), Decision.ASK)
-        self.assertEqual(await self.decide(tv_ctx(msg_id="3", episodes=(3, 4))), Decision.SAVE)
+        self.assertEqual(await self.decide(tv_ctx(msg_id="2", episodes=(3,))), Decision.SAVE)
+        self.assertEqual(await self.decide(tv_ctx(msg_id="3", episodes=(3, 4))), Decision.ASK)
+        self.assertEqual(await self.decide(tv_ctx(msg_id="4", episodes=(4,))), Decision.SAVE)
+
+    async def test_season_pack_is_not_auto_released_to_avoid_historical_bulk_copy(self):
+        pack = tv_ctx(episodes=tuple(range(1, 101)))
+        self.assertEqual(await self.decide(pack), Decision.ASK)
+        self.assertNotIn("subscription", pack.meta)
+        self.assertTrue(any("合集" in line for line in pack.trail))
+
+        no_episode = tv_ctx(episodes=())
+        self.assertEqual(await self.decide(no_episode), Decision.ASK)
 
     async def test_episodes_of_a_same_title_remake_do_not_count_as_stored(self):
         remake = tv_ctx(episodes=(3,), tmdbid=999)  # 同名的另一部剧
@@ -76,6 +104,22 @@ class TestSubscriptionDecision(ServiceCase):
         self.store.finish_transfer(remake)
         self.assertEqual(await self.decide(tv_ctx(msg_id="2", episodes=(3,))), Decision.SAVE)
         self.assertEqual([item["have"] for item in self.service.list_subscriptions()["items"]][0], [])
+
+    def test_different_titles_of_one_tmdb_episode_share_transfer_claim(self):
+        from reelay.core.pipeline import Pipeline
+        left = tv_ctx(title="牧神记", tmdbid=236534, episodes=(106,))
+        right = tv_ctx(title="Tales of Herding Gods", tmdbid=236534, episodes=(106,))
+        left.ns("storage")["dedup_cid"] = "resource_" + "a" * 64 + "_dir1"
+        right.ns("storage")["dedup_cid"] = "resource_" + "a" * 64 + "_dir2"
+        first = set(Pipeline._content_keys("aliyun", left))
+        second = set(Pipeline._content_keys("aliyun", right))
+        self.assertTrue(first.intersection(second), (first, second))
+        different = tv_ctx(title="Another Show", tmdbid=222222, episodes=(106,))
+        different.ns("storage")["dedup_cid"] = "resource_" + "a" * 64 + "_dir2"
+        self.assertFalse(first.intersection(Pipeline._content_keys("aliyun", different)))
+        cross_drive = tv_ctx(title="Tales of Herding Gods", tmdbid=236534, episodes=(106,))
+        cross_drive.ns("storage")["dedup_cid"] = "resource_" + "b" * 64 + "_dir2"
+        self.assertFalse(first.intersection(Pipeline._content_keys("aliyun", cross_drive)))
 
     async def test_preferences_can_still_veto_a_subscription(self):
         provider = LLMDecision()
@@ -120,6 +164,17 @@ class TestSubscriptionService(ServiceCase):
         self.assertEqual(listed["inactive"], [])
         await self.service.remove_subscription({"title": "剧", "season": 1, "tmdbid": 100})
         self.assertEqual(self.service.list_subscriptions()["items"], [])
+
+    async def test_new_subscription_floor_is_persisted_and_validated(self):
+        with self.assertRaises(ValueError):
+            await self.service.add_subscription({"title": "Wrong", "start_episode": 0})
+        result = await self.service.add_subscription({"title": "新剧", "season": 1, "start_episode": 100})
+        self.assertEqual(result["subscription"]["start_episode"], 100)
+        edited = self.service.set_subscription_start({"id": result["subscription"]["id"], "start_episode": 101})
+        self.assertEqual(edited["start_episode"], 101)
+        with self.assertRaises(ValueError):
+            self.service.set_subscription_start({"id": result["subscription"]["id"], "start_episode": "100"})
+        self.assertEqual(self.service.list_subscriptions()["items"][-1]["start_episode"], 101)
 
     async def test_subscribe_from_inbox_uses_the_tasks_tmdb_entry(self):
         ctx = await self.pending_tv("1")
@@ -166,6 +221,67 @@ class TestSubscriptionService(ServiceCase):
         self.parser._client = None
         result = await self.service.resolve_subscription("我在追《繁花》")
         self.assertEqual((result["query"]["title"], result["candidates"]), ("繁花", []))
+
+
+class TestSubscriptionLiveProgress(ServiceCase):
+    async def test_stale_daily_report_never_counts_live_verified_e106_as_unrecorded(self):
+        self.subscribe({"title": "牧神记", "season": 1, "tmdbid": 236534, "total": 110})
+        done_task(self.store, "106", title="牧神记", episodes=(106,), tmdbid=236534)
+        stale = {"series": {"牧神记|S01": {
+            "missing": list(range(1, 111)), "aired": 110,
+        }}}
+        with patch.object(self.pl, "query", return_value=stale):
+            first = self.service.list_subscriptions()["items"][0]
+        self.assertEqual(first["have"], [106])
+        self.assertNotIn(106, first["missing"])
+        self.assertEqual(len(first["missing"]), 109)
+        self.assertEqual(first["missing"][:2], [1, 2])
+        self.assertEqual(first["missing"][-1], 110)
+        # A subsequently completed new episode updates the list immediately;
+        # it must not wait until the next daily tracker run.
+        done_task(self.store, "107", title="牧神记", episodes=(107,), tmdbid=236534)
+        with patch.object(self.pl, "query", return_value=stale):
+            refreshed = self.service.list_subscriptions()["items"][0]
+        self.assertEqual(refreshed["have"], [106, 107])
+        self.assertNotIn(107, refreshed["missing"])
+        self.assertEqual(len(refreshed["missing"]), 108)
+
+    async def test_wrong_e247_quarantine_is_not_counted_as_registered(self):
+        self.subscribe({"title": "吞噬星空", "season": 1, "tmdbid": 101172, "total": 260})
+        wrong = tv_ctx(msg_id="247", title="吞噬星空",
+                       tmdbid=101172, episodes=(247,))
+        wrong.save_dir_cid = "resource-test-cid"
+        wrong.result = {"storage_verified": True}
+        wrong.ns("storage")["identity"] = {
+            "provider": "aliyun", "cid": "resource-test-cid",
+            "share_code": "wrong-source", "title": "吞噬星空",
+            "season": 1, "episodes": [247],
+        }
+        wrong.ns("storage")["manifest"] = {
+            "pairs": [[1, 247]],
+            "files": [{"id": "wrong-4k-file", "name": "4K.mp4",
+                       "size": 4040000000, "share_path": "洛DA/4K.mp4"}],
+        }
+        wrong.state = TaskState.STORED
+        self.store.save_task(wrong)
+        self.store.finish_transfer(wrong)
+        wrong.state = TaskState.DONE
+        self.store.save_task(wrong)
+        before = self.service.list_subscriptions()["items"][0]
+        self.assertIn(247, before["have"])
+        self.store.quarantine_transfer(wrong, reason="E247 错误选择了旁支目录下的 4K.mp4 文件")
+        after = self.service.list_subscriptions()["items"][0]
+        self.assertEqual(after["quarantined"], [247])
+        self.assertNotIn(247, after["have"])
+        self.assertIn(247, after["missing"])
+        self.assertEqual(after["observed"], [])
+        self.assertFalse(after["missing_truncated"])
+
+    def test_very_large_declared_season_is_bounded_and_explicit(self):
+        missing, truncated = subscription_unrecorded([106], 10 ** 9, {})
+        self.assertTrue(truncated)
+        self.assertEqual(len(missing), 4999)
+        self.assertNotIn(106, missing)
 
 
 class TestSubscriptionSuggestions(ServiceCase):

@@ -152,7 +152,7 @@ class TestConfigBlocks(WebCase):
 
     def test_directory_bad_id_rejected(self):
         for cid in ['-1','bad','3.14']:
-            self.assertEqual(self.client.get('/api/storage/dirs',params={'cid':cid}).status_code,422)
+            self.assertEqual(self.client.get('/api/storage/dirs', params={'cid': cid, 'provider': 'p115'}).status_code,422)
 
 
 class TestSettingsApi(WebCase):

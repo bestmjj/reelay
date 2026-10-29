@@ -35,7 +35,8 @@ import re
 
 from ...core.contracts import ParsedResource, PipelineContext, StorageBusy
 from ...core.io import run_blocking
-from ...core.media import episode_of as _episode_of, is_video, resolution_rank, strip_ext
+from ...core.media import (VARIETY_LABELS, episode_of as _episode_of, is_video,
+                           resolution_rank, strip_ext, variety_episode)
 from ...core.registry import register
 from ...core.validation import validate_resource
 from ...core import release, runtime, tmdb
@@ -45,6 +46,12 @@ from .settings import DEFAULT_NAMING
 
 log = logging.getLogger("reelay.plugin.organizer")
 
+
+
+def _fid(value):
+    """115 IDs are numeric; Aliyun IDs are opaque. Never coerce opaque IDs to int."""
+    value = str(value)
+    return int(value) if value.isdecimal() else value
 
 def _safe(name: str) -> str:
     """清洗成合法目录/文件名片段。"""
@@ -92,8 +99,16 @@ def route(p, source_rule: dict, *, current: str | None = None, pinned: str | Non
         root, _, rest = selected.partition("/")
         # 第一段是某个保存目录的别名时，转存根目录跟随它；否则保留来源指定目录，
         # 整理时在其下创建完整路径。
-        if root in (runtime.get("save_dirs", {}) or {}):
+        dirs = runtime.get("save_dirs", {}) or {}
+        provider = source_rule.get("storage") or runtime.get("defaults.storage", "p115")
+        dest = str(dirs.get(root, ""))
+        compatible = (dest.startswith("aliyun:") if provider == "aliyun"
+                      else dest.isdecimal() if provider == "p115" else bool(dest))
+        # A category name may match an alias on another cloud; never switch cloud silently.
+        if root in dirs and compatible:
             return {**result, "alias": root, "category_path": selected, "relative_category": rest, "note": note}
+        if root in dirs and not compatible:
+            note = f"{note}；「{root}」目录属于另一网盘，保留来源保存目录并创建分类子文件夹"
         return {**result, "alias": current, "category_path": selected, "relative_category": selected, "note": note}
     alias = current or source_rule.get("save_to") or "默认"
     missing = "二级分类元数据" if layout == "category" else "可识别的媒体类型"
@@ -126,6 +141,22 @@ def build_plan(p, landed: list[dict], category_path: str = "",
             season, template = None, naming.get("movie", DEFAULT_NAMING["movie"])
         rel = render_path(template, _naming_values(p, f.get("name", ""), ext, season, episode),
                           label=f"{'剧集' if is_tv else '电影'}命名模板")
+        variety = variety_episode(f.get("name", "")) if is_tv else None
+        if variety:
+            # Preserve the configured season/folder template, but distinguish
+            # each edition in the rendered filename. No part may overwrite
+            # another file just because both belong to E03.
+            edition = variety[1]
+            target_dir, _, target_name = rel.rpartition("/")
+            basename = strip_ext(target_name)
+            label = VARIETY_LABELS[edition]
+            period = f"第 {episode} 期"
+            replacement = period + (f"（{label}）" if edition != "main" else "")
+            if re.search(rf"第\s*{episode}\s*集", basename):
+                basename = re.sub(rf"第\s*{episode}\s*集", replacement, basename, count=1)
+            else:
+                basename += " - " + replacement
+            rel = "/".join(filter(None, (target_dir, basename + f".{ext}")))
         if category_path:
             rel = category_path.strip("/") + "/" + rel
         parts = rel.split("/")
@@ -207,7 +238,16 @@ def _same_slot(existing: dict, target_name: str, title: str, is_tv: bool) -> boo
     if not is_tv:
         return True
     episode = _episode_of(name)
-    return episode[1] is not None and episode == _episode_of(target_name)
+    target_episode = _episode_of(target_name)
+    if episode[1] is None or episode != target_episode:
+        return False
+    # A stored E03 上 is not a conflict with E03 下 or E03 加更.
+    old_edition = variety_episode(name)
+    new_edition = variety_episode(target_name)
+    if old_edition or new_edition:
+        return (old_edition[1] if old_edition else "main") == (
+            new_edition[1] if new_edition else "main")
+    return True
 
 
 class _MediaLibrary:
@@ -310,6 +350,17 @@ class LibraryRouter(_MediaLibrary):
 
     async def run(self, ctx: PipelineContext) -> bool:
         ns = ctx.ns("library")
+        if ns.get("direct_existing"):
+            repairing = ns["direct_existing"].get("mode") == "repair"
+            if not repairing:
+                ns.pop("relative_category", None)
+                ns.pop("category_path", None)
+            note = ("补转任务固定原保存根目录及原分类，不再重新自动路由"
+                    if repairing else "手动指定现有剧集目录，跳过自动分类及新作品目录创建")
+            if ns.get("note") != note:
+                ctx.log(note)
+            ns["note"] = note
+            return True
         target = route(ctx.parsed, ctx.source_rule, current=ctx.save_dir_alias, pinned=ns.get("pinned"),
                        preferred=ns.get("preferred"))
         if target["alias"]:
@@ -355,6 +406,28 @@ class Organizer(_MediaLibrary):
         mapping = {f["name"]: (f.get("season"), f["episode"]) for f in manifest.get("files", [])
                    if f.get("name") and type(f.get("episode")) is int}
         ns["plan"] = build_plan(ctx.parsed, landed, relative_category, mapping)
+        repair_info = ctx.ns("task").get("repair") or {}
+        if repair_info:
+            # Use the exact original verified destination path/name, even if
+            # naming templates or category rules have since changed.
+            by_source = {f["source_name"]: f for f in repair_info["files"]}
+            if len(by_source) != len(repair_info["files"]):
+                raise ValueError("补转源文件名不唯一，请人工处理")
+            for item in ns["plan"]:
+                old = by_source.get(item["src_name"])
+                if old is None:
+                    raise ValueError("补转整理计划混入了原清单外的视频")
+                item["target_dir"], item["target_name"] = old["target_dir"], old["target_name"]
+            if len(ns["plan"]) != len(by_source):
+                raise ValueError("补转整理计划缺少原目标文件")
+        destination = ctx.ns("library").get("direct_existing") or {}
+        if destination and destination.get("mode", "existing") not in ("organized", "repair"):
+            # Explicit exact directory: retain standard filenames, but never
+            # create an extra <title>/Season tree under the user-chosen folder.
+            for item in ns["plan"]:
+                item["target_dir"] = ""
+        # "organized": use chosen directory as root, building only the
+        # normal title/season tree (no AI/category prefix).
         ns["base_cid"] = ctx.save_dir_cid
         ns["relative_category"] = relative_category
         ns.pop("error", None)
@@ -386,10 +459,10 @@ class Organizer(_MediaLibrary):
         """整理成功后：删除空的 .reelay-<task> 暂存目录（非空则保留，绝不误删），清掉只在重放时用的删除记录。"""
         state = runtime.services().state(self.name)
         for item in ctx.ns("organize").get("plan") or []:
-            state.delete(f"skipped:{int(item['src_id'])}")
+            state.delete(f"skipped:{_fid(item['src_id'])}")
         manifest = ctx.ns("storage").get("manifest") or {}
         stage = manifest.get("staging_cid")
-        if not isinstance(stage, int):
+        if stage is None:
             return
         try:
             if drive.iterdir(stage):
@@ -405,7 +478,7 @@ class Organizer(_MediaLibrary):
     def _remove(drive, file_id: int, parent: int, what: str) -> None:
         """删除（进回收站）后读回目录，确认文件已不在原处。删除可重复执行，结果不明时重来即可。"""
         drive.delete([file_id])
-        if any(x["id"] == file_id for x in drive.iterdir(int(parent))):
+        if any(x["id"] == file_id for x in drive.iterdir(_fid(parent))):
             raise RuntimeError(f"删除{what}后读回仍在原目录，停止整理")
 
     def _resolve_conflict(self, ctx, strategy, drive, target_cid, item, source_id, source_parent, existing, candidate,
@@ -429,7 +502,7 @@ class Organizer(_MediaLibrary):
                     return "suffix", candidate
             raise FileExistsError(f"同名文件过多，保留源文件：{name}")
         if strategy in ("skip", "upgrade", "replace"):
-            existing_id = int(existing["id"])
+            existing_id = _fid(existing["id"])
             recorded = state.get(f"file:{existing_id}") or {}
             current = {"rank": recorded.get("rank") or resolution_rank(existing.get("name")),
                        "release": recorded.get("release") or release.from_text(existing.get("name")),
@@ -440,7 +513,7 @@ class Organizer(_MediaLibrary):
                 self._record_conflict(ctx, item, strategy, existing_id)
                 self._remove(drive, existing_id, target_cid, "库里的旧文件")
                 return strategy, name
-            state.set(f"skipped:{source_id}", {"kept": existing_id, "name": name, "parent": int(source_parent)})
+            state.set(f"skipped:{source_id}", {"kept": existing_id, "name": name, "parent": _fid(source_parent)})
             self._remove(drive, source_id, source_parent, "本次转存的文件")
             return "skip", name
         raise FileExistsError(f"库里已有「{existing.get('name')}」，请选择删除转存文件或覆盖保存")
@@ -466,7 +539,7 @@ class Organizer(_MediaLibrary):
             runtime.services().store.save_task(ctx)
 
     def _apply_sync(self, ctx: PipelineContext, p, plan: list[dict], drive) -> None:
-        base_cid = int(ctx.save_dir_cid or 0)
+        base_cid = _fid(ctx.save_dir_cid or 0)
         dir_cache: dict[str, int] = {}
 
         def ensure_dir(rel_dir: str) -> int:
@@ -497,18 +570,31 @@ class Organizer(_MediaLibrary):
         organize.setdefault("conflicts", [])  # 每处冲突怎么处理的（见 _record_conflict），媒体库据此排除被替换的文件
         # 人工在冲突时选的处理（删除转存文件 / 覆盖保存）优先于配置的策略，整理成功后清除
         strategy = organize.get("resolve") or runtime.get("plugins.organizer.conflict", "manual")
+        if ctx.ns("task").get("force_single_copy") or ctx.ns("task").get("force_missing_range"):
+            # Human-authorized historical retransfer never deletes or
+            # overwrites an existing cloud file, even if the global config
+            # allows it. Coexisting editions get a safe suffix.
+            strategy = "suffix"
+        no_delete = runtime.get("plugins.organizer.no_delete", True)
+        if no_delete and strategy in ("skip", "upgrade", "replace"):
+            # Old configurations may still request destructive strategies.
+            # Force safe review instead of silently deleting either copy.
+            strategy = "manual"
+            ctx.log("安全模式：保留已有及新转存文件，禁止自动删除或覆盖")
         state = runtime.services().state(self.name)
         new_rank = resolution_rank(p.resolution)
         title, is_tv = _safe(p.title), p.media_type == "tv" or bool(p.episodes)
-        ours = {int(item["src_id"]) for item in plan}  # 同一批的其他文件（如分段电影）不算冲突
+        ours = {_fid(item["src_id"]) for item in plan}  # 同一批的其他文件（如分段电影）不算冲突
 
         for item in plan:
-            source_id = int(item["src_id"])
+            source_id = _fid(item["src_id"])
             skipped = state.get(f"skipped:{source_id}")
             if skipped:
+                if no_delete:
+                    raise ValueError("已有整理检查点要求删除文件；安全模式已阻止，请人工核对")
                 # 冲突时已决定删除本次的新文件：上次删除结果不明就再删一次并读回
                 parent = skipped.get("parent")
-                if parent is not None and any(x["id"] == source_id for x in drive.iterdir(int(parent))):
+                if parent is not None and any(x["id"] == source_id for x in drive.iterdir(_fid(parent))):
                     self._remove(drive, source_id, parent, "本次转存的文件")
                 continue
             target_cid = ensure_dir(item["target_dir"])
@@ -537,7 +623,7 @@ class Organizer(_MediaLibrary):
                     }
                 action, target_name = self._resolve_conflict(
                     ctx, strategy, drive, target_cid, item, source_id, current["parent_id"], existing, candidate, state)
-                self._record_conflict(ctx, item, action, int(existing["id"]))
+                self._record_conflict(ctx, item, action, _fid(existing["id"]))
                 if action == "skip":
                     ctx.log(f"删除了本次转存的「{item.get('src_name')}」，保留库里的「{existing.get('name')}」")
                     continue

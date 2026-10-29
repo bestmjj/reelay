@@ -25,7 +25,8 @@ from ..core.contracts import (AlreadyStored, NeedsManual, PipelineContext, Share
                               TransferRejected, TransferUncertain)
 from ..core.io import run_blocking
 from ..core.registry import register
-from ..core.media import episode_of, is_extra, is_video, resolution_label, resolution_rank, summarize_pairs
+from ..core.media import (episode_of, is_extra, is_video, resolution_label,
+                          resolution_rank, season_of, summarize_pairs, variety_episode)
 
 
 # 电影分享中小于最大文件该比例的视频视为花絮/样片。
@@ -68,8 +69,151 @@ def _movie_choice_problem(videos: list[dict], chosen: str, parsed) -> str | None
     return None
 
 
+# A virtual choice for ONLY video files located directly in the share root.
+# Selecting the root must never include unrelated nested movie folders.
+SHARE_ROOT_DIRECT = "__share_root_direct__"
+
+
+def _share_file_ancestors(item: dict) -> list[str]:
+    """Immutable source folder ancestry, outermost to immediate parent."""
+    ids = item.get("share_ancestor_ids")
+    if isinstance(ids, list):
+        return [str(value) for value in ids]
+    parent = str(item.get("share_folder_id") or "root")
+    return [] if parent == "root" else [parent]
+
+
+def share_folder_choices(video_items: list[dict]) -> list[dict]:
+    """Complete folder tree instead of grouping everything under top-level wrapper.
+
+    Folder rows with count=0 are visible but not selectable. Every folder can
+    include its descendants, while the virtual root-direct choice contains
+    only files directly in the share root. The provider must fully paginate
+    every traversed directory or raise, never return a partial successful list.
+    """
+    buckets: dict[str, dict] = {}
+
+    def add(cid: str, path: str) -> dict:
+        entry = buckets.setdefault(cid, {
+            "folder_id": cid, "path": path or "分享根目录（仅当前层）",
+            "count": 0, "direct_count": 0,
+            "episodes": set(), "unrecognized": 0, "samples": [],
+        })
+        if path and entry["path"] != path:
+            raise NeedsManual("分享文件夹 ID 的目录路径不一致，不能安全选择")
+        return entry
+
+    for item in video_items:
+        if item.get("is_dir"):
+            folder_id = str(item.get("id") or "")
+            if folder_id:
+                add(folder_id, str(item.get("share_path") or item.get("name") or ""))
+            continue
+        name = item.get("name", "")
+        if not is_video(name) or is_extra(name):
+            continue
+        ancestors = _share_file_ancestors(item)
+        segments = [p for p in str(item.get("share_path") or "").split("/") if p]
+        if ancestors and len(ancestors) != len(segments):
+            # Mock/legacy clients may only supply top folder ID and a full
+            # display path. Use the full path to display that exact choice.
+            segments = [str(item.get("share_path") or "")]
+        ids = ancestors if ancestors else [SHARE_ROOT_DIRECT]
+        season, ep = episode_of(name)
+        if season is None:
+            season = season_of(item.get("share_path") or "") or 1
+        for i, cid in enumerate(ids):
+            path = "/".join(segments[:i + 1]) if ancestors else ""
+            entry = add(cid, path)
+            entry["count"] += 1
+            if len(entry["samples"]) < 6:
+                entry["samples"].append({"name": name,
+                                         "path": "/".join(filter(None, [item.get("share_path") or "", name])),
+                                         "size": item.get("size")})
+            if i == len(ids) - 1:
+                entry["direct_count"] += 1
+            if ep is None:
+                entry["unrecognized"] += 1
+            else:
+                entry["episodes"].add((season, ep))
+    result = []
+    for entry in buckets.values():
+        result.append({**entry,
+                       "episodes": [list(pair) for pair in sorted(entry["episodes"])],
+                       "selectable": entry["count"] > 0})
+    return sorted(result, key=lambda entry: entry["path"].casefold())
+
+
+def _overlapping_share_versions(video_items: list[dict], parsed) -> list[str]:
+    """Identify same season/episode in distinct actual source folders."""
+    candidates = [x for x in video_items if is_video(x.get("name", "")) and not is_extra(x.get("name", ""))]
+    folders = share_folder_choices(candidates)
+    if len(folders) <= 1:
+        return []
+    if parsed.media_type == "movie" and not parsed.episodes:
+        return list(dict.fromkeys(x.get("share_path") or "分享根目录" for x in candidates))
+    seen: dict[tuple[int, int], str] = {}
+    overlap: set[str] = set()
+    for item in candidates:
+        season, ep = episode_of(item.get("name", ""))
+        if ep is None:
+            continue
+        season = season if season is not None else season_of(item.get("share_path") or "") or parsed.season or 1
+        # Only the immediate source folder can establish a version boundary.
+        parent = str(item.get("share_folder_id") or "root")
+        old = seen.get((season, ep))
+        if old is not None and old != parent:
+            overlap.update((old, parent))
+        else:
+            seen[(season, ep)] = parent
+    return list(dict.fromkeys(
+        item.get("share_path") or "分享根目录"
+        for item in candidates if str(item.get("share_folder_id") or "root") in overlap
+    ))
+
+
+def share_video_choices(items: list[dict], parsed) -> list[dict]:
+    """Read-only exact-file choices for a user-requested single episode.
+
+    Include unnumbered neighboring videos for transparency but never make
+    them selectable. Selecting an ID is only a request: the real transfer
+    enumerates the share and validates its immutable identity again.
+    """
+    if parsed.media_type not in ("tv", "anime") or len(parsed.episodes) != 1:
+        return []
+    requested = parsed.episodes[0]
+    season = parsed.season or 1
+    choices = []
+    for item in items:
+        if not is_video(item.get("name", "")) or is_extra(item.get("name", "")):
+            continue
+        file_season, episode = episode_of(item["name"])
+        folder_season = season_of(item.get("share_path") or "")
+        if episode not in (None, requested):
+            continue
+        if file_season is not None and file_season != season:
+            continue
+        if folder_season is not None and folder_season != season:
+            continue
+        choices.append({
+            "file_id": str(item["id"]), "name": item["name"],
+            "path": str(item.get("share_path") or ""),
+            "size": item.get("size"), "episode": episode,
+            "selectable": episode == requested and type(item.get("size")) is int
+                          and item["size"] > 0,
+        })
+        if len(choices) > 500:
+            raise NeedsManual("此分享的单集候选超过 500 个，无法安全显示完整源文件，请选择更具体的分享")
+    return sorted(choices, key=lambda c: (not c["selectable"], c["path"].casefold(), c["name"].casefold()))
+
+
 def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: str = 'share',
-                        hints: dict | None = None) -> dict:
+                        hints: dict | None = None, stored_variety_parts=(),
+                        share_folder_id: str | None = None, share_folder_path: str | None = None,
+                        required_latest: int | None = None, blocked_episodes=(),
+                        share_file_id: str | None = None, share_file_name: str | None = None,
+                        share_file_path: str | None = None, share_file_size: int | None = None,
+                        only_episodes=()) -> dict:
     """确定本次转存的文件。分享清单是集数的事实来源，消息/LLM 给出的集数只作提示。
 
     返回 ``{'files', 'episodes', 'season', 'pairs'}``：每个文件带自己的季与集，``pairs`` 为
@@ -83,13 +227,146 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
     """
     hints = hints or {}
     episodic = parsed.media_type in ('tv', 'anime') or bool(parsed.episodes)
-    videos = [x for x in video_items if not is_extra(x.get('name', ''))]
+    if only_episodes:
+        if parsed.media_type not in ("tv", "anime") or not parsed.title:
+            raise NeedsManual("人工指定补集仅支持已确认作品身份的剧集或动漫")
+        if any(type(ep) is not int or not 1 <= ep <= 2000 for ep in only_episodes):
+            raise NeedsManual("人工补集集号必须是 1～2000 的整数")
+        if len(set(only_episodes)) > 100:
+            raise NeedsManual("一次最多人工指定 100 集")
+        # The task's selection is intentionally narrower than the original
+        # Telegram message, which may describe an outdated/latest-only ep.
+        scope = "message"
+    if share_file_id:
+        requested_single = list(only_episodes) if only_episodes else parsed.episodes
+        if not episodic or len(requested_single) != 1:
+            raise NeedsManual("精确选择源文件仅适用于已确认的单集任务")
+        selected = [item for item in video_items
+                    if not item.get("is_dir") and str(item.get("id") or "") == str(share_file_id)]
+        if len(selected) != 1:
+            raise NeedsManual("已选分享源文件 ID 不存在或不唯一，请重新浏览分享后选择")
+        item = selected[0]
+        if (item.get("name") != share_file_name
+                or (item.get("share_path") or "") != (share_file_path or "")
+                or type(item.get("size")) is not int
+                or item["size"] != share_file_size):
+            raise NeedsManual("分享源文件名称、路径或大小已变化，必须重新确认，绝不自动替换")
+        file_season, file_ep = episode_of(item["name"])
+        folder_season = season_of(item.get("share_path") or "")
+        if file_ep != requested_single[0] or (file_season and file_season != (parsed.season or 1))                 or (folder_season and folder_season != (parsed.season or 1)):
+            raise NeedsManual("选择的文件名无法核验为消息指定的集数，不能冒认或更名")
+        video_items = selected
+        share_folder_id = None
+    if share_folder_id is not None:
+        candidates = share_folder_choices(video_items)
+        chosen = next((choice for choice in candidates if choice["folder_id"] == str(share_folder_id)), None)
+        if chosen is None:
+            raise NeedsManual("选中的分享版本文件夹已不存在或没有视频，请重新选择；禁止自动切换到其他版本")
+        if share_folder_path and chosen["path"] != share_folder_path:
+            raise NeedsManual("选中的分享版本文件夹名称已改变，请重新确认，禁止自动使用另一种 HDR 版本")
+        video_items = [x for x in video_items
+                       if (str(share_folder_id) in _share_file_ancestors(x)
+                           if str(share_folder_id) != SHARE_ROOT_DIRECT
+                           else not _share_file_ancestors(x))]
+    # Resolve known episode identities BEFORE deciding whether two source
+    # folders conflict. Old DoVi/HDR duplicates are irrelevant if that episode
+    # was already verified on the destination drive. Only missing episodes
+    # require a source-version choice. Never use this shortcut for variety
+    # editions (upper/lower/bonus are independent content), unnumbered files,
+    # conflicting season labels, or episodes quarantined as incorrect.
+    stored_pairs = {(int(season), int(ep)) for season, ep in stored}
+    blocked_pairs = {(int(season), int(ep)) for season, ep in blocked_episodes}
+    requested = set(only_episodes or parsed.episodes) if scope == "message" else set()
+    source_names = {item.get("name", "") for item in video_items}
+    seen_stored: set[tuple[int, int]] = set()
+    has_variety = any(variety_episode(item.get("name", ""))
+                      for item in video_items if is_video(item.get("name", "")))
+    if only_episodes and has_variety:
+        raise NeedsManual("综艺具有上/下/加更等独立版本，不支持普通剧集的指定补集模式")
+    if episodic and not has_variety and (stored_pairs or requested):
+        remaining = []
+        for item in video_items:
+            name = item.get("name", "")
+            if not is_video(name) or is_extra(name):
+                remaining.append(item)
+                continue
+            file_season, ep = episode_of(name)
+            folder_season = season_of(item.get("share_path") or "")
+            if ep is None or (file_season is not None and folder_season is not None
+                              and file_season != folder_season):
+                remaining.append(item)  # cannot infer or silently suppress it
+                continue
+            season = file_season or folder_season or parsed.season or 1
+            pair = (season, ep)
+            if requested and ep not in requested:
+                continue  # unrelated known historical episode in a latest-only share
+            if pair in blocked_pairs:
+                raise NeedsManual(f"目标 S{season:02d}E{ep:03d} 曾被标记为错片，"
+                                  "需人工解除隔离后才允许重新转存")
+            if pair in stored_pairs:
+                seen_stored.add(pair)
+                continue
+            remaining.append(item)
+        video_items = remaining
+        if not any(is_video(item.get("name", "")) and not is_extra(item.get("name", ""))
+                   for item in video_items):
+            if seen_stored:
+                label = "、".join(f"S{season:02d}E{ep:03d}"
+                                 for season, ep in sorted(seen_stored)[:8])
+                if len({season for season, _ in seen_stored}) > 1:
+                    detail = f"分享内 {len({season for season, _ in seen_stored})} 季共 {len(seen_stored)} 集均已入库"
+                else:
+                    season = next(iter(seen_stored))[0]
+                    detail = f"分享内第 {season} 季的 {len(seen_stored)} 集均已入库"
+                raise AlreadyStored(f"{detail}（{label}），无需选择 DoVi/HDR 版本")
+            if requested:
+                raise NeedsManual(f"分享内未找到消息声明的集数 {sorted(requested)}")
+
+    # A message requesting E11+E12 should not fail when E11 is already
+    # stored and E12 is the only gap. Do not re-require stored episodes.
+    missing_request = requested - {ep for _, ep in seen_stored}
+
+    # Version conflicts now concern only NOT-YET-STORED episode files.
+    # Choosing a wrapper is still unsafe if any missing episode appears
+    # in several child version folders.
+    multiple = _overlapping_share_versions(video_items, parsed)
+    if multiple:
+        missing = set()
+        for item in video_items:
+            file_season, ep = episode_of(item.get("name", ""))
+            if ep is not None:
+                missing.add((file_season or season_of(item.get("share_path") or "")
+                             or parsed.season or 1, ep))
+        label = "、".join(f"S{season:02d}E{ep:03d}"
+                         for season, ep in sorted(missing)[:10])
+        if share_folder_id is not None:
+            raise NeedsManual(f"所选目录仍包含缺失集 {label} 的多个版本，请选择更具体的版本子文件夹")
+        raise NeedsManual("缺失集 " + label + " 存在多个分享版本文件夹（"
+                          + "、".join(multiple[:4]) + "），请为缺失集选择一个分享版本")
+    # A share containing a correctly labelled E247 at the root AND an
+    # unrelated video named 4K.mp4 in another folder must never let AI
+    # invent E247 for that unrelated file. Require an explicit source folder.
+    if share_folder_id is None:
+        candidates = [x for x in video_items if is_video(x.get("name", ""))
+                      and not is_extra(x.get("name", ""))]
+        identified = [x for x in candidates if episode_of(x.get("name", ""))[1] is not None]
+        unknown = [x for x in candidates if episode_of(x.get("name", ""))[1] is None]
+        if episodic and identified and unknown and any(
+                str(a.get("share_folder_id") or "root")
+                != str(b.get("share_folder_id") or "root")
+                for a in identified for b in unknown):
+            raise NeedsManual("分享不同目录混有明确集号与无集号视频，"
+                              "请先选择目标文件夹，禁止 AI 猜测集号后误转存")
+    videos = [x for x in video_items if is_video(x.get("name", ""))
+              and not is_extra(x.get('name', ''))]
     if not videos and not episodic:
         # 原盘、合集的文件名常列出附带内容（如「花絮中字」）：分享里总有正片，按文件名全像花絮时改按大小判断
         videos = [x for x in video_items if type(x.get('size')) is int and x['size'] >= MOVIE_MIN_SIZE]
     if not videos:
         raise NeedsManual('分享内未找到正片视频文件')
-    names = {x.get('name', '') for x in videos}
+    # Hints may still name an existing (filtered) episode: validate against
+    # the original share choice, never let an LLM invent a non-existent file.
+    names = source_names
     for name in [*hints.get('episodes', {}), *hints.get('drop', []), *filter(None, [hints.get('movie_file')])]:
         if name not in names:
             raise NeedsManual(f'方案引用了分享里没有的正片文件：{name}')
@@ -115,7 +392,16 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
     for x in videos:
         name = x.get('name', '')
         file_season, ep = episode_of(name)
+        folder_season = season_of(x.get("share_path") or "")
+        if file_season is not None and folder_season is not None and file_season != folder_season:
+            raise NeedsManual(f"视频标注的季号与所在分享文件夹冲突：{name}")
+        if file_season is None:
+            file_season = folder_season
         if name in hints.get('episodes', {}):
+            if ep is None:
+                raise NeedsManual(
+                    f"文件「{name}」没有可核验的集号，"
+                    "AI 不能根据消息集号将其冒认成目标视频，请选择正确的分享文件夹")
             hint_season, hint_ep = hints['episodes'][name]
             if ep is not None and ep != hint_ep:
                 raise NeedsManual(f'方案的集号与文件名不一致：{name}')
@@ -139,9 +425,61 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         bare = [item.get('name', '') for item, s, _ in detected if s is None]
         if bare:
             raise NeedsManual(f'分享包含多季 {sorted(marked)}，但有文件名不带季号：{"、".join(bare[:5])}')
-        if scope == 'message' and parsed.episodes:
+        if scope == 'message' and requested:
+            if only_episodes:
+                raise NeedsManual(f'分享包含多季 {sorted(marked)}，人工补集需要先确认季号')
             raise NeedsManual(f'分享包含多季 {sorted(marked)}，消息只写了集数，需先指定季号')
         season, picked = None, detected
+    withheld = {(int(s), int(ep)) for s, ep in blocked_episodes}
+    affected = sorted(withheld & {(s, ep) for _, s, ep in picked})
+    if affected:
+        blocked_label = "、".join(f"S{s:02d}E{ep:03d}" for s, ep in affected[:5])
+        raise NeedsManual(f"目标 {blocked_label} 曾被标记为错片，需人工解除隔离后才允许重新转存")
+    if scope == 'message' and requested:
+        # A subscription progress post can point at an entire historical
+        # pack. Once the one requested episode has been positively located,
+        # unrelated old episodes (including duplicate releases) must not
+        # veto its selection. Still fail closed on unnumbered files above,
+        # or ambiguous/multiple versions of the REQUESTED episode below.
+        missing = missing_request - {ep for _, _, ep in picked}
+        if missing:
+            raise NeedsManual(f'分享内未找到本次需要补的集数 {sorted(missing)}')
+        picked = [(item, s, ep) for item, s, ep in picked if ep in missing_request]
+    if required_latest is not None and required_latest not in {ep for _, _, ep in picked}:
+        raise NeedsManual(f"选中版本缺少消息明确更新的 E{required_latest:02d}，"
+                          "不从其他版本补集，也不自动转存旧集")
+    # Variety episodes have *editions*: upper/lower/bonus/pure are not
+    # alternative resolutions of the same episode. They must be saved and
+    # deduplicated independently, never collapsed to a single E03.
+    variety_mode = any(variety_episode(x.get('name', '')) is not None for x in videos)
+    if variety_mode:
+        if any(variety_episode(x.get('name', '')) is None for x in videos):
+            raise NeedsManual('分享混有综艺期数与无法识别的普通视频，需确认每个文件的期数和版本')
+        editions: dict[tuple[int, int, str], dict] = {}
+        for item, s, ep in picked:
+            detail = variety_episode(item.get('name', ''))
+            if detail is None or detail[0] != ep:
+                raise NeedsManual(f"综艺期数与文件名不一致：{item.get('name', '')}")
+            key = (s, ep, detail[1])
+            if key in editions:
+                raise NeedsManual(
+                    f'第 {ep} 期的「{detail[1]}」包含多个文件或版本，'
+                    '不得自动丢弃或覆盖，请人工确认')
+            editions[key] = item
+        stored_parts = {(int(s), int(ep), str(part)) for s, ep, part in stored_variety_parts}
+        wanted = sorted(set(editions) - stored_parts)
+        if not wanted:
+            raise AlreadyStored('综艺分享中这些期数的上/下/加更/纯享版本均已单独核验入库')
+        files = [{**editions[key], 'season': key[0], 'episode': key[1], 'variant': key[2]}
+                 for key in wanted]
+        pairs = sorted({(season, ep) for season, ep, _ in wanted})
+        season, episodes = summarize_pairs(pairs)
+        return {
+            'files': files, 'episodes': episodes, 'season': season,
+            'pairs': [list(row) for row in pairs],
+            'variety_parts': [{'season': s, 'episode': ep, 'variant': part}
+                              for s, ep, part in wanted],
+        }
     groups: dict[tuple[int, int], list[dict]] = {}
     for item, s, ep in picked:
         groups.setdefault((s, ep), []).append(item)
@@ -160,11 +498,9 @@ def _select_video_items(video_items: list[dict], parsed, *, stored=(), scope: st
         by_pair[(s, ep)] = kept[0]
     if not by_pair:
         raise NeedsManual(f'分享内没有第 {season} 季的视频')
-    if scope == 'message' and parsed.episodes:
-        missing = set(parsed.episodes) - {ep for _, ep in by_pair}
-        if missing:
-            raise NeedsManual(f'分享内未找到消息声明的集数 {sorted(missing)}')
-        by_pair = {(season, ep): by_pair[(season, ep)] for ep in parsed.episodes}
+    if scope == 'message' and requested:
+        by_pair = {pair: item for pair, item in by_pair.items()
+                   if pair[1] in missing_request}
     wanted = sorted(set(by_pair) - {(s, ep) for s, ep in stored})
     if not wanted:
         raise AlreadyStored(f'分享内第 {season} 季的 {len(by_pair)} 集均已入库' if season is not None
@@ -312,20 +648,53 @@ def _verified_files(expected: list[dict], actual: list[dict]) -> list[dict]:
     return [by_name[x['name']] for x in expected]
 
 
+def _announced_latest(ctx: PipelineContext) -> int | None:
+    """Only check a clear 'updated to E14' when a user selected a version."""
+    if not ctx.ns("share_selection").get("folder_id"):
+        return None
+    if ctx.parsed.media_type not in ("tv", "anime"):
+        return None
+    hits = {int(v) for v in re.findall(
+        r"(?:更新至|更新到|更至|更新)\s*(?:第\s*)?(\d{1,4})\s*集",
+        ctx.raw.text or "")}
+    if len(hits) != 1:
+        return None
+    episode = hits.pop()
+    return episode if not ctx.parsed.episodes or episode in ctx.parsed.episodes else None
+
+
 class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
     """按分享清单选定转存文件（与具体网盘无关）：规则无法确定时先让 AI 给方案，方案经同一套规则校验。"""
 
     @staticmethod
     def _select(ctx: PipelineContext, listing: list[dict], hints: dict | None = None) -> dict:
+        only = ctx.ns('share_selection').get('only_episodes') or []
         return _select_video_items(listing, ctx.parsed,
                                    stored=ctx.ns('storage').get('stored_episodes') or [],
-                                   scope=ctx.source_rule.get('episodes_from', 'share'), hints=hints)
+                                   scope='message' if only else ctx.source_rule.get('episodes_from', 'share'),
+                                   only_episodes=only, hints=hints,
+                                   stored_variety_parts=ctx.ns('storage').get('stored_variety_parts') or [],
+                                   share_folder_id=ctx.ns('share_selection').get('folder_id'),
+                                   share_folder_path=ctx.ns('share_selection').get('path'),
+                                   required_latest=None if only else _announced_latest(ctx),
+                                   blocked_episodes=ctx.ns('storage').get('blocked_episodes') or [],
+                                   share_file_id=ctx.ns('share_selection').get('file_id'),
+                                   share_file_name=ctx.ns('share_selection').get('file_name'),
+                                   share_file_path=ctx.ns('share_selection').get('file_path'),
+                                   share_file_size=ctx.ns('share_selection').get('file_size'))
 
     async def select(self, ctx: PipelineContext, listing: list[dict]) -> dict:
         """按规则确定转存文件；规则无法确定时先让 AI 给出方案，方案经同一套规则校验，不过再转人工。"""
         try:
             return self._select(ctx, listing)
         except NeedsManual as exc:
+            if ctx.ns("task").get("force_missing_range"):
+                raise  # Never let AI guess among versions or episodes for a forced bulk copy.
+            if str(exc).startswith(("分享包含多个版本文件夹", "选中的分享版本文件夹",
+                                    "选中版本缺少", "分享不同目录混有",
+                                    "选中的文件夹内部还有", "缺失集 ",
+                                    "所选目录仍包含缺失集")):
+                raise  # Folder selection must be explicit; AI cannot bypass it.
             if self._client is None or not runtime.get('ai.assist', True):
                 raise
             problem = str(exc)
@@ -442,15 +811,27 @@ class P115Storage(ShareStorage):
             return {'status': 'available', **extra}
         return {**describe_share(P115ShareFileSystem(client, parsed.share_code, parsed.receive_code), parsed), **extra}
 
-    def browse(self, cid: str, offset: int = 0, limit: int = 100) -> dict[str, Any]:
-        """管理台选目录：列出 cid 下的子目录（分页）与面包屑。"""
-        return browse_dirs(self._auth, cid, offset, limit)
+    def share_source_inventory(self, parsed) -> dict:
+        """One read-only full share scan for both source folders and files."""
+        from types import SimpleNamespace
+        listing = self._list_share_sync(SimpleNamespace(parsed=parsed), include_dirs=True)
+        return {"folders": share_folder_choices(listing),
+                "files": share_video_choices(listing, parsed)}
+
+    def share_folder_choices(self, parsed) -> list[dict]:
+        return self.share_source_inventory(parsed)["folders"]
+
+    def browse(self, cid: str, offset: int = 0, limit: int = 100, *, include_files: bool = False) -> dict[str, Any]:
+        """目录选择器仅列目录；文件管理页也列出普通文件。"""
+        return browse_dirs(self._auth, cid, offset, limit, include_files=include_files)
 
     def _require_client(self) -> None:
         if self._cookie_client() is None:
             raise RuntimeError('115 客户端不可用：分享枚举/转存需要配置 cookie（写操作可走 OAuth）')
 
     async def prepare(self, ctx: PipelineContext) -> dict[str, Any]:
+        if ctx.parsed and ctx.parsed.raw_fields.get("share_provider") == "aliyun":
+            raise NeedsManual("这是阿里云盘分享链接，请将监听来源的转存网盘设为阿里云盘")
         self._require_client()
         listing = await run_blocking(self._list_share_sync, ctx)
         selection = await self.select(ctx, listing)
@@ -520,14 +901,16 @@ class P115Storage(ShareStorage):
                 raise TransferRejected(problem, permanent=True)
         return self._reconcile_sync(manifest)
 
-    def _list_share_sync(self, ctx: PipelineContext) -> list[dict]:
+    def _list_share_sync(self, ctx: PipelineContext, *, include_dirs: bool = False) -> list[dict]:
         from p115client import P115ShareFileSystem
         p = ctx.parsed
         client = self._cookie_client()
         problem = share_problem(client, p.share_code, p.receive_code)
         if problem:
             raise ShareUnavailable(problem)
-        return self._collect_share_videos(P115ShareFileSystem(client, p.share_code, p.receive_code))
+        return self._collect_share_videos(
+            P115ShareFileSystem(client, p.share_code, p.receive_code),
+            include_dirs=include_dirs)
 
     def _stage_sync(self, ctx: PipelineContext, selection: dict) -> dict[str, Any]:
         from p115client import P115FileSystem
@@ -590,22 +973,42 @@ class P115Storage(ShareStorage):
         return self._receipt(manifest, landed)
 
     @staticmethod
-    def _collect_share_videos(share_fs, root: int = 0, max_depth: int = 3) -> list[dict]:
-        out = []
-        def walk(cid, depth):
+    def _collect_share_videos(share_fs, root: int = 0, max_depth: int = 8,
+                              *, include_dirs: bool = False) -> list[dict]:
+        out: list[dict] = []
+        visited: set[str] = set()
+        count = 0
+
+        def walk(cid, depth, path: tuple[str, ...], ancestors: tuple[str, ...]):
+            nonlocal count
+            if str(cid) in visited:
+                raise NeedsManual('115 分享目录存在重复 ID，无法完整核验')
+            visited.add(str(cid))
             for item in share_fs.iterdir(cid):
+                count += 1
+                if count > 10000:
+                    raise NeedsManual('分享文件与目录超过 10000 项，无法完整核验')
                 if item.get('is_directory') or item.get('is_dir'):
+                    next_path = (*path, item['name'])
+                    next_ids = (*ancestors, str(item['id']))
+                    if include_dirs:
+                        out.append({**_file_record(item), 'is_dir': True,
+                                    'share_path': '/'.join(next_path),
+                                    'share_folder_id': str(item['id']),
+                                    'share_ancestor_ids': list(next_ids)})
                     if depth >= max_depth:
-                        raise NeedsManual('分享目录过深，不能完整核验视频清单')
-                    walk(item['id'], depth + 1)
+                        raise NeedsManual('分享目录过深，不能按不完整清单转存')
+                    walk(item['id'], depth + 1, next_path, next_ids)
                 elif is_video(item.get('name', '')):
-                    out.append(_file_record(item))
-        walk(root, 0)
+                    out.append({**_file_record(item),
+                                'share_folder_id': ancestors[-1] if ancestors else 'root',
+                                'share_ancestor_ids': list(ancestors),
+                                'share_path': '/'.join(path)})
+        walk(root, 0, (), ())
         return out
 
-
-def browse_dirs(credentials, cid: str, offset: int = 0, limit: int = 100) -> dict:
-    """只读列出 cid 下的子目录：保留长 ID、显式分页，错误不伪装成空目录。"""
+def browse_dirs(credentials, cid: str, offset: int = 0, limit: int = 100, *, include_files: bool = False) -> dict:
+    """只读按原分页列出目录；管理工具可要求同时显示普通文件。"""
     from p115client import check_response
     mode = 'oauth' if credentials.has_oauth else 'cookie'
     try:
@@ -644,15 +1047,18 @@ def browse_dirs(credentials, cid: str, offset: int = 0, limit: int = 100) -> dic
                 pid = item.get('parent_id', cid)
             else:
                 is_dir = not item.get('fid')
-                fid, name = item.get('cid'), item.get('n')
-                pid = item.get('pid', cid)
-            if is_dir:
-                if fid is None or not str(fid).isascii() or not str(fid).isdecimal():
-                    raise StorageBrowseError('invalid_response', '115 返回了无效的目录 ID。', 502)
-                items.append({'id': str(fid), 'name': str(name or ''), 'pid': str(pid)})
+                fid, name = (item.get('cid') if is_dir else item.get('fid')), item.get('n')
+                pid = item.get('pid', cid) if is_dir else item.get('cid', cid)
+            if is_dir or include_files:
+                if not str(fid or '').isascii() or not str(fid or '').isdecimal():
+                    raise StorageBrowseError('invalid_response', '115 返回了无效的文件或目录 ID。', 502)
+                size = item.get('s', item.get('file_size', item.get('size')))
+                size = int(size) if isinstance(size, (int, str)) and str(size).isdecimal() else None
+                items.append({'id': str(fid), 'name': str(name or ''), 'pid': str(pid),
+                              'is_dir': is_dir, 'size': None if is_dir else size})
         total = int(result.get('count', offset + len(data)))
         next_offset = offset + len(data) if offset + len(data) < total and data else None
-        return {'items': sorted(items, key=lambda x: x['name']), 'cid': cid, 'path': breadcrumbs,
+        return {'items': sorted(items, key=lambda x: (not x['is_dir'], x['name'].casefold())), 'cid': cid, 'path': breadcrumbs,
                 'next_offset': next_offset, 'total_entries': total, 'via': mode}
     except StorageBrowseError:
         raise
