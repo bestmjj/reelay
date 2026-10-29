@@ -590,6 +590,129 @@ class ManualE247FileChoiceAPITests(WebCase):
             self.assertIn("S01E247", plan[0]["target_name"])
 
 
+class TelegramDestinationCorrectionTests(WebCase):
+    """Telegram auto-listener approval can override a wrong inferred directory."""
+    CONFIG = {
+        "save_dirs": {"默认": "12345", "动漫": "aliyun:anime-root"},
+        "defaults": {"storage": "p115", "parser": "regex",
+                     "save_to": "默认", "approval_mode": "manual"},
+        "sources": [{"bot": "@shareAliyun", "storage": "aliyun", "parser": "regex",
+                     "save_to": "默认", "approval_mode": "manual"}],
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.ctx = PipelineContext(RawMessage(
+            "@shareAliyun", "tg-wrong-title",
+            "K狂王 第二季 https://www.alipan.com/s/real-share",
+            extra={}))  # NOT a manual_import
+        self.ctx.parsed = ParsedResource(
+            is_media=True, title="误识别作品", media_type="tv", year=2026,
+            season=1, episodes=[1], share_code="real-share",
+            raw_fields={"share_provider": "aliyun"})
+        self.ctx.state = TaskState.PENDING_APPROVAL
+        self.ctx.source_rule = {"storage": "aliyun", "approval_mode": "manual",
+                                "save_to": "默认", "episodes_from": "share"}
+        self.ctx.save_dir_alias = "默认"  # original 115 alias must be bypassed
+        self.app.state.store.save_task(self.ctx)
+        self.url = f"/api/tasks/{self.ctx.task_id}"
+        self.storage = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        self.folder_id = "real-folder"
+        self.drive_id = "real-resource-drive"
+
+    def correct(self):
+        result = self.client.patch(self.url + "/parsed", json={"values": {
+            "title": "K狂王 第二季", "media_type": "anime", "year": 2026,
+            "season": 2, "episodes": [11, 12, 13, 14],
+            "resolution": "2160p",
+        }})
+        self.assertEqual(result.status_code, 200, result.text)
+
+    def mocked_folder(self, path):
+        return (
+            patch.object(self.storage, "client", SimpleNamespace(drive_id=self.drive_id)),
+            patch.object(self.storage, "dir_path", return_value=path),
+            patch.object(self.storage, "library", return_value=SimpleNamespace(
+                get_attr=lambda fid: {"id": fid, "is_dir": True})),
+        )
+
+    def test_corrected_telegram_uses_exact_folder_despite_wrong_115_alias(self):
+        self.correct()
+        path = "/影视/动漫/作品/K狂王 第二季/Season 02"
+        a, b, c = self.mocked_folder(path)
+        with a, b, c:
+            wrong = self.client.post(self.url + "/approve", json={
+                "existing_folder_id": self.folder_id,
+                "existing_drive_id": "different-drive",
+                "destination_mode": "exact",
+            })
+            self.assertEqual(wrong.status_code, 409, wrong.text)
+            accepted = self.client.post(self.url + "/approve", json={
+                "existing_folder_id": self.folder_id,
+                "existing_drive_id": self.drive_id,
+                "destination_mode": "exact",
+            })
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            ctx = self.app.state.store.get_task(self.ctx.task_id)
+            self.assertEqual(ctx.state, TaskState.QUEUED)
+            self.assertFalse(ctx.ns("storage").get("manifest"))
+            self.assertEqual(ctx.ns("library")["direct_existing"]["mode"], "exact")
+            self.app.state.pipeline._resolve_directory(ctx)
+            self.assertEqual(ctx.save_dir_cid, self.folder_id)
+            with patch.object(self.storage, "dir_path", return_value="/影视/错误位置"):
+                with self.assertRaisesRegex(ValueError, "无法再次核验"):
+                    self.app.state.pipeline._resolve_directory(ctx)
+            ctx.ns("storage")["landed"] = [
+                {"id": "new11", "name": "11 4K.mp4", "size": 90000000, "is_dir": False}]
+            ctx.ns("storage")["manifest"] = {"files": [
+                {"name": "11 4K.mp4", "season": 2, "episode": 11}]}
+            from reelay.plugins.organizer import LibraryRouter, Organizer
+            with self.app.state.pipeline.scope(ctx):
+                asyncio.run(LibraryRouter().run(ctx))
+                asyncio.run(Organizer().prepare(ctx))
+            self.assertEqual(ctx.ns("organize")["plan"][0]["target_dir"], "")
+
+    def test_corrected_telegram_uses_selected_organization_root(self):
+        self.correct()
+        a, b, c = self.mocked_folder("/影视/动漫/本次整理根")
+        with a, b, c:
+            accepted = self.client.post(self.url + "/approve", json={
+                "existing_folder_id": self.folder_id,
+                "existing_drive_id": self.drive_id,
+                "destination_mode": "organized",
+            })
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            ctx = self.app.state.store.get_task(self.ctx.task_id)
+            self.app.state.pipeline._resolve_directory(ctx)
+            ctx.ns("storage")["landed"] = [
+                {"id": "new11", "name": "11 4K.mp4", "size": 90000000, "is_dir": False}]
+            ctx.ns("storage")["manifest"] = {"files": [
+                {"name": "11 4K.mp4", "season": 2, "episode": 11}]}
+            from reelay.plugins.organizer import LibraryRouter, Organizer
+            with self.app.state.pipeline.scope(ctx):
+                asyncio.run(LibraryRouter().run(ctx))
+                asyncio.run(Organizer().prepare(ctx))
+            target = ctx.ns("organize")["plan"][0]["target_dir"]
+            self.assertIn("K狂王 第二季", target)
+            self.assertIn("Season 02", target)
+            self.assertFalse(target.startswith("国产动漫/"))
+
+    def test_nonexistent_folder_never_queues(self):
+        self.correct()
+        a, b, c = self.mocked_folder("/影视/自选位置")
+        with a, b, c:
+            with patch.object(self.storage, "library", return_value=SimpleNamespace(
+                    get_attr=lambda fid: {"id": fid, "is_dir": False})):
+                result = self.client.post(self.url + "/approve", json={
+                    "existing_folder_id": self.folder_id,
+                    "existing_drive_id": self.drive_id,
+                    "destination_mode": "exact",
+                })
+            self.assertEqual(result.status_code, 409, result.text)
+            self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state,
+                             TaskState.PENDING_APPROVAL)
+
+
 class FolderChoiceAPITests(WebCase):
     CONFIG = {"save_dirs": {"默认": "aliyun:library"},
               "defaults": {"storage": "aliyun", "save_to": "默认"},
