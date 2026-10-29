@@ -77,6 +77,8 @@ interface TaskMeta {
   storage?: { partial?: ITransferPartial };
   share_selection?: { folder_id?: string; path?: string; file_id?: string; only_episodes?: number[];
     file_name?: string; file_path?: string; file_size?: number };
+  task?: { force_single_copy?: { season: number; episode: number };
+    force_missing_range?: { season: number; episodes: number[]; effective_episodes?: number[] } };
 }
 
 export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDetailSheetProps) {
@@ -161,7 +163,10 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             destination_mode: destinationMode }
         : actionBody(action, { dir: targetDir, conflict });
       await taskApi.act(detail.task_id, ACTION_ENDPOINT[action], body);
-      finish(conflict ? CONFLICT_DONE[conflict] : ACTION_DONE[action]);
+      finish(conflict ? CONFLICT_DONE[conflict]
+        : action === 'approve' && forcedRange
+          ? '已加入缺集核验队列；仅复制最终云盘目录实际缺少的集数'
+          : ACTION_DONE[action]);
     } catch (err) {
       toast.error(errorMessage(err, '操作失败'));
     } finally {
@@ -320,6 +325,45 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     }
   };
 
+  const forceMissingRange = async () => {
+    if (!detail) return;
+    const current = detail.context.parsed?.episodes ?? [];
+    const defaultValue = current.length === 1 && current[0] > 1 && current[0] <= 101
+      ? `1-${current[0] - 1}` : '';
+    const answer = window.prompt(
+      '要补回哪些集？例如 1-13。\\n只复制最终云盘目录里实际缺少的集数（最多 100 集）。',
+      defaultValue,
+    );
+    if (answer === null) return;
+    let episodes: number[];
+    try {
+      episodes = parseSelectedEpisodes(answer);
+      if (!episodes.length) throw new Error('请填写要补回的集数，例如 1-13');
+    } catch (err) {
+      toast.error(errorMessage(err, '集数无效'));
+      return;
+    }
+    if (!window.confirm(
+      `确认申请批量补回第 ${episodes.join('、')} 集？\\n后续还要选定唯一分享版本和最终 Season 文件夹。`
+      + '\\n只补云盘里确实没有的集数；历史入库记录与现有文件不会删除或覆盖。',
+    )) return;
+    setBusy(true);
+    try {
+      const next = await taskApi.forceMissingRange(detail.task_id, episodes);
+      loaded.mutate(() => next);
+      setShareFolders(null);
+      setShareFolderId('');
+      setShareFileId('');
+      setRememberShareFolder(false);
+      toast.success(`已指定 ${episodes.length} 集：请选择唯一分享版本及最终保存目录`);
+      onChanged?.();
+    } catch (err) {
+      toast.error(errorMessage(err, '无法启动批量补集'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const reopenDuplicate = async () => {
     if (!detail) return;
     setBusy(true);
@@ -409,7 +453,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const requireExplicitTarget = detail?.context.raw.extra?.manual_import === true
     && detail?.context.raw.extra?.manual_unlabeled === true;
   const meta = (detail?.context.meta ?? {}) as TaskMeta;
-  const forcedCopy = Boolean((detail?.context.meta?.task as { force_single_copy?: unknown } | undefined)?.force_single_copy);
+  const forcedCopy = Boolean(meta.task?.force_single_copy);
+  const forcedRange = meta.task?.force_missing_range;
   const isAliyun = detail?.context.source_rule.storage === 'aliyun'
     || (detail?.context.meta?.storage as { provider?: string } | undefined)?.provider === 'aliyun';
   const plan = meta.organize?.plan ?? [];
@@ -418,10 +463,13 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const conflict = can('resolve_conflict') ? meta.organize?.pending_conflict : undefined;
   const reorganize = () => (conflict ? setChoosing(true) : void run('reorganize'));
   const currentSeason = `Season ${String(parsed?.season ?? 1).padStart(2, '0')}`;
-  const forceBlockReason = !forcedCopy ? null
+  const forceBlockReason = !forcedCopy && !forcedRange ? null
     : hasPendingMetadataEdits ? '识别结果有未保存的修改，请先点击「保存修改」'
-    : !meta.share_selection?.file_id ? '请在「选择分享源文件或文件夹」中锁定准确的单集视频'
-    : !existingFolder ? `还没有指定最终保存位置：请在上方「指定阿里云盘保存目录」选择已有的 ${currentSeason} 文件夹`
+    : forcedCopy && !meta.share_selection?.file_id
+      ? '请在「选择分享源文件或文件夹」中锁定准确的单集视频'
+    : forcedRange && !meta.share_selection?.folder_id
+      ? '请在「选择分享源文件或文件夹」中读取分享并确认一个包含所需集数的版本文件夹'
+    : !existingFolder ? `请在上方「指定阿里云盘保存目录」选择已有的 ${currentSeason} 最终文件夹`
     : !existingFolder.driveId ? '所选文件夹缺少阿里云盘资源库 ID，请重新选择'
     : destinationMode !== 'exact' ? '保存方式必须选择「直接存入所选文件夹」'
     : null;
@@ -430,7 +478,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     <div className="flex flex-wrap items-center justify-between gap-2">
       {can('approve') && forceBlockReason ? (
         <p role="status" className="w-full text-xs text-destructive">
-          暂时无法强制转存：{forceBlockReason}。
+          暂时无法提交：{forceBlockReason}。
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">
@@ -450,6 +498,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         {can('force_reopen_duplicate') ? (
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void forceReopenDuplicate()}>
             <AlertTriangle />强制转存本集
+          </Button>
+        ) : null}
+        {can('force_missing_range') ? (
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => void forceMissingRange()}>
+            <RefreshCw />批量补回缺集
           </Button>
         ) : null}
         {can('reconcile') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reconcile')}><ShieldCheck />核验转存</Button> : null}
@@ -476,7 +529,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               disabled={busy || Boolean(forceBlockReason) || Boolean(hasPendingMetadataEdits)
                 || (requireExplicitTarget && !targetDir && !existingFolder)
                 || Boolean(existingFolder && !existingFolder.driveId)}
-              onClick={() => void run('approve')}><Check />{forcedCopy ? '确认强制转存本集' : '确认转存'}</Button> : null}
+              onClick={() => void run('approve')}><Check />{forcedRange ? '确认批量补回缺集' : forcedCopy ? '确认强制转存本集' : '确认转存'}</Button> : null}
       </div>
     </div>
   ) : null;
@@ -646,6 +699,21 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             </Section>
           ) : null}
 
+          {forcedRange ? (
+            <Section title="批量补回缺集" icon={ShieldCheck}>
+              <p className="text-xs leading-5 text-muted-foreground">
+                已选择第 {forcedRange.season} 季的 {forcedRange.episodes.length} 集：
+                {forcedRange.episodes.map((ep) => `E${String(ep).padStart(3, '0')}`).join('、')}。
+                请在下方读取分享并只选择一个版本文件夹（DoVi、HDR.Vivid 等不可混用），
+                然后明确选中原来保存剧集的 {currentSeason} 最终文件夹。
+                系统将在复制前读取真实云盘文件，已存在的集数跳过；旧入库记录保留，
+                不自动删除、替换或覆盖文件。
+              </p>
+              <p className="text-xs text-destructive">
+                如果来源版本缺集、目标文件名无法识别或读取失败，将停止操作而非复制错误文件。
+              </p>
+            </Section>
+          ) : null}
           {forcedCopy ? (
             <Section title="人工强制转存（只限本集）" icon={AlertTriangle}>
               <p className="text-xs leading-5 text-muted-foreground">
@@ -691,8 +759,9 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
           {can('choose_share_folder') ? (
             <Section title="选择分享源文件或文件夹" icon={FolderTree}>
               <p className="text-xs leading-5 text-muted-foreground">
-                想只转存 E247：先保存识别结果中的季与集号，再读取分享并选中精确的
-                「247 4K.mp4」源视频。文件夹选择适合单一版本目录；两种方式互斥。
+                {forcedRange
+                  ? '批量补回需要选择一个包含所需集数的完整分享版本文件夹；不能混用 DoVi/HDR，也不要逐个选择源视频。'
+                  : '想只转存 E247：先确认季与集号，再读取分享并选中精确的「247 4K.mp4」源视频。多集转存可选择版本文件夹。'}
                 这里选择的是分享来源，不会改变下方「保存到」的目标目录。
               </p>
               <Button variant="outline" size="sm" disabled={shareFolderBusy || busy}

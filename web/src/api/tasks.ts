@@ -94,6 +94,9 @@ export const taskApi = {
   /** Explicitly bypass only the old episode ledger for one manually selected Aliyun file. */
   forceReopenDuplicate: (taskId: string) =>
     post<ITaskDetail>(`tasks/${taskId}/force-reopen`),
+  /** Reopen a skipped Aliyun task for a user-specified range, to transfer only absent cloud episodes. */
+  forceMissingRange: (taskId: string, episodes: number[]) =>
+    post<ITaskDetail>(`tasks/${taskId}/force-missing-range`, { episodes }),
   /** Read-only inspection; old DONE record remains unchanged. */
   repairCheck: (taskId: string) =>
     get<IRepairReport>(`tasks/${taskId}/repair-check`),
