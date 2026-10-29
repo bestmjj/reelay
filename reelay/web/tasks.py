@@ -12,6 +12,7 @@ class ActionPayload(BaseModel):
     save_dir_alias: str | None = None
     existing_folder_id: str | None = Field(default=None, min_length=1, max_length=128)
     existing_drive_id: str | None = Field(default=None, min_length=1, max_length=128)
+    destination_mode: Literal["existing", "exact", "organized"] = "existing"
     conflict: Literal["skip", "replace"] | None = None  # 重新整理时处理文件冲突
 
 
@@ -110,6 +111,7 @@ def router(service) -> APIRouter:
             save_dir_alias=payload.save_dir_alias if payload else None,
             existing_folder_id=payload.existing_folder_id if payload else None,
             existing_drive_id=payload.existing_drive_id if payload else None,
+            destination_mode=payload.destination_mode if payload else "existing",
         )
         return {"ok": True}
 
