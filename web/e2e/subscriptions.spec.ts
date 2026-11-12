@@ -104,3 +104,52 @@ test('existing episode dialog browses cloud folders instead of asking for save-d
   await expect(page.getByText(/105 4K\.mp4/).first()).toBeVisible();
   await expect(page.getByText(/无需去设置保存目录/)).toBeVisible();
 });
+
+test('automatic subscription simulation can submit the pinned result only once', async ({ page }) => {
+  const login = await page.request.post(`${ROOT}/api/auth/login`, {
+    data: { password: 'reelay-e2e-password-123' },
+  });
+  expect(login.ok()).toBeTruthy();
+  const show = {
+    id: 237, title: '牧神记', season: 1, total: 110, tmdbid: 236534,
+    auto: true, start_episode: 106, have: [], observed: [], scan_complete: false,
+    missing: [], aired: 106, category: '动漫', finished: null, discovery: null,
+  };
+  let submitCalls = 0;
+  await page.route('**/api/subscriptions', async (route) => {
+    if (route.request().method() !== 'GET') { await route.continue(); return; }
+    await route.fulfill({ json: { items: [show], suggestions: [], inactive: [], sources: ['@shareAliyun'] } });
+  });
+  await page.route('**/api/subscriptions/simulate', async (route) => {
+    await route.fulfill({ json: {
+      status: 'automatic', reason: '订阅新集满足放行条件',
+      subscription: { id: 237, title: '牧神记', season: 1 },
+      source: '@shareAliyun', example_origin: 'local',
+      parsed: { title: '牧神记', media_type: 'anime', season: 1, episodes: [106],
+                share_code: 'abc123', raw_fields: { share_provider: 'aliyun' } },
+      matched_subscription: { id: 237, title: '牧神记', season: 1 },
+      decision: 'save', routing: { share_provider: 'aliyun', target_storage: 'aliyun', compatible: true },
+      target_preview: '动漫/国产动漫', trail: ['订阅新集自动放行'],
+      task_created: false, share_checked: false, dedup_checked: false,
+      simulation_token: 'fake-server-token-for-browser-only', promotion_expires_in: 1800,
+    } });
+  });
+  await page.route('**/api/subscriptions/submit-simulation', async (route) => {
+    submitCalls++;
+    expect(route.request().postDataJSON()).toEqual({
+      id: 237, token: 'fake-server-token-for-browser-only',
+    });
+    await route.fulfill({ json: {
+      task_id: 'test-simulation-job', state: 'received', note: '后台核验并转存',
+    } });
+  });
+  page.on('dialog', async (dialog) => { await dialog.accept(); });
+  await page.goto(`${ROOT}/subscriptions`);
+  await page.getByRole('button', { name: '模拟测试' }).click();
+  await page.getByRole('button', { name: '开始模拟测试' }).click();
+  await expect(page.getByText('预计自动放行')).toBeVisible();
+  await page.getByRole('button', { name: '按模拟结果提交转存任务' }).click();
+  await expect(page.getByText(/已创建正式任务 test-simulation-job/)).toBeVisible();
+  await expect(page.getByRole('button', { name: '按模拟结果提交转存任务' })).toHaveCount(0);
+  expect(submitCalls).toBe(1);
+});
