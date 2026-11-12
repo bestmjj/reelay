@@ -624,7 +624,8 @@ class TaskOpsMixin(ServiceBase):
                 and not storage.get("manifest") and not storage.get("landed")
                 and ctx.parsed and ctx.parsed.title and ctx.parsed.media_type in ("tv", "anime")):
             out.append("select_episodes")
-        if self._landed_single_episode(ctx, allow_completed=True):
+        if state == TaskState.NEED_MANUAL and self._landed_single_episode(
+                ctx, allow_completed=True):
             out.append("organize_single_episode")
         if state == TaskState.NEED_MANUAL:
             if unknown_transfer:
@@ -960,7 +961,11 @@ class TaskOpsMixin(ServiceBase):
         """
         storage = ctx.ns("storage")
         parsed = ctx.parsed
-        if (ctx.state != TaskState.NEED_MANUAL or not parsed
+        archived = bool(
+            allow_completed and ctx.state == TaskState.SKIPPED
+            and ctx.ns("task").get("skip", {}).get("kind") == "preserved_transfer"
+        )
+        if (not (ctx.state == TaskState.NEED_MANUAL or archived) or not parsed
                 or parsed.media_type not in ("tv", "anime")
                 or not parsed.title or type(parsed.season) is not int
                 or not 1 <= parsed.season <= 100
