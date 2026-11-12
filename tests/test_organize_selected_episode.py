@@ -289,6 +289,11 @@ class OnlyE18FromCopiedSeason(WebCase):
         closed = store.get_task(ctx.task_id)
         self.assertEqual(closed.state, TaskState.SKIPPED)
         self.assertEqual(closed.ns("task")["skip"]["kind"], "preserved_transfer")
+        self.assertNotIn("organize_single_episode", self.client.get(self.url).json()["actions"])
+        # Read-only location stays available after dismissal; no new writes.
+        location = self.client.get(self.url + "/single-episode-location")
+        self.assertEqual(location.status_code, 200, location.text)
+        self.assertEqual(location.json()["file_id"], "landed-18")
         self.assertTrue(closed.result["storage_verified"])
         self.assertEqual(len(self.drive.iterdir("stage-dir")), 18)
         self.assertEqual(self.drive.writes, [])
