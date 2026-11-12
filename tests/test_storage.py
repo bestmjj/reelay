@@ -585,11 +585,25 @@ class TestTransferRecovery(unittest.IsolatedAsyncioTestCase):
             await self.service.reject(uncertain.task_id)
         self.assertEqual(self.store.get_task(uncertain.task_id).state, TaskState.NEED_MANUAL)
 
-    async def test_ignoring_is_refused_when_files_already_landed(self):
-        ctx, *_ = await self.conflict_task()  # 文件已转存、等待处理整理冲突
-        with self.assertRaises(ConflictError):
-            await self.service.reject(ctx.task_id)
-        self.assertEqual(self.store.get_task(ctx.task_id).state, TaskState.NEED_MANUAL)
+    async def test_ignoring_stored_conflict_preserves_files_and_revokes_false_dedup(self):
+        # New explicit exit path: a verified copy with a failed organizer may
+        # be dismissed while leaving BOTH the existing and landed files intact.
+        ctx, existing, season, landed = await self.conflict_task()
+        self.assertIn("dismiss", self.service.task_actions(self.store.get_task(ctx.task_id)))
+        received = len(self.cloud.receives())
+        before_delete = [x for x in self.cloud.calls if x[0] == "delete"]
+        await self.service.reject(ctx.task_id)
+        closed = self.store.get_task(ctx.task_id)
+        self.assertEqual(closed.state, TaskState.SKIPPED)
+        self.assertEqual(closed.ns("task")["skip"]["kind"], "preserved_transfer")
+        self.assertIn(existing["id"], self.cloud.items)
+        self.assertIn(landed, self.cloud.items)
+        self.assertEqual(len(self.cloud.receives()), received)
+        self.assertEqual([x for x in self.cloud.calls if x[0] == "delete"], before_delete)
+        self.assertEqual(self.store._conn.execute(
+            "SELECT COUNT(*) FROM dedup WHERE task_id=? AND kind IN ('share','episode','variety_part')",
+            (ctx.task_id,)).fetchone()[0], 0)
+        self.assertEqual(self.claims(), 0)
 
     async def test_waiting_task_rechecks_episodes_stored_meanwhile(self):
         self.cloud.add_share('a', 'S01E01.mkv', 'S01E02.mkv')
