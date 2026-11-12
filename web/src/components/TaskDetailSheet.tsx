@@ -765,7 +765,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               </p>
             </Section>
           ) : null}
-          {(detail.error || organizeError || (detail.explanation && !meta.organize?.partial_completed)) ? (
+          {detail.skip_kind !== 'preserved_transfer'
+            && (detail.error || organizeError || (detail.explanation && !meta.organize?.partial_completed)) ? (
             <div className="flex gap-2.5 rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">
               <AlertTriangle className="mt-0.5 size-4 shrink-0" />
               <div className="min-w-0 space-y-1">
