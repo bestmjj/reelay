@@ -73,7 +73,9 @@ interface TaskDetailSheetProps {
 
 interface TaskMeta {
   confidence?: { score?: number; caps?: string[] };
-  organize?: { plan?: Array<{ target_dir: string; target_name: string }>; error?: string; pending_conflict?: IOrganizeConflict };
+  organize?: { plan?: Array<{ target_dir: string; target_name: string }>;
+    error?: string; pending_conflict?: IOrganizeConflict;
+    partial_completed?: { season: number; episode: number; source_id: string; remaining: number } };
   storage?: { partial?: ITransferPartial };
   share_selection?: { folder_id?: string; path?: string; file_id?: string; only_episodes?: number[];
     file_name?: string; file_path?: string; file_size?: number };
@@ -513,6 +515,24 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const organizeError = meta.organize?.error;
   const partial = meta.storage?.partial;
   const conflict = can('resolve_conflict') ? meta.organize?.pending_conflict : undefined;
+  const reorganizeSingleEpisode = async () => {
+    if (!detail || !parsed?.episodes || parsed.episodes.length !== 1) return;
+    const ep = parsed.episodes[0];
+    if (!window.confirm(
+      `只整理这次已经转存的 S${String(parsed.season ?? 1).padStart(2, '0')}E${String(ep).padStart(3, '0')}？`
+      + '\\n不会重新转存，也不会删除或覆盖任何文件；同名时另存带后缀的新文件。'
+      + '\\n分享里其他已转存文件留在暂存目录，任务仍会提示需要人工处理剩余文件。',
+    )) return;
+    setBusy(true);
+    try {
+      await taskApi.organizeSingleEpisode(detail.task_id);
+      finish(`已排队：仅整理 E${String(ep).padStart(3, '0')}，其余已转存文件原样保留`);
+    } catch (err) {
+      toast.error(errorMessage(err, '无法只整理本集'));
+    } finally {
+      setBusy(false);
+    }
+  };
   const reorganize = () => (conflict ? setChoosing(true) : void run('reorganize'));
   const currentSeason = `Season ${String(parsed?.season ?? 1).padStart(2, '0')}`;
   const forceBlockReason = !forcedCopy && !forcedRange && !forcedAll ? null
@@ -539,6 +559,12 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         {can('correct') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void saveParsed()}>保存修改</Button> : null}
         {can('reparse') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reparse')}><RotateCcw />重新识别</Button> : null}
         {can('retry') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('retry')}><RefreshCw />重试</Button> : null}
+        {can('organize_single_episode') ? (
+          <Button variant="outline" size="sm" disabled={busy || hasPendingMetadataEdits}
+            onClick={() => void reorganizeSingleEpisode()}>
+            <ShieldCheck />仅整理 E{String(parsed?.episodes?.[0] ?? '').padStart(2, '0')}（不重复转存）
+          </Button>
+        ) : null}
         {can('repair_missing') ? (
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void checkMissingFiles()}>
             <ShieldCheck />核验已入库文件
@@ -650,6 +676,19 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             </div>
           ) : null}
 
+          {meta.organize?.partial_completed ? (
+            <div className="rounded-lg border p-3 text-sm leading-6">
+              <p className="font-medium text-primary">
+                已完成 S{String(meta.organize.partial_completed.season).padStart(2, '0')}
+                E{String(meta.organize.partial_completed.episode).padStart(3, '0')} 的单集整理。
+              </p>
+              <p className="text-muted-foreground">
+                仅移动已转存的目标文件，没有重新转存；其他
+                {meta.organize.partial_completed.remaining} 个文件保留在暂存目录，没有删除或覆盖。
+                原整季任务仍待人工处理剩余文件。
+              </p>
+            </div>
+          ) : null}
           {detail.error || organizeError || detail.explanation ? (
             <div className="flex gap-2.5 rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">
               <AlertTriangle className="mt-0.5 size-4 shrink-0" />
