@@ -118,7 +118,7 @@ class SourceMixin(ServiceBase):
         rule 用于接入向导：按草案规则试跑，而不是按配置里的来源规则。
         """
         from .. import confidence
-        from ..contracts import RawMessage
+        from ..contracts import Decision, RawMessage
         cfg = self.get_config()
         raw = RawMessage(source=source or "@test", msg_id="web-preview", text=text, urls=list(urls or []))
         ctx = PipelineContext(raw=raw)
@@ -129,10 +129,15 @@ class SourceMixin(ServiceBase):
             ctx.parsed = await parser.parse(ctx)
         await self.pipeline.run_hooks("after_parse", ctx)
         confidence.apply(ctx)
+        # Simulate the real subscribed-progress boundary too: "更新至 E18"
+        # does NOT mean copying E01-E18. Display the effective latest E18.
+        progress_scope = subscriptions.scope_latest_progress(ctx, self.store.subscriptions())
         decider = self.pipeline.reg.get_provider(
             "decision", ctx.source_rule.get("decision", cfg["defaults"]["decision"]))
         with self.pipeline.scope(ctx):
             decision = await decider.decide(ctx)
+        if progress_scope == "below_floor" and decision == Decision.SAVE:
+            decision = Decision.ASK
         share_provider = (ctx.parsed.raw_fields.get("share_provider") if ctx.parsed else None)
         target_storage = ctx.source_rule.get("storage") or cfg["defaults"]["storage"]
         matched = subscriptions.match(

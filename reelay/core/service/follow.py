@@ -6,12 +6,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import secrets
 import time
 from typing import Any
 
 from .. import ai, discovery, existing_media, ignored, library_scan_progress, messages, subscriptions, tmdb, works
-from ..contracts import PipelineContext, TaskState
+from ..contracts import ParsedResource, PipelineContext, RawMessage, TaskState
+from ..parse_rules import parse_share_url, share_provider
+from ..validation import validate_resource
 from ..media import format_episodes
 from ..rules import tv_category
 from .base import ConflictError, NotFoundError, ServiceBase
@@ -25,6 +30,9 @@ GENRES = ("subscriptions", "genres")
 # updated only on its daily run and must not cause an episode already in the
 # current verified ledger to be presented as still missing.
 MAX_VISIBLE_EPISODES = 5000
+SIMULATION_TOKEN_NAMESPACE = "subscription_simulation_promotions"
+SIMULATION_TOKEN_TTL = 30 * 60
+SIMULATION_TOKEN_LIMIT = 60
 
 
 def subscription_unrecorded(have: list[int], total: int | None, report: dict) -> tuple[list[int], bool]:
@@ -175,7 +183,7 @@ class FollowMixin(ServiceBase):
             status, reason = "automatic", "订阅新集满足放行条件，将进入自动转存队列"
         else:
             status, reason = "manual", "不满足自动放行条件，会进入待审批，请查看识别轨迹"
-        return {
+        result = {
             "status": status, "reason": reason,
             "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
             "source": sample["source"], "example_origin": example_origin, "parsed": preview["parsed"],
@@ -187,6 +195,114 @@ class FollowMixin(ServiceBase):
             "task_created": False,
             "share_checked": False, "dedup_checked": False,
         }
+        parsed = preview.get("parsed") or {}
+        share_url, code, _ = parse_share_url(sample["text"], sample["urls"])
+        # Offer promotion only for an unambiguous single-episode preview
+        # with a real share extracted from the server-selected message.
+        eligible = bool(
+            status == "automatic" and entry.get("auto")
+            and parsed.get("is_media") is True
+            and parsed.get("media_type") in ("tv", "anime")
+            and type(parsed.get("season")) is int
+            and parsed["season"] == entry["season"]
+            and type(parsed.get("episodes")) is list
+            and len(parsed["episodes"]) == 1
+            and type(parsed["episodes"][0]) is int
+            and parsed.get("share_code") == code
+            and share_provider(share_url) in ("aliyun", "p115")
+            and route.get("share_provider") == share_provider(share_url)
+            and route.get("target_storage") == share_provider(share_url)
+            and sample.get("source") in sources
+        )
+        if eligible:
+            try:
+                validate_resource(dict(parsed))
+            except ValueError:
+                eligible = False
+        if eligible:
+            now = time.time()
+            previews = self.store.state_items(SIMULATION_TOKEN_NAMESPACE)
+            for key, row in previews.items():
+                if now - float((row or {}).get("created_at") or 0) > SIMULATION_TOKEN_TTL:
+                    self.store.state_delete(SIMULATION_TOKEN_NAMESPACE, key)
+            active = sorted(
+                ((key, row) for key, row in previews.items()
+                 if now - float((row or {}).get("created_at") or 0) <= SIMULATION_TOKEN_TTL),
+                key=lambda item: float(item[1].get("created_at") or 0))
+            for key, _ in active[:max(0, len(active) - SIMULATION_TOKEN_LIMIT + 1)]:
+                self.store.state_delete(SIMULATION_TOKEN_NAMESPACE, key)
+            token = secrets.token_urlsafe(24)
+            self.store.state_set(SIMULATION_TOKEN_NAMESPACE, token, {
+                "created_at": now, "subscription_id": entry["id"],
+                "subscription": {field: entry.get(field) for field in
+                                 ("id", "title", "season", "tmdbid", "auto", "start_episode")},
+                "source_rule": self.pipeline.rule_for(sample["source"]),
+                "sample": {"source": sample["source"], "text": sample["text"],
+                           "urls": list(sample["urls"])},
+                "parsed": parsed,
+            })
+            result["simulation_token"] = token
+            result["promotion_expires_in"] = SIMULATION_TOKEN_TTL
+        return result
+
+    async def submit_simulated_subscription(self, subscription_id: int, token: str) -> dict[str, Any]:
+        """Promote ONE verified automatic preview to a durable normal task.
+
+        The token is server-generated, single-use, and contains the exact raw
+        source text, entity URLs, and parsed result of the simulation. It
+        never calls a cloud write; the normal Worker still checks source
+        files, dedup, destination, and transfer receipt before organizing.
+        """
+        if not token or len(token) > 128:
+            raise ConflictError("模拟凭证无效；请重新模拟后再提交")
+        record = self.store.state_take(SIMULATION_TOKEN_NAMESPACE, token)
+        if (not isinstance(record, dict)
+                or record.get("subscription_id") != subscription_id
+                or time.time() - float(record.get("created_at") or 0) > SIMULATION_TOKEN_TTL):
+            raise ConflictError("模拟已过期或已经提交，请重新模拟；没有重复发送转存")
+        entry = self.store.subscription(subscription_id)
+        if not entry or not entry.get("auto") or any(
+                entry.get(field) != record["subscription"].get(field)
+                for field in ("id", "title", "season", "tmdbid", "auto", "start_episode")):
+            raise ConflictError("订阅已更改或停止自动转存，请重新模拟")
+        sample = record["sample"]
+        source = sample["source"]
+        configured = {str(rule["bot"]).casefold() for rule in self.get_config()["sources"]}
+        if (source.casefold() not in configured
+                or self.pipeline.rule_for(source) != record["source_rule"]):
+            raise ConflictError("Telegram 来源或转存规则已改变，请重新模拟")
+        parsed = ParsedResource(**validate_resource(dict(record["parsed"])))
+        share_url, code, _ = parse_share_url(sample["text"], sample["urls"])
+        if (not parsed.is_media or parsed.is_ad
+                or parsed.media_type not in ("tv", "anime")
+                or parsed.season != entry["season"]
+                or len(parsed.episodes) != 1
+                or not parsed.title or not parsed.share_code
+                or code != parsed.share_code
+                or share_provider(share_url) != self.pipeline.rule_for(source).get("storage")):
+            raise ConflictError("模拟的作品、来源或唯一集号无法再次核对，请重新模拟")
+        # Repeat promotions of the same source text/episode have a stable
+        # message ID, even if the user runs a brand-new simulation.
+        digest = hashlib.sha256(json.dumps({
+            "subscription": subscription_id, "source": source,
+            "text": sample["text"], "urls": sample["urls"],
+            "share_code": parsed.share_code, "season": parsed.season,
+            "episodes": parsed.episodes,
+        }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:32]
+        raw = RawMessage(source=source, msg_id="simulation-" + digest,
+                         text=sample["text"], urls=sample["urls"],
+                         extra={"simulation_import": True, "simulation_subscription_id": subscription_id})
+        ctx = PipelineContext(raw=raw)
+        ctx.ns("task")["promoted_simulation"] = {
+            "subscription_id": subscription_id, "parsed": record["parsed"],
+        }
+        ctx.log("用户确认复用订阅模拟的识别结果；创建正式任务，仍须重新核验真实云盘与去重")
+        accepted = await self.pipeline.accept(ctx)
+        if not accepted:
+            raise ConflictError("这条模拟资源已有任务，不会重复提交；请查看任务列表")
+        return {"task_id": accepted.task_id, "state": accepted.state.value,
+                "note": "已提交正式任务，沿用模拟识别结果；Worker 将重新核验分享、目标与去重。"
+                        "规则变化或来源不匹配时会转人工，不直接复制。" }
 
     def scan_existing_subscription_folder(self, subscription_id: int,
                                           provider: str, cid: str) -> dict[str, Any]:

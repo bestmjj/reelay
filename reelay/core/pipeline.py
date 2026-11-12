@@ -40,6 +40,8 @@ from .store import Store, _load_ctx
 from .config import config_revision, load_config, merge_config, normalize_config
 from .media import pairs_label, summarize_pairs
 from .parse_rules import prefilter_reason
+from .validation import validate_resource
+from .contracts import ParsedResource
 from . import confidence, existing_media, ignored, messages, repair, runtime, subscriptions, works
 
 log = logging.getLogger("reelay.pipeline")
@@ -389,10 +391,25 @@ class Pipeline:
         if manual_link_only:
             parser_name = "regex"
             ctx.log("手动提交的分享缺少可靠片名：仅提取分享链接，不调用 AI 猜片名")
-        parser = self.reg.get_provider("parser", parser_name)
+        preview = ctx.ns("task").get("promoted_simulation") or {}
+        parser = self.reg.get_provider("parser", parser_name) if not preview else None
         try:
-            with self.scope(ctx):
-                ctx.parsed = await parser.parse(ctx)
+            if preview:
+                from .parse_rules import parse_share_url
+                _, current_code, _ = parse_share_url(ctx.raw.text, ctx.raw.urls)
+                validated = validate_resource(copy.deepcopy(preview["parsed"]))
+                if (current_code != validated.get("share_code")
+                        or not validated.get("is_media")
+                        or validated.get("is_ad")
+                        or validated.get("media_type") not in ("tv", "anime")
+                        or not validated.get("episodes")
+                        or len(validated["episodes"]) != 1):
+                    raise ValueError("模拟的来源与解析结果已不一致")
+                ctx.parsed = ParsedResource(**validated)
+                ctx.log("直接采用已确认的订阅模拟识别结果，不重复调用 AI 解析")
+            else:
+                with self.scope(ctx):
+                    ctx.parsed = await parser.parse(ctx)
         except Exception as exc:
             ctx.state = TaskState.FAILED
             ctx.ns("task")["retry_from"] = TaskState.RECEIVED.value

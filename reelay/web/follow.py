@@ -58,6 +58,11 @@ class SubscriptionTestPayload(BaseModel):
     source: str | None = Field(default=None, max_length=150)
 
 
+class SubscriptionPromotionPayload(BaseModel):
+    id: int = Field(gt=0)
+    token: str = Field(min_length=20, max_length=128)
+
+
 class IgnoredWorkPayload(BaseModel):
     id: int | None = None
     title: str = ""
@@ -85,6 +90,11 @@ def router(service) -> APIRouter:
         """Never enqueues a job or touches a destination cloud."""
         return await service.simulate_subscription(
             payload.id, text=payload.text, source=payload.source)
+
+    @api.post("/api/subscriptions/submit-simulation")
+    async def submit_simulation(payload: SubscriptionPromotionPayload):
+        """Use a single-use server preview to queue a normal verified transfer."""
+        return await service.submit_simulated_subscription(payload.id, payload.token)
 
     @api.post("/api/subscriptions/resolve")
     async def resolve(payload: TextPayload):
