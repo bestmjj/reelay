@@ -584,6 +584,7 @@ class Pipeline:
                     or (existing.get("media_type") is not None
                         and ctx.parsed.media_type != existing["media_type"])
                     or (existing.get("pairs") is not None
+                        and not ctx.ns("task").get("force_copy_all")
                         and [list(p) for p in ctx.episode_pairs()] != existing["pairs"])
                     or (existing.get("share_code") is not None
                         and ctx.parsed.share_code != existing["share_code"])
@@ -645,6 +646,23 @@ class Pipeline:
         repair_info = ctx.ns("task").get("repair") or {}
         forced = ctx.ns("task").get("force_single_copy") or {}
         forced_range = ctx.ns("task").get("force_missing_range") or {}
+        forced_all = ctx.ns("task").get("force_copy_all") or {}
+        if forced_all:
+            selected = ctx.ns("share_selection")
+            target = ctx.ns("library").get("direct_existing") or {}
+            if (provider_name != "aliyun" or not ctx.parsed
+                    or ctx.parsed.season != forced_all.get("season")
+                    or ctx.parsed.share_code != forced_all.get("share_code")
+                    or not selected.get("folder_id") or selected.get("file_id")
+                    or selected.get("share_code") != ctx.parsed.share_code
+                    or selected.get("provider") != "aliyun"
+                    or selected.get("only_episodes")
+                    or target.get("mode") != "exact"
+                    or target.get("provider") != "aliyun"
+                    or not forced_all.get("approved_files")):
+                await self._fail(ctx, "全部转存必须确认完整的分享版本及最终 Season 文件夹；授权已失效",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
         if forced_range:
             selection = ctx.ns("share_selection")
             target = ctx.ns("library").get("direct_existing") or {}
@@ -816,7 +834,7 @@ class Pipeline:
                 observed = existing_media.apply_associations(
                     existing_media.scan_observations(self.store),
                     self.store.state_get("media_associations", "confirmed", {}) or {})
-                if ctx.episode_pairs() and observed and not forced_range:
+                if ctx.episode_pairs() and observed and not (forced_range or forced_all):
                     try:
                         with self.scope(ctx):
                             guard = await asyncio.to_thread(
@@ -837,6 +855,14 @@ class Pipeline:
                         already.update(confirmed)
                         ns["stored_episodes"] = [list(pair) for pair in sorted(already)]
                         ctx.log(f"已实时核验网盘原有文件，跳过 {len(confirmed)} 个重复季集，不记为 Reelay 已转存")
+                if forced_all:
+                    # Explicit manual whole-season copy is an independent mode.
+                    # Historical database entries must not filter any file
+                    # from the verified, user-selected source folder.
+                    already.clear()
+                    ns["stored_episodes"] = []
+                    ctx.log("人工确认「全部转存」：旧入库集数不参与本次来源过滤；"
+                            "文件同集冲突交由整理器以安全后缀保留")
                 if forced_range:
                     # Only episodes *physically absent* from the explicit final
                     # folder may bypass historical DONE records.
@@ -877,6 +903,18 @@ class Pipeline:
                         ctx.log(f"此分享沿用上次选择的版本「{preference.get('path') or '已选择文件夹'}」")
                 with self.scope(ctx):
                     manifest = await storage.prepare(ctx)
+                if forced_all:
+                    incoming = sorted(
+                        [{"id": str(x.get("id")), "name": x.get("name"),
+                          "size": x.get("size"), "season": x.get("season"),
+                          "episode": x.get("episode"),
+                          "share_path": x.get("share_path") or ""}
+                         for x in manifest.get("files") or []],
+                        key=lambda x: (x["season"], x["episode"]))
+                    if incoming != forced_all["approved_files"]:
+                        raise NeedsManual("完整来源文件夹发生变化（文件 ID、集号、名称或大小）；"
+                                          "已停止全部转存，请重新人工确认")
+                    ctx.log(f"严格匹配人工确认的完整分享版本，共 {len(incoming)} 个视频")
                 if forced_range:
                     effective = forced_range.get("effective_episodes") or []
                     source_files = manifest.get("files") or []
@@ -977,6 +1015,31 @@ class Pipeline:
                 # The cloud may have been restored after the manifest was
                 # prepared. Do not send any copy request from a stale decision.
                 await self._fail(ctx, f"复制前再次核验不通过：{exc}",
+                                 retry_from=TaskState.QUEUED, auto_retry=False)
+                return
+        if sending and forced_all:
+            try:
+                target = ctx.ns("library").get("direct_existing") or {}
+                if (str(storage.client.drive_id) != target.get("drive_id")
+                        or str(ctx.save_dir_cid) != str(target.get("id"))):
+                    raise NeedsManual("阿里云盘资源库或目标目录 ID 不匹配")
+                with self.scope(ctx):
+                    path = await asyncio.to_thread(storage.dir_path, ctx.save_dir_cid)
+                    attr = await asyncio.to_thread(storage.library().get_attr, ctx.save_dir_cid)
+                if (path != target.get("path") or not attr.get("is_dir")
+                        or str(attr.get("id")) != str(ctx.save_dir_cid)):
+                    raise NeedsManual("目标 Season 目录被移动、更名或删除")
+                incoming = sorted(
+                    [{"id": str(x.get("id")), "name": x.get("name"),
+                      "size": x.get("size"), "season": x.get("season"),
+                      "episode": x.get("episode"),
+                      "share_path": x.get("share_path") or ""}
+                     for x in (ns.get("manifest") or {}).get("files") or []],
+                    key=lambda x: (x["season"], x["episode"]))
+                if incoming != forced_all["approved_files"]:
+                    raise NeedsManual("已准备文件清单与人工批准的全部来源不一致")
+            except Exception as exc:
+                await self._fail(ctx, f"全部转存前目标或源文件核验失败，尚未发起复制：{exc}",
                                  retry_from=TaskState.QUEUED, auto_retry=False)
                 return
         if sending and forced_range:
@@ -1250,7 +1313,8 @@ class Pipeline:
         # cloud file IDs. The normal immutable DONE ledger must not veto those
         # exact files; the separate live-ID check runs immediately before copy.
         if (ctx.ns("task").get("repair") or ctx.ns("task").get("force_single_copy")
-                or ctx.ns("task").get("force_missing_range")):
+                or ctx.ns("task").get("force_missing_range")
+                or ctx.ns("task").get("force_copy_all")):
             # Forced single-file jobs already validate the exact immutable
             # source ID against the prepared manifest and preserve content claims.
             return True
