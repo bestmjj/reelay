@@ -8,7 +8,8 @@ from typing import Any
 
 from ..contracts import PipelineContext, TaskState
 from ..media import multi_season
-from .base import DEDUP_MESSAGE, _dump_ctx, _load_ctx, _locked
+from .base import (DEDUP_EPISODE, DEDUP_MESSAGE, DEDUP_SHARE, DEDUP_VARIETY,
+                   _dump_ctx, _load_ctx, _locked)
 
 
 class TaskRepository:
@@ -18,6 +19,51 @@ class TaskRepository:
         """插入或更新任务快照 —— 每次状态变更都调它，保证库里是最新状态。"""
         with self._lock, self._conn:
             self._write_task(ctx, error=error)
+
+    def close_stored_manual_task(self, task_id: str) -> dict[str, int]:
+        """Finish a stuck organizer task without deleting any cloud files.
+
+        Importantly, a fully verified cloud COPY is not necessarily a
+        successfully organized library EPISODE. Remove only content/share
+        dedup keys owned by this task, preserving other tasks' entries and
+        the message key that prevents automatic replay.
+        """
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT snapshot FROM tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("任务不存在")
+            ctx = _load_ctx(json.loads(row["snapshot"]))
+            storage = ctx.ns("storage")
+            if (ctx.state != TaskState.NEED_MANUAL
+                    or storage.get("phase") != "stored"
+                    or (ctx.result or {}).get("storage_verified") is not True
+                    or not storage.get("landed")):
+                raise ValueError("只有已核验完成网盘复制、等待人工整理的任务可以保留文件并忽略")
+            stored_count = len(storage["landed"])
+            # All dedup keys for this task's share and episodes may have
+            # been inserted before organization. These claims are not proof
+            # of final library placement and must not block later recovery.
+            revoked = self._conn.execute(
+                "DELETE FROM dedup WHERE task_id=? AND kind IN (?,?,?)",
+                (task_id, DEDUP_SHARE, DEDUP_EPISODE, DEDUP_VARIETY),
+            ).rowcount
+            self._conn.execute(
+                "DELETE FROM resource_claims WHERE task_id=?", (task_id,)
+            )
+            ctx.state = TaskState.SKIPPED
+            ctx.ns("task")["skip"] = {
+                "kind": "preserved_transfer",
+                "reason": (f"已结束整理：保留已转存的 {stored_count} 个云盘文件，"
+                           "未证明全部位于正确剧集目录。撤销此任务的旧入库去重声明，"
+                           "后续缺集可重新核验；未删除或覆盖任何文件。"),
+            }
+            ctx.log(f"人工结束卡住的整理任务：原 {stored_count} 个落地文件均保留云盘原位；"
+                    f"撤销本任务 {revoked} 条分享/集数去重声明；未发送云盘删除或复制请求")
+            self._write_task(ctx)
+            return {"kept": stored_count, "dedup_revoked": revoked}
 
     def queue_repair_task(self, original: PipelineContext, repair: PipelineContext) -> None:
         """Atomically keep DONE history and queue one independent repair child.

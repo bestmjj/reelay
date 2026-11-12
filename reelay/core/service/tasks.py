@@ -633,7 +633,14 @@ class TaskOpsMixin(ServiceBase):
                 out.append("reorganize")
                 if (ctx.meta.get("organize") or {}).get("pending_conflict"):
                     out.append("resolve_conflict")
-        if state in (TaskState.FAILED, TaskState.NEED_MANUAL) and not unknown_transfer and not storage.get("landed"):
+        if (state in (TaskState.FAILED, TaskState.NEED_MANUAL)
+                and not unknown_transfer and not storage.get("landed")):
+            out.append("dismiss")
+        elif (state == TaskState.NEED_MANUAL and storage.get("phase") == "stored"
+              and (ctx.result or {}).get("storage_verified") is True
+              and storage.get("landed")):
+            # Exit for a stranded post-transfer organizer. Do not delete
+            # already-transferred files and do not leave false dedup claims.
             out.append("dismiss")
         if (state in (TaskState.PENDING_APPROVAL, TaskState.FAILED, TaskState.NEED_MANUAL)
                 and ctx.parsed and ctx.parsed.share_code
@@ -844,7 +851,11 @@ class TaskOpsMixin(ServiceBase):
         if storage.get("phase") == "receiving":
             raise ConflictError("转存结果还没核验，不能直接忽略；请先核验转存")
         if storage.get("landed"):
-            raise ConflictError("文件已经转存，不能直接忽略；请重新整理或删除转存文件")
+            try:
+                self.store.close_stored_manual_task(ctx.task_id)
+            except ValueError as exc:
+                raise ConflictError(str(exc)) from exc
+            return
         previous = ctx.state
         ctx.state = TaskState.SKIPPED
         ctx.ns("task")["skip"] = {"kind": "user", "reason": "用户在管理端主动忽略失败或待人工任务"}

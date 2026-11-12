@@ -77,7 +77,7 @@ interface TaskMeta {
     error?: string; pending_conflict?: IOrganizeConflict;
     partial_completed?: { season: number; episode: number; source_id: string; remaining: number;
       target_path?: string; target_name?: string } };
-  storage?: { partial?: ITransferPartial };
+  storage?: { partial?: ITransferPartial; landed_count?: number; landed?: Array<{ id: string }> };
   share_selection?: { folder_id?: string; path?: string; file_id?: string; only_episodes?: number[];
     file_name?: string; file_path?: string; file_size?: number };
   task?: { force_single_copy?: { season: number; episode: number };
@@ -178,6 +178,15 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
 
   const run = async (action: PostedAction, conflict?: ConflictChoice) => {
     if (!detail) return;
+    const copied = (detail.context.meta as TaskMeta | undefined)?.storage?.landed_count
+      ?? ((detail.context.meta as { storage?: { landed?: unknown[] } } | undefined)
+        ?.storage?.landed?.length ?? 0);
+    if (action === 'dismiss' && copied > 0 && !window.confirm(
+      `确认结束这条卡住的整理任务，并保留已转存的 ${copied} 个文件？`
+      + '\\n不会删除、覆盖或再次转存云盘文件。'
+      + '\\n将撤销本任务的不可靠去重声明，避免 E01–E18 被误认为全部已经入库。'
+      + '\\n如果 E18 还不在原剧集目录，请在结束前先使用「定位已转存的 E18 文件」核对。',
+    )) return;
     const sourceCount = (detail.context.meta as TaskMeta | undefined)?.task?.force_copy_all?.source_files?.length;
     if (action === 'approve' && sourceCount && !window.confirm(
       `最终确认：从已选分享版本中完整复制 ${sourceCount} 个视频？\\n即使有旧入库记录或目录已有同集，也会复制。`
@@ -622,7 +631,12 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         {can('subscribe') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void subscribe()}><BellPlus />追这部剧</Button> : null}
       </div>
       <div className="flex gap-2">
-        {can('dismiss') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('dismiss')} className="text-destructive"><EyeOff />忽略</Button> : null}
+        {can('dismiss') ? (
+          <Button variant="outline" size="sm" disabled={busy}
+            onClick={() => void run('dismiss')} className="text-destructive">
+            <EyeOff />{meta.storage?.landed?.length ? '忽略任务（保留已转存文件）' : '忽略'}
+          </Button>
+        ) : null}
         {can('reject') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reject')} className="text-destructive"><X />忽略</Button> : null}
         {can('approve') ? <Button size="sm"
               disabled={busy || Boolean(forceBlockReason) || Boolean(hasPendingMetadataEdits)
