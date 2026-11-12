@@ -632,6 +632,18 @@ class Pipeline:
             return
         ns = ctx.ns("storage")
         if ctx.ns("task").get("action") == "organize_only":
+            if ctx.ns("organize").get("single_episode"):
+                # Organize-only still moves cloud file IDs; verify the
+                # original Aliyun resource drive before making any change.
+                storage = self.reg.get_provider("storage", "aliyun")
+                try:
+                    with self.scope(ctx):
+                        await asyncio.to_thread(
+                            storage._assert_manifest_drive, ns.get("manifest") or {})
+                except Exception as exc:
+                    await self._fail(ctx, f"原阿里云盘资源库无法核验，停止仅整理本集：{exc}",
+                                     retry_from=TaskState.QUEUED, auto_retry=False)
+                    return
             self._resolve_directory(ctx)
             ctx.ns("task").pop("action")
             ctx.ns("task")["retry_from"] = TaskState.STORED.value
@@ -1215,7 +1227,12 @@ class Pipeline:
             ok = await self.run_hooks("after_save", ctx)
             verified = ok and ctx.result.get("verified") is True
             ctx.state = TaskState.DONE if verified else TaskState.NEED_MANUAL
-            ctx.log("整理完成且已读回核验" if verified else "转存已完成，整理需人工处理")
+            partial = ctx.ns("organize").get("partial_completed") or {}
+            if partial and not verified:
+                ctx.log(f"本次仅完成 E{partial['episode']:03d} 的整理；"
+                        f"其余 {partial['remaining']} 个文件仍保留暂存，后续可单独处理")
+            else:
+                ctx.log("整理完成且已读回核验" if verified else "转存已完成，整理需人工处理")
             await self.notify_all(ctx, "saved" if verified else "organize_failed", persist=False)
             await self.emit("on_saved" if verified else "on_failed", ctx, persist=False)
             self.store.save_task(ctx)

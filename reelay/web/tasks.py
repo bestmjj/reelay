@@ -165,6 +165,11 @@ def router(service) -> APIRouter:
         await service.requeue_organize(task_id, save_dir_alias=payload.save_dir_alias, conflict=payload.conflict)
         return {"ok": True}
 
+    @api.post("/api/tasks/{task_id}/organize-single-episode")
+    async def organize_single_episode(task_id: str):
+        service.requeue_organize_single_episode(task_id)
+        return {"ok": True}
+
     @api.post("/api/tasks/{task_id}/accept-partial")
     async def accept_partial(task_id: str):
         await service.accept_partial_transfer(task_id)

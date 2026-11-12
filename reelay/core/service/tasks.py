@@ -624,6 +624,8 @@ class TaskOpsMixin(ServiceBase):
                 and not storage.get("manifest") and not storage.get("landed")
                 and ctx.parsed and ctx.parsed.title and ctx.parsed.media_type in ("tv", "anime")):
             out.append("select_episodes")
+        if self._landed_single_episode(ctx):
+            out.append("organize_single_episode")
         if state == TaskState.NEED_MANUAL:
             if unknown_transfer:
                 out += ["reconcile", *(["accept_partial"] if storage.get("partial") else []), "abandon"]
@@ -935,6 +937,82 @@ class TaskOpsMixin(ServiceBase):
         self.pipeline.stamp_config(ctx)
         ctx.ns("task")["retry_from"] = TaskState.QUEUED.value
         ctx.log("由管理端请求按当前命名重新整理，不重复转存")
+        self._update(ctx, expected=TaskState.NEED_MANUAL, reset_retries=True)
+
+    @staticmethod
+    def _landed_single_episode(ctx: PipelineContext) -> dict[str, Any] | None:
+        """Find one immutable already-landed file for the approved single ep.
+
+        A historic season-pack transfer may have copied E01-E18 while the
+        message/recognition says only E18. Do not re-copy, re-map unrelated
+        episodes, or ever treat the entire pack as E18. The rest stays staged.
+        """
+        storage = ctx.ns("storage")
+        parsed = ctx.parsed
+        if (ctx.state != TaskState.NEED_MANUAL or not parsed
+                or parsed.media_type not in ("tv", "anime")
+                or not parsed.title or type(parsed.season) is not int
+                or not 1 <= parsed.season <= 100
+                or len(parsed.episodes) != 1
+                or type(parsed.episodes[0]) is not int
+                or (storage.get("provider") or ctx.source_rule.get("storage")) != "aliyun"
+                or storage.get("phase") != "stored"
+                or not (ctx.result or {}).get("storage_verified")
+                or not isinstance(storage.get("manifest"), dict)
+                or not storage["manifest"].get("drive_id")
+                or len(storage["manifest"].get("files") or []) <= 1
+                or not storage.get("landed")):
+            return None
+        from ..media import episode_of
+
+        expected_season, expected_episode = parsed.season, parsed.episodes[0]
+        matched = []
+        for item in storage["manifest"]["files"]:
+            if (type(item.get("season")) is not int
+                    or type(item.get("episode")) is not int
+                    or (item["season"], item["episode"]) != (expected_season, expected_episode)
+                    or not item.get("name") or type(item.get("size")) is not int
+                    or item["size"] <= 0):
+                continue
+            name_season, name_episode = episode_of(item["name"])
+            if name_episode != expected_episode or name_season not in (None, expected_season):
+                continue
+            actual = [file for file in storage["landed"]
+                      if str(file.get("id") or "") and file.get("name") == item["name"]
+                      and file.get("size") == item["size"] and not file.get("is_dir")]
+            if len(actual) == 1:
+                matched.append({"season": expected_season, "episode": expected_episode,
+                                "source_id": str(actual[0]["id"]), "source_name": item["name"],
+                                "size": item["size"]})
+        if len(matched) != 1:
+            return None
+        previous = ctx.ns("organize").get("partial_completed") or {}
+        if previous.get("source_id") == matched[0]["source_id"]:
+            return None
+        return matched[0]
+
+    def requeue_organize_single_episode(self, task_id: str) -> None:
+        """Queue *organize only* for the already copied E18, never a share copy.
+
+        A successful partial move does not mark the entire season pack DONE:
+        the other landed files remain untouched in .reelay- staging.
+        """
+        ctx = self._require_context(task_id)
+        selection = self._landed_single_episode(ctx)
+        if not selection or "organize_single_episode" not in self.task_actions(ctx):
+            raise ConflictError("这条任务没有可核验的已转存单集；不能将整季误当成一集重新整理")
+        organize = ctx.ns("organize")
+        for key in ("plan", "base_cid", "pending_conflict", "resolve", "applied", "error"):
+            organize.pop(key, None)
+        organize["single_episode"] = selection
+        ctx.state = TaskState.QUEUED
+        ctx.ns("task")["action"] = "organize_only"
+        ctx.ns("task")["generation"] = ctx.ns("task").get("generation", 0) + 1
+        self.pipeline.stamp_config(ctx)
+        ctx.ns("task")["retry_from"] = TaskState.QUEUED.value
+        remaining = len(ctx.ns("storage").get("landed") or []) - 1
+        ctx.log(f"人工确认只整理已转存的 S{selection['season']:02d}E{selection['episode']:03d}；"
+                f"其余 {remaining} 个文件继续保留在暂存目录；不请求分享复制，不删除或覆盖")
         self._update(ctx, expected=TaskState.NEED_MANUAL, reset_retries=True)
 
     def _require_unknown_transfer(self, task_id: str) -> PipelineContext:

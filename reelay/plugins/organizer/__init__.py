@@ -401,6 +401,18 @@ class Organizer(_MediaLibrary):
         landed = ctx.ns("storage").get("landed") or []
         if not landed:
             raise ValueError("缺少已核验的落地文件")
+        selected = ns.get("single_episode") or {}
+        if selected:
+            # A season pack has already been copied. Only the one immutable
+            # source file authorized by the user is eligible for this pass.
+            # Keep all other landed files untouched in the staging folder.
+            landed = [x for x in landed
+                      if str(x.get("id")) == selected["source_id"]
+                      and x.get("name") == selected["source_name"]
+                      and x.get("size") == selected["size"]]
+            if len(landed) != 1 or (ctx.parsed.season, ctx.parsed.episodes) != (
+                    selected["season"], [selected["episode"]]):
+                raise ValueError("本集的实际转存文件或季集号已变化；停止整理")
         # 转存清单里每个文件的季集已经过校验（含转人工前 AI 补出、经规则校验的季集），整理沿用它。
         manifest = ctx.ns("storage").get("manifest") or {}
         mapping = {f["name"]: (f.get("season"), f["episode"]) for f in manifest.get("files", [])
@@ -441,10 +453,21 @@ class Organizer(_MediaLibrary):
             drive = runtime.services().storage(ctx.ns("storage").get("provider", "p115")).library()
             await run_blocking(self._apply_sync, ctx, ctx.parsed, plan, drive)
             self._cleanup(ctx, drive)
-            ctx.ns("organize")["applied"] = True
+            organize = ctx.ns("organize")
+            selected = organize.pop("single_episode", None)
+            if selected:
+                remaining = len(ctx.ns("storage").get("landed") or []) - 1
+                organize["partial_completed"] = {**selected, "remaining": remaining}
+                organize["applied"] = False  # whole season was NOT organized
+                ctx.result["verified"] = False  # keep the original task pending
+                ctx.log(f"已整理 S{selected['season']:02d}E{selected['episode']:03d}："
+                        f"只移动已转存的这一集，剩余 {remaining} 个文件仍保留在暂存目录，"
+                        "本任务不冒充整季整理成功")
+            else:
+                organize["applied"] = True
+                ctx.log("整理文件 ID、目录和名称全部读回核验通过")
             for key in ("error", "pending_conflict", "resolve"):
-                ctx.ns("organize").pop(key, None)
-            ctx.log("整理文件 ID、目录和名称全部读回核验通过")
+                organize.pop(key, None)
         except StorageBusy:
             raise  # 网盘暂时拒绝一切请求（如 115 风控冷却）：交给内核到点再整理，不算失败
         except Exception as exc:
@@ -571,7 +594,8 @@ class Organizer(_MediaLibrary):
         # 人工在冲突时选的处理（删除转存文件 / 覆盖保存）优先于配置的策略，整理成功后清除
         strategy = organize.get("resolve") or runtime.get("plugins.organizer.conflict", "manual")
         if (ctx.ns("task").get("force_single_copy") or ctx.ns("task").get("force_missing_range")
-                or ctx.ns("task").get("force_copy_all")):
+                or ctx.ns("task").get("force_copy_all")
+                or ctx.ns("organize").get("single_episode")):
             # Human-authorized historical retransfer never deletes or
             # overwrites an existing cloud file, even if the global config
             # allows it. Coexisting editions get a safe suffix.
