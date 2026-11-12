@@ -54,6 +54,13 @@ class TaskRepository:
                 "DELETE FROM resource_claims WHERE task_id=?", (task_id,)
             )
             ctx.state = TaskState.SKIPPED
+            organizer = ctx.ns("organize")
+            # This is historical evidence, no longer an active error after
+            # the user explicitly ended the organizing job.
+            prior_error = organizer.pop("error", None)
+            if prior_error:
+                organizer["archived_error"] = prior_error
+            organizer.pop("pending_conflict", None)
             ctx.ns("task")["skip"] = {
                 "kind": "preserved_transfer",
                 "reason": (f"已结束整理：保留已转存的 {stored_count} 个云盘文件，"
