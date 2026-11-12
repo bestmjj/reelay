@@ -1,4 +1,4 @@
-import { AlertTriangle, BellPlus, Check, EyeOff, FolderSearch, FolderTree, RefreshCw, RotateCcw, ShieldCheck, Trash2, X } from 'lucide-react';
+import { AlertTriangle, BellPlus, Check, EyeOff, FolderSearch, FolderTree, Loader2, RefreshCw, RotateCcw, ShieldCheck, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { inboxApi, type ISaveDirs } from '@/api/inbox';

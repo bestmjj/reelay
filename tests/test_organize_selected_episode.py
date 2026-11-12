@@ -21,8 +21,16 @@ class FakeExistingSeason:
         self.writes = []
         self.deleted = []
         self.items["existing-e18"] = {
-            "id": "existing-e18", "name": "temporary",
+            "id": "existing-e18", "name": "李熊猫 - S01E17 - 2160p.mp4",
             "size": 999, "parent_id": "season-dir", "is_dir": False,
+        }
+        self.items["season-dir"] = {
+            "id": "season-dir", "name": "Season 01", "is_dir": True,
+            "size": 0, "parent_id": "show-dir",
+        }
+        self.items["wrong-season-dir"] = {
+            "id": "wrong-season-dir", "name": "Season 01", "is_dir": True,
+            "size": 0, "parent_id": "other-dir",
         }
 
     def get_attr(self, file_id):
@@ -113,9 +121,24 @@ class OnlyE18FromCopiedSeason(WebCase):
         self.app.state.store.save_task(self.ctx)
         self.url = f"/api/tasks/{self.ctx.task_id}"
         self.drive = FakeExistingSeason(landed)
+        provider = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        for mocker in (
+            patch.object(provider, "_assert_manifest_drive", return_value=None),
+            patch.object(provider, "client", SimpleNamespace(drive_id="drive-resource")),
+            patch.object(provider, "library", return_value=self.drive),
+            patch.object(provider, "dir_path", side_effect=lambda cid: {
+                "stage-dir": "/.reelay-test", "season-dir": "/李熊猫 (2026)/Season 01",
+                "wrong-season-dir": "/其他剧 (2026)/Season 01",
+            }.get(str(cid))),
+        ):
+            mocker.start()
+            self.addCleanup(mocker.stop)
 
     def queue_e18(self):
-        response = self.client.post(self.url + "/organize-single-episode")
+        response = self.client.post(self.url + "/organize-single-episode", json={
+            "existing_folder_id": "season-dir", "existing_drive_id": "drive-resource",
+            "destination_mode": "exact",
+        })
         self.assertEqual(response.status_code, 200, response.text)
         queued = self.app.state.store.get_task(self.ctx.task_id)
         self.assertEqual(queued.state, TaskState.QUEUED)
@@ -128,7 +151,9 @@ class OnlyE18FromCopiedSeason(WebCase):
                          "landed-18")
         self.assertEqual(len(self.drive.iterdir("stage-dir")), 18)
         self.assertEqual(self.drive.writes, [])
-        self.assertEqual(self.client.post(self.url + "/organize-single-episode").status_code, 409)
+        self.assertEqual(self.client.post(self.url + "/organize-single-episode", json={
+            "existing_folder_id": "season-dir", "existing_drive_id": "drive-resource",
+        }).status_code, 409)
 
     def test_only_existing_e18_is_planned_and_other_17_untouched(self):
         queued = self.queue_e18()
@@ -151,6 +176,8 @@ class OnlyE18FromCopiedSeason(WebCase):
         completed = queued.ns("organize")["partial_completed"]
         self.assertEqual((completed["season"], completed["episode"]), (1, 18))
         self.assertEqual(completed["remaining"], 17)
+        self.assertEqual(completed["target_path"], "/李熊猫 (2026)/Season 01")
+        self.assertEqual(completed["target_id"], "season-dir")
         self.assertEqual(len(self.drive.iterdir("stage-dir")), 17)
         self.assertFalse(any(action[1] != "landed-18" for action in self.drive.writes))
         self.assertNotEqual(self.drive.get_attr("landed-18")["name"], plan[0]["target_name"])
@@ -172,11 +199,68 @@ class OnlyE18FromCopiedSeason(WebCase):
                 self.app.state.store.save_task(original)
                 detail = self.client.get(self.url).json()
                 self.assertNotIn("organize_single_episode", detail["actions"])
-                response = self.client.post(self.url + "/organize-single-episode")
+                response = self.client.post(self.url + "/organize-single-episode", json={
+                    "existing_folder_id": "season-dir", "existing_drive_id": "drive-resource",
+                })
                 self.assertEqual(response.status_code, 409)
                 self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state,
                                  TaskState.NEED_MANUAL)
                 self.app.state.store.save_task(self.ctx)
+
+    def test_previous_success_moved_e18_to_wrong_folder_is_located_and_requeued(self):
+        # Existing tasks could say "E18 organized" without recording which
+        # Season folder was actually used. Verify the live file ID, not status.
+        original = self.app.state.store.get_task(self.ctx.task_id)
+        original.ns("organize")["partial_completed"] = {
+            "source_id": "landed-18", "season": 1, "episode": 18,
+            "remaining": 17,
+        }
+        self.app.state.store.save_task(original)
+        self.drive.items["landed-18"]["parent_id"] = "wrong-season-dir"
+        self.drive.items["landed-18"]["name"] = "李熊猫 - S01E18 - 第 18 集 - 2160p.mp4"
+        located = self.client.get(self.url + "/single-episode-location")
+        self.assertEqual(located.status_code, 200, located.text)
+        self.assertEqual(located.json()["parent_path"], "/其他剧 (2026)/Season 01")
+        self.assertIn("李熊猫 - S01E18", located.json()["file_path"])
+        self.assertIn("organize_single_episode", self.client.get(self.url).json()["actions"])
+        self.assertEqual(self.client.post(self.url + "/organize-single-episode", json={
+            "existing_folder_id": "wrong-season-dir",
+            "existing_drive_id": "drive-resource",
+        }).status_code, 409)
+        queued = self.queue_e18()
+        self.assertEqual(queued.ns("library")["direct_existing"]["path"],
+                         "/李熊猫 (2026)/Season 01")
+        self.assertEqual(queued.ns("organize")["single_episode"]["source_id"], "landed-18")
+        organizer = Organizer()
+        state = DictState()
+        services = SimpleNamespace(
+            state=lambda _: state,
+            storage=lambda _: SimpleNamespace(library=lambda: self.drive),
+        )
+        with patch("reelay.plugins.organizer.runtime.services", return_value=services):
+            self.assertTrue(asyncio.run(organizer.run(queued)))
+        self.assertEqual(self.drive.get_attr("landed-18")["parent_id"], "season-dir")
+        self.assertEqual(len(self.drive.iterdir("stage-dir")), 17)
+        self.assertEqual(queued.ns("organize")["partial_completed"]["target_path"],
+                         "/李熊猫 (2026)/Season 01")
+        self.assertEqual(self.drive.deleted, [])
+
+    def test_explicit_target_and_live_id_required_before_reorganizing(self):
+        self.assertEqual(self.client.post(self.url + "/organize-single-episode",
+                         json={}).status_code, 409)
+        self.assertEqual(self.client.post(self.url + "/organize-single-episode", json={
+            "existing_folder_id": "season-dir", "existing_drive_id": "other-drive",
+        }).status_code, 409)
+        self.drive.items["landed-18"]["size"] = 0
+        result = self.client.get(self.url + "/single-episode-location")
+        self.assertEqual(result.status_code, 409)
+        self.assertEqual(self.client.post(self.url + "/organize-single-episode", json={
+            "existing_folder_id": "season-dir",
+            "existing_drive_id": "drive-resource",
+        }).status_code, 409)
+        self.assertEqual(self.app.state.store.get_task(self.ctx.task_id).state,
+                         TaskState.NEED_MANUAL)
+        self.assertEqual(self.drive.writes, [])
 
     def test_post_organize_flow_does_not_call_storage_save(self):
         queued = self.queue_e18()
