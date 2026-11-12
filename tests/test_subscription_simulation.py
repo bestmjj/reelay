@@ -170,6 +170,8 @@ class SubscriptionSimulationWebTests(WebCase):
         saved = self.app.state.store.get_task(task_id)
         self.assertEqual(saved.parsed.episodes, [106])
         self.assertEqual(saved.parsed.share_code, "abc123")
+        self.assertEqual(saved.source_rule["episodes_from"], "message")
+        self.assertEqual(saved.ns("share_selection")["only_episodes"], [106])
         self.assertIn(saved.state, (TaskState.PENDING_APPROVAL, TaskState.QUEUED))
         replay = self.client.post("/api/subscriptions/submit-simulation", json={
             "id": sub["id"], "token": data["simulation_token"],
