@@ -17,7 +17,7 @@ from tests.fakes import WebCase
 def season_source(folder="dovi-folder", path="Season 01 DoVi", episodes=range(1, 47)):
     files = []
     for episode in episodes:
-        name = (f"光阴之外 - S01E46 - 第 46 集 - 2160p.mp4"
+        name = ("光阴之外 - S01E46 - 第 46 集 - 2160p.mp4"
                 if episode == 46 else f"光阴之外.S01E{episode:02d}.mp4")
         files.append({
             "id": f"{folder}-{episode}", "name": name,
