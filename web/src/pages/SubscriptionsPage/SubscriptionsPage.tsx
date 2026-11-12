@@ -1,4 +1,4 @@
-import { Ban, BellPlus, BellRing, CircleAlert, Flag, FlaskConical, FolderSearch, Lightbulb, Loader2, RefreshCw, Search, Trash2, Undo2 } from 'lucide-react';
+import { Ban, BellPlus, BellRing, CircleAlert, Flag, FlaskConical, FolderSearch, Lightbulb, Send, Loader2, RefreshCw, Search, Trash2, Undo2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -156,6 +156,8 @@ export default function SubscriptionsPage() {
   const [testText, setTestText] = useState('');
   const [testResult, setTestResult] = useState<ISubscriptionSimulation | null>(null);
   const [testBusy, setTestBusy] = useState(false);
+  const [testPromoting, setTestPromoting] = useState(false);
+  const [testSubmitted, setTestSubmitted] = useState<string | null>(null);
   const [existingItem, setExistingItem] = useState<ISubscription | null>(null);
   const [existingData, setExistingData] = useState<IExistingPreview | null>(null);
   const [existingOffset, setExistingOffset] = useState(0);
@@ -243,6 +245,7 @@ export default function SubscriptionsPage() {
         setTestItem(item);
         setTestText('');
         setTestResult(null);
+        setTestSubmitted(null);
       }}
       onStart={() => {
         setStartItem(item);
@@ -345,14 +348,38 @@ export default function SubscriptionsPage() {
     }
   };
   const runSimulation = async () => {
-    if (!testItem || testBusy) return;
+    if (!testItem || testBusy || testPromoting) return;
     setTestBusy(true);
+    setTestResult(null);
+    setTestSubmitted(null);
     try {
       setTestResult(await subscriptionApi.simulate(testItem.id, testText.trim() || undefined));
     } catch (e) {
       toast.error(errorMessage(e, '模拟测试失败'));
     } finally {
       setTestBusy(false);
+    }
+  };
+  const submitSimulation = async () => {
+    if (!testItem || !testResult?.simulation_token || testPromoting || testBusy || testSubmitted) return;
+    const episodes = testResult.parsed?.episodes ?? [];
+    const season = testResult.parsed?.season ?? testItem.season;
+    const label = episodes.map((ep) => `E${String(ep).padStart(3, '0')}`).join('、');
+    if (!window.confirm(
+      `确认按模拟结果提交《${testItem.title}》S${String(season).padStart(2, '0')}${label} 转存任务？`
+      + '\\n后台仍会重新核验分享文件、网盘目标和去重状态；不会忽略已有文件或重复覆盖。',
+    )) return;
+    setTestPromoting(true);
+    try {
+      const response = await subscriptionApi.submitSimulated(testItem.id, testResult.simulation_token);
+      setTestSubmitted(response.task_id);
+      setTestResult((previous) => previous ? { ...previous, simulation_token: undefined } : previous);
+      toast.success(`已创建任务 ${response.task_id}，后台将校验并按模拟结果转存`);
+    } catch (e) {
+      setTestResult((previous) => previous ? { ...previous, simulation_token: undefined } : previous);
+      toast.error(errorMessage(e, '模拟结果已失效，请重新模拟后再提交'));
+    } finally {
+      setTestPromoting(false);
     }
   };
 
@@ -685,19 +712,24 @@ export default function SubscriptionsPage() {
           </Button>
         </DialogContent>
       </Dialog>
-      <Dialog open={Boolean(testItem)} onOpenChange={(open) => { if (!open && !testBusy) setTestItem(null); }}>
+      <Dialog open={Boolean(testItem)} onOpenChange={(open) => { if (!open && !testBusy && !testPromoting) setTestItem(null); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>订阅模拟测试 · {testItem?.title} 第 {testItem?.season} 季</DialogTitle>
             <DialogDescription>
               优先读取最近已接收的对应频道消息；也可以粘贴一条真实资源消息。
-              仅运行识别和订阅决策，不产生任务、不访问或修改网盘文件。
+              先运行只读模拟；自动放行且来源明确时，可一键提交已识别的结果给后台转存。
+              提交前不访问云盘，实际复制仍经过分享与去重安全校验。
             </DialogDescription>
           </DialogHeader>
-          <Textarea value={testText} onChange={(event) => setTestText(event.target.value)}
-            rows={5} maxLength={12000} disabled={testBusy}
+          <Textarea value={testText} onChange={(event) => {
+              setTestText(event.target.value);
+              setTestResult(null);
+              setTestSubmitted(null);
+            }}
+            rows={5} maxLength={12000} disabled={testBusy || testPromoting}
             placeholder="可留空：自动选择已接收的匹配消息。或者粘贴频道中的完整资源消息（含分享链接）。" />
-          <Button disabled={testBusy} onClick={() => void runSimulation()}>
+          <Button disabled={testBusy || testPromoting} onClick={() => void runSimulation()}>
             {testBusy ? <Loader2 className="animate-spin" /> : <FlaskConical />}
             {testBusy ? '分析中' : '开始模拟测试'}
           </Button>
@@ -741,8 +773,28 @@ export default function SubscriptionsPage() {
                   </div>
                 </details>
               ) : null}
+              {testResult.simulation_token && !testSubmitted ? (
+                <Button size="sm" className="w-full" disabled={testPromoting || testBusy}
+                  onClick={() => void submitSimulation()}>
+                  {testPromoting ? <Loader2 className="animate-spin" /> : <Send />}
+                  按模拟结果提交转存任务
+                </Button>
+              ) : null}
+              {testSubmitted ? (
+                <p className="text-sm text-primary">
+                  已创建正式任务 {testSubmitted}。
+                  <Link to="/tasks" className="ml-1 underline">查看任务状态</Link>
+                </p>
+              ) : null}
+              {testResult.status === 'automatic' && !testResult.simulation_token && !testSubmitted ? (
+                <p className="text-xs text-muted-foreground">
+                  本次虽预计放行，但尚未确定唯一集数及有效分享标识，暂不能直接提交。
+                  请粘贴包含分享链接和明确集数的消息重新模拟。
+                </p>
+              ) : null}
               <p className="text-xs text-muted-foreground">
-                本次测试没有创建任务，也未检查真实分享是否有效及目标是否已存在。
+                模拟没有复制文件。按模拟结果提交后仍须核验真实分享、云盘目标及去重记录。
+                模拟提交凭证有效期 30 分钟，且只能使用一次。
               </p>
             </div>
           ) : null}

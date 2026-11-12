@@ -106,6 +106,9 @@ export interface ISubscriptionSimulation {
   task_created: false;
   share_checked?: false;
   dedup_checked?: false;
+  /** One-time, short-lived server token; present only for eligible automatic single episodes. */
+  simulation_token?: string;
+  promotion_expires_in?: number;
 }
 
 export interface IExistingVideo {
@@ -143,6 +146,9 @@ export const subscriptionApi = {
   list: () => get<ISubscriptionsResp>('subscriptions'),
   simulate: (id: number, text?: string) =>
     post<ISubscriptionSimulation>('subscriptions/simulate', { id, text: text || null }),
+  /** Submit the exact preview to the normal Worker; does not call the cloud from this request. */
+  submitSimulated: (id: number, token: string) =>
+    post<{ task_id: string; state: string; note: string }>('subscriptions/submit-simulation', { id, token }),
   submitManual: (text: string, source?: string) =>
     post<{ task_id: string; state: string; note: string }>('resources/submit', { text, source: source || null }),
   resolve: (text: string) => post<IResolveResp>('subscriptions/resolve', { text }),
