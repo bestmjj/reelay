@@ -79,7 +79,8 @@ interface TaskMeta {
     file_name?: string; file_path?: string; file_size?: number };
   task?: { force_single_copy?: { season: number; episode: number };
     force_missing_range?: { season: number; episodes: number[]; effective_episodes?: number[] };
-    force_copy_all?: { season: number; approved_files?: Array<{ id: string; name: string; episode: number }> } };
+    force_copy_all?: { season: number; source_files?: Array<{ id: string; name: string; episode: number }>;
+      approved_files?: Array<{ id: string; name: string; episode: number }> } };
 }
 
 export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDetailSheetProps) {
@@ -167,6 +168,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
 
   const run = async (action: PostedAction, conflict?: ConflictChoice) => {
     if (!detail) return;
+    const sourceCount = (detail.context.meta as TaskMeta | undefined)?.task?.force_copy_all?.source_files?.length;
+    if (action === 'approve' && sourceCount && !window.confirm(
+      `最终确认：从已选分享版本中完整复制 ${sourceCount} 个视频？\\n即使有旧入库记录或目录已有同集，也会复制。`
+      + '\\n原有文件不会自动删除或覆盖，同名文件将保留两个版本。',
+    )) return;
     setBusy(true);
     try {
       const body = action === 'approve' && existingFolder
@@ -515,7 +521,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       ? '请在「选择分享源文件或文件夹」中锁定准确的单集视频'
     : forcedRange && !meta.share_selection?.folder_id
       ? '请在「选择分享源文件或文件夹」中读取分享并确认一个包含所需集数的版本文件夹'
-    : forcedAll && !meta.share_selection?.folder_id
+    : forcedAll && (!meta.share_selection?.folder_id || !forcedAll.source_files?.length)
       ? '请在「选择分享源文件或文件夹」中确认一个完整的单季来源版本文件夹'
     : !existingFolder ? `请在上方「指定阿里云盘保存目录」选择已有的 ${currentSeason} 最终文件夹`
     : !existingFolder.driveId ? '所选文件夹缺少阿里云盘资源库 ID，请重新选择'
@@ -763,9 +769,9 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                 即使云盘中已存在同集，也会重新复制；不删除、不覆盖旧文件，同名时添加数字后缀。
                 若分享内容改变、文件集号无法识别或出现多个版本，将停止，避免误存。
               </p>
-              {forcedAll.approved_files?.length ? (
+              {forcedAll.source_files?.length ? (
                 <p className="text-xs text-primary">
-                  已核验完整来源清单：{forcedAll.approved_files.length} 个视频，准备完整转存。
+                  当前锁定来源清单：{forcedAll.source_files.length} 个视频，确认后将全部转存。
                 </p>
               ) : null}
             </Section>
