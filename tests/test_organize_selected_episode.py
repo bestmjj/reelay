@@ -262,6 +262,62 @@ class OnlyE18FromCopiedSeason(WebCase):
                          TaskState.NEED_MANUAL)
         self.assertEqual(self.drive.writes, [])
 
+    def test_ignore_stuck_transferred_pack_preserves_all_cloud_files(self):
+        # This is exactly the previously unescapable state: E01-E18 are
+        # copied and verified, but only E18 was identified for organization.
+        self.assertIn("dismiss", self.client.get(self.url).json()["actions"])
+        ctx = self.app.state.store.get_task(self.ctx.task_id)
+        ctx.ns("storage")["identity"] = {
+            "share_code": "gsQB8YFoLZQ", "provider": "aliyun",
+            "cid": "resource-target", "title": "李熊猫", "season": 1,
+            "episodes": list(range(1, 19)),
+        }
+        self.app.state.store.finish_transfer(ctx)
+        store = self.app.state.store
+        # Another valid task's same-episode entry is NEVER ours to erase.
+        other_key = "other-target:other-show|S01|E01"
+        from reelay.core.store.base import DEDUP_EPISODE, DEDUP_MESSAGE, DEDUP_SHARE
+        store.mark(DEDUP_EPISODE, other_key, "another-task")
+        store.mark(DEDUP_MESSAGE, "@shareAliyun:e18-all-copied", ctx.task_id)
+        with store._lock:
+            current = store._conn.execute(
+                "SELECT COUNT(*) FROM dedup WHERE task_id=? AND kind IN (?,?)",
+                (ctx.task_id, DEDUP_SHARE, DEDUP_EPISODE)).fetchone()[0]
+        self.assertEqual(current, 19)
+        answer = self.client.post(self.url + "/reject")
+        self.assertEqual(answer.status_code, 200, answer.text)
+        closed = store.get_task(ctx.task_id)
+        self.assertEqual(closed.state, TaskState.SKIPPED)
+        self.assertEqual(closed.ns("task")["skip"]["kind"], "preserved_transfer")
+        self.assertTrue(closed.result["storage_verified"])
+        self.assertEqual(len(self.drive.iterdir("stage-dir")), 18)
+        self.assertEqual(self.drive.writes, [])
+        self.assertEqual(self.drive.deleted, [])
+        with store._lock:
+            remaining = store._conn.execute(
+                "SELECT kind,key FROM dedup WHERE task_id=?",
+                (ctx.task_id,)).fetchall()
+            unrelated = store._conn.execute(
+                "SELECT COUNT(*) FROM dedup WHERE kind=? AND key=?",
+                (DEDUP_EPISODE, other_key)).fetchone()[0]
+        self.assertEqual({row["kind"] for row in remaining}, {DEDUP_MESSAGE})
+        self.assertEqual(unrelated, 1)
+        self.assertEqual(self.client.post(self.url + "/reject").status_code, 409)
+
+    def test_cannot_ignore_unknown_or_unverified_cloud_transfer(self):
+        original = self.app.state.store.get_task(self.ctx.task_id)
+        for phase, verified in (("receiving", True), ("stored", False)):
+            with self.subTest(phase=phase, verified=verified):
+                ctx = self.app.state.store.get_task(self.ctx.task_id)
+                ctx.ns("storage")["phase"] = phase
+                ctx.result["storage_verified"] = verified
+                self.app.state.store.save_task(ctx)
+                self.assertNotIn("dismiss", self.client.get(self.url).json()["actions"])
+                self.assertEqual(self.client.post(self.url + "/reject").status_code, 409)
+                self.assertEqual(self.app.state.store.get_task(ctx.task_id).state,
+                                 TaskState.NEED_MANUAL)
+        self.app.state.store.save_task(original)
+
     def test_post_organize_flow_does_not_call_storage_save(self):
         queued = self.queue_e18()
         provider = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
