@@ -24,6 +24,22 @@ class PluginStateRepository:
                 "value=excluded.value, updated_at=excluded.updated_at",
                 (plugin, key, json.dumps(value, ensure_ascii=False), time.time()))
 
+    def state_take(self, plugin: str, key: str) -> Any:
+        """Atomically consume a one-time server-side preview token.
+
+        A repeated submission (including from another web process) returns
+        None. The separate preview is never itself a transfer receipt.
+        """
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT value FROM plugin_state WHERE plugin=? AND key=?",
+                (plugin, key)).fetchone()
+            if row is not None:
+                self._conn.execute(
+                    "DELETE FROM plugin_state WHERE plugin=? AND key=?", (plugin, key))
+            return json.loads(row["value"]) if row else None
+
     def state_delete(self, plugin: str, key: str) -> None:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM plugin_state WHERE plugin=? AND key=?", (plugin, key))

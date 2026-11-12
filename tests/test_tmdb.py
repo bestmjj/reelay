@@ -80,6 +80,20 @@ class TestTmdbMatching(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(search_kinds("movie", False), ["movie", "tv"])
         self.assertEqual(search_kinds(None, False), ["tv", "movie"])
 
+    async def test_year_bonus_is_not_mislabeled_as_title_similarity(self):
+        hit = {"id": 2, "title": "流浪地球2", "release_date": "2023-01-22",
+               "_kind": "movie", "_score": 1.1}
+        ctx = message()
+        ctx.parsed = ParsedResource(is_media=True, title="流浪地球2",
+                                    year=2023, media_type="movie", share_code="abc123")
+        with secret_store.override(tmdb_api_key="k"), \
+                patch.object(tmdb, "best_match", return_value=(hit, [hit])):
+            await TmdbEnrich().run(ctx)
+        trail = "\n".join(ctx.trail)
+        self.assertIn("片名相似度 100%", trail)
+        self.assertIn("综合匹配分 1.10", trail)
+        self.assertIn("含同年加分", trail)
+
     async def test_unknown_type_searches_tv_and_movie_and_takes_the_closer_match(self):
         from reelay.providers.parser import _regex_parse
         share = "https://115.com/s/abc123?password=abcd"

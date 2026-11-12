@@ -23,7 +23,7 @@ NO_TITLE_CAP = 0.3
 def assess(ctx: PipelineContext) -> tuple[float, dict[str, Any]]:
     p = ctx.parsed
     if not p or not p.is_media or p.is_ad or not p.share_code:
-        return 0.0, {"checks": {}, "note": "非影视、广告或缺 115 链接"}
+        return 0.0, {"checks": {}, "note": "非影视、广告或缺少支持的网盘分享链接"}
     episodic = p.media_type in ("tv", "anime")
     checks = {
         "title": bool(p.title and p.title.strip()),

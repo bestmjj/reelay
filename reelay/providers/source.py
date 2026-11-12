@@ -13,7 +13,7 @@ import logging
 import time
 from typing import Any, Awaitable, Callable
 
-from ..core import paths, proxy, runtime, secret_store
+from ..core import discovery, paths, proxy, runtime, secret_store
 from ..core.contracts import RawMessage
 from ..core.registry import register
 
@@ -216,6 +216,185 @@ class TelegramUserbotSource:
             if len(out) >= limit:
                 break
         return out
+
+
+    async def message_by_id(self, target: str, message_id: int) -> list[dict]:
+        """Read exactly one message already accessible to the configured listener.
+
+        Used for explicit user submissions of t.me/<configured-channel>/<id>.
+        Never join or search unknown channels and never write to Telegram.
+        """
+        if not (self._client and self._authorized and self._client.is_connected()):
+            raise RuntimeError("Telegram 监听会话未连接")
+        target = target.strip()
+        if target.casefold() not in {name.casefold() for name in self._targets}:
+            raise ValueError("只能读取已经配置的 Telegram 来源")
+        if type(message_id) is not int or not 1 <= message_id <= 2 ** 63 - 1:
+            raise ValueError("消息 ID 无效")
+        entity = await self._client.get_entity(
+            int(target) if target.lstrip("-").isdigit() else target)
+        msg = await self._client.get_messages(entity, ids=message_id)
+        if not msg or getattr(msg, "action", None) or not (msg.raw_text or "").strip():
+            return []
+        return [{"source": target, "msg_id": str(msg.id),
+                 "text": msg.raw_text, "urls": _extract_urls(msg)}]
+
+    async def search_messages(self, target: str, title: str, limit: int = 5) -> list[dict]:
+        """Read-only subscribed-show examples from an already authorized channel.
+
+        This is intentionally separate from discover_subscriptions: results
+        NEVER enter accept_task, dedup claims or the transfer queue. Unlike
+        automatic discovery, simulation may inspect older channel history.
+        """
+        if not (self._client and self._authorized and self._client.is_connected()):
+            raise RuntimeError("Telegram 监听会话未连接，无法查询频道历史")
+        target = target.strip()
+        if target.casefold() not in {name.casefold() for name in self._targets}:
+            raise ValueError("只能查询已经配置的监听来源")
+        if not title.strip() or len(title) > 100:
+            raise ValueError("订阅片名不合法")
+        limit = min(max(int(limit), 1), 5)
+        entity = await self._client.get_entity(
+            int(target) if target.lstrip("-").isdigit() else target)
+        found: list[dict] = []
+        seen: set[int] = set()
+
+        def add(msg) -> bool:
+            raw_text = getattr(msg, "raw_text", "") or ""
+            if not raw_text or getattr(msg, "action", None):
+                return False
+            from ..core.parse_rules import parse_share_url
+            urls = _extract_urls(msg)
+            if (not discovery.contains_title(raw_text, title)
+                    or not parse_share_url(raw_text, urls)[0]
+                    or int(msg.id) in seen):
+                return False
+            seen.add(int(msg.id))
+            found.append({"text": raw_text, "urls": urls, "msg_id": str(msg.id),
+                          "source": target})
+            return len(found) >= limit
+
+        # Telegram's search index can omit spellings used in Chinese titles.
+        # Fetch at most 60 search results and, if none matched, 80 recent posts.
+        async for msg in self._client.iter_messages(entity, search=title, limit=60):
+            if add(msg):
+                return found
+        if not found:
+            async for msg in self._client.iter_messages(entity, limit=80):
+                if add(msg):
+                    break
+        return found
+
+    async def discover_subscriptions(self, emit: EmitFn, active: list[dict],
+                                     load: Callable[[str, str, dict], dict],
+                                     save: Callable[[str, str, dict], None]) -> dict:
+        """Search only the subscribed titles in the existing authorized sources.
+
+        Cooldowns, global FloodWait and per-subscription search state are stored
+        in SQLite by the caller. Oldest-unchecked targets run first, so adding
+        several channels won't starve later subscriptions indefinitely.
+        """
+        if not self._authorized or not self._client or not self._client.is_connected():
+            return {"status": "disconnected", "queries": 0, "candidates": 0}
+        now = time.time()
+        global_state = load(discovery.NAMESPACE, "__global__", {}) or {}
+        if now < float(global_state.get("next_at") or 0):
+            return {"status": "rate_limited", "queries": 0, "candidates": 0}
+        pending = []
+        failed = 0
+        for target in list(self._targets):
+            try:
+                entity = await self._client.get_entity(
+                    int(target) if target.lstrip("-").isdigit() else target)
+            except Exception as exc:  # noqa: BLE001 - one inaccessible channel doesn't block others
+                failed += 1
+                log.warning("主动追剧：无法访问来源 %s (%s)", target, type(exc).__name__)
+                flood_seconds = getattr(exc, "seconds", None)
+                if isinstance(flood_seconds, (int, float)):
+                    wait = min(max(int(flood_seconds), 60), 86400)
+                    save(discovery.NAMESPACE, "__global__", {"next_at": time.time() + wait})
+                    return {"status": "rate_limited", "queries": 0, "candidates": 0, "failed": failed}
+                # Show actionable errors beside each affected subscription.
+                for sub in active:
+                    if not sub.get("auto") or sub.get("finished"):
+                        continue
+                    key = discovery.state_key(target, sub)
+                    old = load(discovery.NAMESPACE, key, {}) or {}
+                    save(discovery.NAMESPACE, key, {
+                        **old, "source": target, "next_at": now + 1800,
+                        "error": f"无法访问 {target}（{type(exc).__name__}），请确认监听账号有读取权限",
+                    })
+                continue
+            source = _entity_name(entity)
+            for sub in active:
+                if not sub.get("auto") or sub.get("finished") or not sub.get("title"):
+                    continue
+                key = discovery.state_key(target, sub)
+                state = load(discovery.NAMESPACE, key, {}) or {}
+                if discovery.due(state, now):
+                    pending.append((float(state.get("checked_at") or 0), key, source, entity, sub, state))
+        pending.sort(key=lambda row: row[0])
+        queries, candidates = 0, 0
+        for _, key, source, entity, sub, state in pending[:discovery.MAX_QUERIES_PER_CYCLE]:
+            if not self._authorized or not self._client.is_connected():
+                break
+            queries += 1
+            count = 0
+            earliest = discovery.cutoff(state, now, sub.get("created_at"))
+            try:
+                async for msg in self._client.iter_messages(
+                        entity, search=sub["title"], limit=discovery.SEARCH_LIMIT):
+                    configured = {name.casefold() for name in self._targets}
+                    if source.casefold() not in configured and key.rsplit(":", 1)[0] not in configured:
+                        # Sources can be edited while a search is in flight.
+                        # Never accept a historical post from a just-removed source.
+                        break
+                    date = getattr(msg, "date", None)
+                    if date is None:
+                        continue
+                    if date.timestamp() < earliest:
+                        break
+                    if count >= discovery.MAX_CANDIDATES_PER_SHOW:
+                        break
+                    if getattr(msg, "action", None):
+                        continue
+                    text = getattr(msg, "raw_text", None) or ""
+                    if not discovery.contains_title(text, sub["title"]):
+                        continue
+                    urls = _extract_urls(msg)
+                    from ..core.parse_rules import parse_share_url
+                    if not parse_share_url(text, urls)[0]:
+                        continue
+                    # Don't bypass existing message, content and share dedup.
+                    await emit(RawMessage(
+                        source=source, msg_id=str(msg.id), text=text, urls=urls,
+                        extra={"backfill": True, "discovery": True}))
+                    count += 1
+                save(discovery.NAMESPACE, key, {
+                    "source": source, "checked_at": time.time(), "next_at": 0,
+                    "matches": count, "emitted": count, "error": None,
+                })
+                candidates += count
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - unknown outcome must not advance this cursor
+                failed += 1
+                seconds = getattr(exc, "seconds", None)
+                flood = isinstance(seconds, (int, float))
+                wait = min(max(int(seconds), 60), 86400) if flood else 300
+                save(discovery.NAMESPACE, key, {
+                    **state, "source": source, "next_at": time.time() + wait,
+                    "error": f"Telegram {type(exc).__name__}，稍后自动重试",
+                })
+                log.warning("主动追剧：%s 《%s》检索失败（%s），延迟 %ds",
+                            source, sub["title"], type(exc).__name__, wait)
+                if flood:
+                    save(discovery.NAMESPACE, "__global__", {"next_at": time.time() + wait})
+                    return {"status": "rate_limited", "queries": queries,
+                            "candidates": candidates, "failed": failed}
+            await asyncio.sleep(discovery.QUERY_DELAY_SEC)
+        return {"status": "partial" if failed else "ok", "queries": queries,
+                "candidates": candidates, "failed": failed}
 
 
 def _entity_name(entity: Any) -> str:

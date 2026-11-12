@@ -82,10 +82,21 @@ class ServiceBase:
             raise NotFoundError("任务不存在")
         return ctx
 
-    def _validate_alias(self, alias: str) -> None:
+    def _validate_alias(self, alias: str, *, provider: str | None = None) -> None:
+        """Validate the configured alias and its cloud provider before routing.
+
+        A 115 CID is not an Aliyun file ID; Aliyun destinations are stored as
+        `aliyun:<file_id>`. Directory syntax is validated by normalize_config.
+        Never reject a valid Aliyun destination merely because it is not numeric.
+        """
         cid = self.pipeline.save_dirs.get(alias)
-        if cid is None or not str(cid).isdecimal():
-            raise ValueError(f"目标目录别名不存在或 CID 无效：{alias}")
+        if cid is None:
+            raise ValueError(f"目标目录别名不存在：{alias}")
+        reference = str(cid)
+        if provider == "aliyun" and not reference.startswith("aliyun:"):
+            raise ValueError(f"目标目录「{alias}」不是阿里云盘目录，禁止跨网盘转存")
+        if provider == "p115" and reference.startswith("aliyun:"):
+            raise ValueError(f"目标目录「{alias}」不是 115 网盘目录，禁止跨网盘转存")
 
     @staticmethod
     def _require_editable(ctx: PipelineContext) -> None:

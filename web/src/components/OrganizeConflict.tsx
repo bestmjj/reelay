@@ -1,4 +1,4 @@
-import { FileVideo, FolderTree, Replace, Trash2 } from 'lucide-react';
+import { Copy, FileVideo, FolderTree } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { sizeText } from '@/lib/format';
@@ -30,20 +30,16 @@ export function OrganizeConflict({ conflict }: { conflict: IOrganizeConflict }) 
   );
 }
 
-/** 卡片上的两个处理按钮；执行前用确认弹窗核对文件。 */
+/** 卡片上非破坏性的处理按钮；执行前用确认弹窗核对文件。 */
 export function ConflictButtons({ conflict, busy, onChoose, size = 'sm' }: {
   conflict: IOrganizeConflict; busy: boolean; onChoose: (choice: ConflictChoice) => void; size?: 'sm' | 'default';
 }) {
   const choose = async (choice: ConflictChoice) => { if (await confirmConflict(choice, conflict)) onChoose(choice); };
   return (
     <div className="flex flex-wrap gap-2">
-      <Button type="button" size={size} variant="outline" disabled={busy} onClick={() => void choose('skip')}
-        title="保留库里的文件，删除本次转存的这份" className="text-destructive">
-        <Trash2 />删除转存文件
-      </Button>
-      <Button type="button" size={size} disabled={busy} onClick={() => void choose('replace')}
-        title="删除库里的文件，换成本次转存的这份">
-        <Replace />覆盖保存
+      <Button type="button" size={size} variant="outline" disabled={busy} onClick={() => void choose('suffix')}
+        title="保留原文件，新文件自动使用不同名称">
+        <Copy />保留两份（不删除）
       </Button>
     </div>
   );
@@ -51,7 +47,7 @@ export function ConflictButtons({ conflict, busy, onChoose, size = 'sm' }: {
 
 /**
  * 有整理冲突时的「重新整理」：直接重新整理只会再撞上同一个冲突，所以先选怎么处理——
- * 删除本次转存的文件、覆盖保存，或者（改过命名、目录设置后）按当前设置重新规划位置。
+ * 保留两份（为新文件添加序号），或者改过命名规则后重新规划位置。
  * 弹窗里已列出两份文件，选择即执行，不再二次确认。
  */
 export function ConflictDialog({ conflict, open, onOpenChange, onChoose, canReplan }: {
@@ -68,7 +64,7 @@ export function ConflictDialog({ conflict, open, onOpenChange, onChoose, canRepl
         <DialogHeader className="text-left">
           <DialogTitle className="text-base">库里已有同一份资源</DialogTitle>
           <DialogDescription className="text-[13px] leading-5">
-            整理到的位置已经有这一集（或这部电影）的文件。选一种处理方式；被替换或删除的那份会移进 115 回收站。
+            整理到的位置已有相同内容。默认安全模式不删除或覆盖文件，可保留两份，也可以修改保存目录后重新整理。
           </DialogDescription>
         </DialogHeader>
         <OrganizeConflict conflict={conflict} />
@@ -82,8 +78,7 @@ export function ConflictDialog({ conflict, open, onOpenChange, onChoose, canRepl
             <Button variant="ghost" onClick={() => pick(undefined)}><FolderTree />按当前设置重新规划</Button>
           ) : <span />}
           <div className="flex flex-col-reverse gap-2 sm:flex-row">
-            <Button variant="outline" className="text-destructive" onClick={() => pick('skip')}><Trash2 />删除转存文件</Button>
-            <Button variant="destructive" onClick={() => pick('replace')}><Replace />覆盖保存</Button>
+            <Button variant="outline" onClick={() => pick('suffix')}><Copy />保留两份（不删除）</Button>
           </div>
         </DialogFooter>
       </DialogContent>

@@ -166,12 +166,12 @@ def normalize_config(data: Any) -> dict[str, Any]:
             raise ValueError(f"{key} 必须是对象")
     dirs = cfg["save_dirs"]
     if not dirs or any(type(k) is not str or not k.strip() or type(v) not in (str, int)
-                       or not str(v).isdecimal() for k, v in dirs.items()):
-        raise ValueError("save_dirs 必须包含非空别名与非负整数 CID")
+                       or not re.fullmatch(r"(?:[0-9]+|[A-Za-z0-9_-]{16,128}|aliyun:(?:0|[A-Za-z0-9_-]{1,128}))", str(v)) for k, v in dirs.items()):
+        raise ValueError("save_dirs 必须包含有效别名和网盘目录 ID")
     if len({k.strip() for k in dirs}) != len(dirs) or any(k != k.strip() for k in dirs):
         raise ValueError("save_dirs 目录别名不能重复或带首尾空格")
-    if any(not re.fullmatch(r'[0-9]+', str(cid)) for cid in dirs.values()):
-        raise ValueError("save_dirs CID 必须是十进制非负整数字符串")
+    if any(not re.fullmatch(r"(?:[0-9]+|[A-Za-z0-9_-]{16,128}|aliyun:(?:0|[A-Za-z0-9_-]{1,128}))", str(cid)) for cid in dirs.values()):
+        raise ValueError("save_dirs 目录 ID 必须是 115 数字 CID 或 aliyun:文件 ID")
     cfg["save_dirs"] = {alias: str(cid) for alias, cid in dirs.items()}
     if not isinstance(cfg["sources"], list):
         raise ValueError("sources 必须是数组")
@@ -291,6 +291,19 @@ def _validate_services(cfg: dict) -> None:
     _number(cfg["p115"], "risk_cooldown_sec", "p115", 60, 86400, integer=True)
     from .proxy import validate as validate_proxy
     validate_proxy(cfg["proxy"])
+
+
+def directory_matches_storage(reference: str, storage: str) -> bool:
+    """A folder alias is provider-bound. Legacy numeric CIDs always belong to 115.
+
+    Unknown third-party providers keep their own validation rules.
+    """
+    ref = str(reference)
+    if storage == "aliyun":
+        return ref.startswith("aliyun:")
+    if storage == "p115":
+        return ref.isdecimal()
+    return True
 
 
 def _validate_rule(rule: dict, dirs: dict, label: str) -> None:

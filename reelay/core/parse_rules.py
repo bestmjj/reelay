@@ -144,6 +144,29 @@ def parse_115_url(text: str, urls: list[str]) -> tuple[str | None, str | None, s
     return None, None, None
 
 
+_ALI_SHARE_RE = re.compile(r"https?://(?:www\.)?(?:alipan\.com|aliyundrive\.com)/s/([A-Za-z0-9_-]+)(?:\?[^\s]*)?", re.I)
+
+
+def parse_share_url(text: str, urls: list[str]) -> tuple[str | None, str | None, str | None]:
+    """Recognize both 115 and Aliyun Drive; never infer an ID from LLM output."""
+    for item in [*urls, text]:
+        match = _ALI_SHARE_RE.search(item or "")
+        if match:
+            password = _PWD_RE.search(text or "")
+            query = re.search(r"[?&](?:pwd|password)=([A-Za-z0-9]{4})", match.group(0), re.I)
+            return match.group(0), match.group(1), (password.group(1) if password else
+                                                      query.group(1) if query else None)
+    return parse_115_url(text, urls)
+
+
+def share_provider(share_url: str | None) -> str | None:
+    if share_url and _ALI_SHARE_RE.search(share_url):
+        return "aliyun"
+    if share_url and _SHARE_RE.search(share_url):
+        return "p115"
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # 规则解析（兜底 / 降级）
 # --------------------------------------------------------------------------- #
@@ -174,11 +197,35 @@ _TITLE_END_RE = re.compile(
 AD_KEYWORDS = ("招商", "广告", "投稿", "点击进群", "更多资源关注", "推广")
 
 
+# Manual one-off submissions frequently contain only a share link and
+# instructions ("选择分享根目录中的 247"). Neither is evidence of a title.
+# This also protects regex fallback when an LLM request failed.
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s]+", re.I)
+_SOURCE_INSTRUCTION_RE = re.compile(
+    r"^(?:请|帮我|麻烦|我要|我想|仅|只|直接)?(?:选择分享|选择文件|选择根目录|"
+    r"从分享|从根目录|转存|只转存|保存到|下载|只要第|只要|获取分享|"
+    r"分享根目录|阿里云盘分享|文件夹里|链接是|点击链接|指定第)"
+)
+
+
 def _title_line(text: str) -> str:
-    """片名所在的行：写明「名称：」「片名：」的行优先，否则第一个不全是话题标签与符号的行；去掉开头的 emoji 与符号。"""
-    lines = [re.sub(r"^[^\w【《(（\[]+", "", line).strip() for line in (text or "").splitlines()
-             if re.sub(r"#\S+|[^\w]", "", line)]
-    return next((line for line in lines if _LABEL_RE.match(line)), lines[0] if lines else "")
+    """Find a real-looking title line, never a URL or operator instructions."""
+    lines = []
+    for raw in (text or "").splitlines():
+        without_link = _URL_IN_TEXT_RE.sub(" ", raw)
+        # Hashtag-only captions are metadata, not a real title line.
+        if not re.sub(r"#\S+|[^\w]", "", without_link):
+            continue
+        line = re.sub(r"^[^\w【《(（\[]+", "", without_link).strip()
+        if _LABEL_RE.match(line):
+            return line
+        if _SOURCE_INSTRUCTION_RE.match(line):
+            continue
+        # "247 4K.mp4" is a source filename, not the identity of a show.
+        if re.match(r"^(?:第\s*)?\d{1,4}\s*(?:[集话]|[._ -]+(?:4k|\d{3,4}p))", line, re.I):
+            continue
+        lines.append(line)
+    return lines[0] if lines else ""
 
 
 def _title(line: str) -> str | None:
@@ -240,7 +287,7 @@ def regex_fields(text: str, rules: dict | None = None) -> dict:
 def prefilter_reason(ctx, share_code: str | None) -> str | None:
     """与 DefaultDecision 的硬过滤一致；命中则无论 LLM 怎么判都会被跳过。"""
     if not share_code:
-        return "无 115 链接"
+        return "未找到支持的网盘分享链接"
     filters = (ctx.source_rule or {}).get("filters", {}) or {}
     text = ctx.raw.text or ""
     must = filters.get("must_have") or []

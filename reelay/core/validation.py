@@ -86,7 +86,8 @@ def validate_resource(data: Any, *, complete: bool = False) -> dict[str, Any]:
             valid = value is None or (type(value) is str and len(value) <= 2000)
         if not valid:
             raise ValueError(f"解析字段 {key} 类型或范围无效")
-    if complete and data["is_media"] and not data["is_ad"]:
-        if not data["title"] or not data["title"].strip() or data["media_type"] is None:
-            raise ValueError("影视资源必须提供标题和媒体类型")
+    # The JSON schema deliberately allows null title/media_type when the
+    # Telegram caption contains only a share link. That is valid *incomplete*
+    # extraction, not a malformed LLM response. The decision layer must then
+    # require manual review; never incentivize the model to hallucinate a title.
     return data

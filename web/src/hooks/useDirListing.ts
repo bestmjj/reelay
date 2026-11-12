@@ -1,23 +1,29 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { storageApi, type IDirItem } from '@/api/storage';
+import { storageApi, type CloudProvider, type IDirItem } from '@/api/storage';
 import { useAsync } from '@/hooks/useAsync';
 import { errorMessage } from '@/lib/utils';
 
 export type Crumb = { id: string; name: string };
 
 /**
- * 逐级浏览 115 目录（115 目录页与目录选择弹窗共用）：进入目录、面包屑路径、分页加载更多。
- * 路径优先用 115 返回的真实路径（按编号定位时也能显示正确的目录名）；根目录由界面单独显示，这里不含。
+ * Folder picker and file manager share breadcrumb/pagination behavior, but only
+ * the file manager asks for ordinary files. Include provider in every cache key:
+ * switching between 115 and Aliyun while at root ID "0" must never leak
+ * either cloud's previously loaded entries into the other.
  */
-export function useDirListing(initial: { cid: string; path: Crumb[] } = { cid: '0', path: [] }) {
+export function useDirListing(initial: { cid: string; path: Crumb[] } = { cid: '0', path: [] },
+                              provider?: CloudProvider, includeFiles = false) {
   const [target, setTarget] = useState(initial);
-  const first = useAsync(() => storageApi.dirs(target.cid), [target.cid], '目录查询失败');
-  const [more, setMore] = useState<{ cid: string; items: IDirItem[]; next: number | null } | null>(null);
+  const key = (provider ?? 'default') + ':' + (includeFiles ? 'files' : 'dirs') + ':' + target.cid;
+  const load = (cid: string, offset: number) =>
+    includeFiles && provider ? storageApi.items(cid, offset, provider) : storageApi.dirs(cid, offset, provider);
+  const first = useAsync(() => load(target.cid, 0), [target.cid, provider, includeFiles], '目录查询失败');
+  const [more, setMore] = useState<{ key: string; items: IDirItem[]; next: number | null } | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
 
   const page = first.stale ? undefined : first.data;
-  const extra = more?.cid === target.cid ? more : null;
+  const extra = more?.key === key ? more : null;
   const serverPath = (page?.path ?? []).filter((p) => p.id !== '0').map((p) => ({ id: p.id, name: p.name }));
   const path = page && (serverPath.length || target.cid === '0') ? serverPath : target.path;
 
@@ -29,11 +35,15 @@ export function useDirListing(initial: { cid: string; path: Crumb[] } = { cid: '
   const loadMore = async () => {
     const next = extra ? extra.next : page?.next_offset ?? null;
     if (next === null || loadingMore) return;
-    const cid = target.cid;
+    const requestKey = key;
     setLoadingMore(true);
     try {
-      const r = await storageApi.dirs(cid, next);
-      setMore((prev) => ({ cid, items: [...(prev?.cid === cid ? prev.items : []), ...r.items], next: r.next_offset }));
+      const r = await load(target.cid, next);
+      setMore((prev) => ({
+        key: requestKey,
+        items: [...(prev?.key === requestKey ? prev.items : []), ...r.items],
+        next: r.next_offset,
+      }));
     } catch (e) {
       toast.error(errorMessage(e, '目录查询失败'));
     } finally {
@@ -44,13 +54,13 @@ export function useDirListing(initial: { cid: string; path: Crumb[] } = { cid: '
   return {
     cid: target.cid,
     path,
-    /** 当前目录的第一页还没读到。 */
     loading: first.loading,
     ready: page !== undefined,
-    error: first.error,
-    /** 进入新目录、结果还没到时，仍是上一个目录的列表（由界面决定变淡还是显示骨架）。 */
-    items: page ? [...page.items, ...(extra?.items ?? [])] : first.data?.items ?? [],
+    error: first.stale ? '' : first.error,
+    items: page ? [...page.items, ...(extra?.items ?? [])] : [],
     next: extra ? extra.next : page?.next_offset ?? null,
+    driveId: page?.drive_id,
+    totalEntries: page?.total_entries,
     loadingMore,
     open,
     loadMore,

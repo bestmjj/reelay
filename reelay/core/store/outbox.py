@@ -31,13 +31,17 @@ class OutboxRepository:
             return claimed
 
     def finish_delivery(self, delivery_id: int, *, error: str | None = None,
-                        retry_after: float | None = None, skipped: bool = False) -> None:
+                        retry_after: float | None = None, skipped: bool = False,
+                        terminal: bool = False) -> None:
+        """Permanently undeliverable messages stay visible as failed and can
+        be manually retried after the Telegram target has been corrected."""
         with self._lock, self._conn:
             row = self._conn.execute("SELECT attempts FROM outbox WHERE id=?", (delivery_id,)).fetchone()
             if not row:
                 return
             attempts = row["attempts"] + (0 if skipped else 1)
-            status = "skipped" if skipped else ("done" if error is None else ("failed" if attempts >= 8 else "pending"))
+            status = ("skipped" if skipped else "done" if error is None
+                      else "failed" if terminal or attempts >= 8 else "pending")
             now = time.time()
             delay = retry_after if retry_after is not None else min(2 ** attempts, 300)
             self._conn.execute("UPDATE outbox SET status=?, attempts=?, error=?, next_attempt=?, lease_until=0, updated_at=? WHERE id=?",

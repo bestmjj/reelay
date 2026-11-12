@@ -20,7 +20,7 @@ from reelay.core.registry import Registry, discover
 from reelay.core.service import ManagementService
 from reelay.core.store import Store
 from reelay.core.worker import Worker
-from reelay.providers.decision import DefaultDecision, LLMDecision
+from reelay.providers.decision import DefaultDecision, LLMDecision, SubscriptionDecision
 from reelay.providers.notify import ConsoleNotify
 from reelay.providers.parser import LLMParser, RegexParser
 from reelay.providers.source import TelegramUserbotSource
@@ -75,7 +75,7 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
         changes = [{"is_ad": "false"}, {"is_media": "true"}, {"confidence": 2},
                    {"confidence": float("nan")}, {"confidence": True}, {"year": "2026"},
                    {"season": True}, {"episodes": ["bad"]}, {"episodes": [1, 1]},
-                   {"genres": "动画"}, {"media_type": "unknown"}, {"title": None}, {"extra": 1}]
+                   {"genres": "动画"}, {"media_type": "unknown"}, {"extra": 1}]
         for change in changes:
             with self.subTest(change=change):
                 ctx = context()
@@ -85,6 +85,25 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
                 ctx.parsed = await parser.parse(ctx)
                 self.assertTrue(ctx.meta["parse"]["fallback"])
                 self.assertEqual(await DefaultDecision().decide(ctx), Decision.ASK)
+
+    async def test_missing_title_or_type_is_incomplete_not_invalid_and_requires_review(self):
+        # JSON Schema explicitly permits null title/type for sparse Telegram
+        # messages. Never retry valid JSON or promote it to a cloud copy, even
+        # when the admin lowers confidence_threshold to zero.
+        for missing in ({"title": None}, {"media_type": None},
+                        {"title": None, "media_type": None},
+                        {"title": "  "}):
+            with self.subTest(missing=missing):
+                ctx = context()
+                ctx.source_rule = {"approval_mode": "auto", "confidence_threshold": 0}
+                parser = LLMParser()
+                parser._client = FakeAI({**movie(), **missing})
+                ctx.parsed = await parser.parse(ctx)
+                self.assertEqual(len(parser._client.calls), 1)
+                self.assertFalse(ctx.meta["parse"].get("fallback", False))
+                self.assertTrue(ctx.meta["parse"]["incomplete"])
+                self.assertEqual(await DefaultDecision().decide(ctx), Decision.ASK)
+                self.assertEqual(SubscriptionDecision.promote(ctx, Decision.ASK), Decision.ASK)
 
     async def test_timeout_refusal_and_missing_credentials_require_approval(self):
         for client in (None, FakeAI(TimeoutError("secret must not be persisted")), FakeAI(movie(), refusal="no")):
@@ -98,6 +117,8 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_regex_can_auto_save_and_clears_old_fallback(self):
         ctx = context()
+        # Explicit episode marker yields a trustworthy media type for auto mode.
+        ctx.raw.text = "剧 第3集 4K https://115.com/s/actual?password=abcd"
         ctx.source_rule = {"approval_mode": "auto"}
         ctx.ns("parse")["fallback"] = True
         ctx.parsed = await RegexParser().parse(ctx)
@@ -338,6 +359,7 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
                "plugins": {"organizer": {"enabled": False}}, "providers": {"notify": []}}
         pipeline = Pipeline(reg, self.store(), cfg)
         ctx = context()
+        ctx.raw.text = "剧 第3集 4K https://115.com/s/actual?password=abcd"
         await pipeline.process_new(ctx)
         with self.assertRaises(asyncio.CancelledError):
             await pipeline.execute_save(ctx)
@@ -411,6 +433,67 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(store.retry_delivery(failed["id"]))
         self.assertFalse(store.retry_delivery(failed["id"]))
         self.assertEqual(store.delivery_counts(), {"done": 1, "pending": 1})
+
+    async def test_telegram_bot_to_bot_error_is_terminal_and_log_is_rate_limited(self):
+        # Reproduce the production storm: every notification targets a Bot,
+        # which Telegram rejects with USER_IS_BOT. Keep failed deliveries
+        # durable (not skipped), but do not retry the same invalid peer.
+        class UserIsBotError(Exception):
+            pass
+
+        class Target:
+            name = "console"
+            reject = True
+            calls = 0
+            async def notice(self, text, **kwargs):
+                self.calls += 1
+                if self.reject:
+                    raise UserIsBotError("Bots cannot message other bots")
+
+        target = Target()
+        reg = Registry()
+        reg.add_provider("notify", target)
+        store = self.store()
+        pipeline = Pipeline(reg, store, {"providers": {"notify": ["console"]}})
+        for i in range(27):
+            store.stage_notice(f"bad-peer:{i}", f"notice {i}", ["console"])
+        with self.assertLogs("reelay.pipeline", level="ERROR") as logged:
+            while await pipeline.dispatch_deliveries():
+                pass
+        self.assertEqual(len(logged.output), 1)
+        self.assertIn("UserIsBotError", logged.output[0])
+        self.assertIn("停止自动重试", logged.output[0])
+        self.assertEqual(target.calls, 27)
+        self.assertEqual(store.delivery_counts(), {"failed": 27})
+        rows = store._conn.execute(
+            "SELECT attempts, error, status FROM outbox ORDER BY id").fetchall()
+        self.assertTrue(all(tuple(row) == (1, "UserIsBotError", "failed") for row in rows))
+        self.assertEqual(store.claim_deliveries(), [])
+
+        # An operator can correct owner_id/forward.target then manually
+        # replay failed notifications from the management dashboard.
+        target.reject = False
+        self.assertTrue(store.retry_delivery(store.list_deliveries()[0]["id"]))
+        await pipeline.dispatch_deliveries()
+        self.assertEqual(store.delivery_counts(), {"done": 1, "failed": 26})
+
+    async def test_transient_delivery_failure_retains_backoff(self):
+        class Transient:
+            name = "console"
+            async def notice(self, text, **kwargs):
+                raise ConnectionError("Telegram disconnected")
+        reg = Registry()
+        reg.add_provider("notify", Transient())
+        store = self.store()
+        pipeline = Pipeline(reg, store, {"providers": {"notify": ["console"]}})
+        store.stage_notice("transient", "notice", ["console"])
+        with self.assertLogs("reelay.pipeline", level="WARNING") as logged:
+            await pipeline.dispatch_deliveries()
+        self.assertIn("退避策略重试", logged.output[0])
+        self.assertEqual(store.delivery_counts(), {"pending": 1})
+        delivery = store._conn.execute(
+            "SELECT attempts, error FROM outbox").fetchone()
+        self.assertEqual(tuple(delivery), (1, "ConnectionError"))
 
     async def test_task_and_event_intent_commit_or_rollback_together(self):
         class Listener:
@@ -552,6 +635,7 @@ class TestPipeline(unittest.IsolatedAsyncioTestCase):
         pipeline = Pipeline(reg, self.store(), cfg)
         service = ManagementService(pipeline.store, pipeline, config_path=str(Path(self.temp.name) / "config.yaml"))
         ctx = context()
+        ctx.raw.text = "剧 第3集 4K https://115.com/s/actual?password=abcd"
         await pipeline.process_new(ctx)
         self.assertTrue(pipeline.store.get_task(ctx.task_id).ns("parse")["fallback"])
         await service.save_config({"defaults": {"parser": "regex", "approval_mode": "auto"}, "providers": {"notify": ["test"]}})
@@ -626,7 +710,7 @@ class TestParserCostControls(PipelineCase):
         resource = await parser.parse(ctx)
         self.assertEqual(parser._client.calls, [])
         self.assertFalse(resource.is_media)
-        self.assertEqual(ctx.ns("parse")["prefilter"], "无 115 链接")
+        self.assertEqual(ctx.ns("parse")["prefilter"], "未找到支持的网盘分享链接")
 
     async def test_prefilter_applies_block_keywords_and_must_have(self):
         parser = self.parser(media())
@@ -922,6 +1006,34 @@ class TestConfigSnapshots(PipelineCase):
         self.assertEqual(restarted.task_config(restored)["save_dirs"], {"默认": "1"})
         pipeline.apply_config(changed)  # 同一版本只存一份
         self.assertEqual(self.store._conn.execute("SELECT COUNT(*) FROM config_snapshots").fetchone()[0], 2)
+
+
+class AliyunDirectoryResolution(PipelineCase):
+    def test_storage_specific_alias_is_not_treated_as_115_cid(self):
+        pipeline = self.pipeline({"save_dirs": {"默认": "0", "动漫": "aliyun:FolderAbc_123"}})
+        ctx = message()
+        ctx.source_rule = {"save_to": "动漫", "storage": "aliyun"}
+        pipeline._resolve_directory(ctx)
+        self.assertEqual((ctx.save_dir_alias, ctx.save_dir_cid), ("动漫", "FolderAbc_123"))
+
+        other = message(msg_id="another")
+        other.source_rule = {"save_to": "动漫", "storage": "p115"}
+        with self.assertRaisesRegex(ValueError, "属于阿里云盘"):
+            pipeline._resolve_directory(other)
+
+    def test_aliyun_never_uses_numeric_115_alias_even_root(self):
+        pipeline = self.pipeline({"save_dirs": {
+            "默认": "0", "115影片": "123456", "阿里根目录": "aliyun:0"}})
+        for alias in ("默认", "115影片"):
+            with self.subTest(alias=alias):
+                ctx = message()
+                ctx.source_rule = {"save_to": alias, "storage": "aliyun"}
+                with self.assertRaisesRegex(ValueError, "属于 115"):
+                    pipeline._resolve_directory(ctx)
+        valid = message()
+        valid.source_rule = {"save_to": "阿里根目录", "storage": "aliyun"}
+        pipeline._resolve_directory(valid)
+        self.assertEqual(valid.save_dir_cid, "0")
 
 
 if __name__ == "__main__":

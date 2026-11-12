@@ -1,5 +1,9 @@
 # 配置参考
 
+> 阿里云盘扫码登录、Refresh Token 轮换、目录选择与防重复转存：参见 [阿里云盘使用说明](aliyun-drive.md)。
+>
+> 追剧订阅的模拟测试、Telegram 自动检索和异常恢复：参见 [主动追剧说明](subscription-auto-discovery.md)。
+
 所有设置都能在管理台修改，保存后约 1 秒生效（个别项注明需要重启主进程）。本页是完整的字段说明，日常使用不需要逐项阅读，遇到具体问题时按目录查找即可。
 
 - [系统配置](#系统配置system)：[目录与来源](#目录与来源save_dirs--sources--providers) · [识别与决策](#识别与决策defaults--sources) · [AI 能力](#ai-能力ai) · [版本偏好](#版本偏好release) · [转发、审批提醒、定时](#转发审批提醒定时) · [AI 服务与 TMDB](#ai-服务与-tmdbllm--tmdb) · [Telegram](#telegramtelegram) · [115 请求限速](#115-请求限速p115) · [网络代理](#网络代理proxy) · [运行参数](#运行参数runtime)
@@ -47,7 +51,7 @@ plugins:
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `approval_mode` | `manual` | 确认方式：`manual` 人工确认，每条符合要求的资源都等你确认；`auto` AI 处理，识别与规则都通过就直接转存，低置信度、TMDB 未匹配、LLM 降级等拿不准的仍转人工 |
+| `approval_mode` | `manual` | 确认方式：`manual` 人工确认（但启用 `subscription` 决策的已订阅新集满足规则时仍自动放行）；`auto` AI 处理，识别与规则都通过就直接转存，低置信度、TMDB 未匹配、LLM 降级等拿不准的仍转人工 |
 | `bot_notify` | `true` | Bot 通知，与确认方式无关：推送审批卡片（可在 Telegram 直接确认）与入库通知；关闭后在管理台「待审批」处理，转存或整理出问题的提醒照常发送 |
 | `save_to` | `默认` | 默认保存到的目录别名 |
 | `parser` | `llm` | `llm` 或 `regex`。`llm` 会把规则识别的结果作为参考一起交给 AI；LLM 不可用、超时重试后仍失败或输出非法时降级 regex 并强制人工确认 |
@@ -127,6 +131,37 @@ AI 接口密钥与 TMDB key 是密钥，见 [密钥](#密钥)。改了立即生�
 | `telegram.owner_id` | 空 | 你的 Telegram 数字 ID；控制 Bot 只服务这个 ID，留空不启用控制 Bot（重启主进程生效） |
 | `telegram.backfill_limit` / `backfill_max_days` | `200` / `7` | 监听启动时（含断线后进程重启）每个来源最多补拉的停机期间消息条数（`0` 关闭）与最大消息年龄（天）；首次监听的来源不导入历史 |
 | `telegram.alert_after_sec` | `120` | 消息源断开（含还没配置或登录 Telegram）多久后告警 |
+
+#### 控制 Bot 的通知失败（`UserIsBotError`）
+
+- `UserIsBotError` 是 Telegram 明确拒绝 **Bot 向另一个 Bot 发消息**；不是 AI 识别、阿里云盘转存或常规的 Telegram 断线错误。
+- 管理台「总览 → 通知发送」会展示失败事件类型。**`identified`** 是「识别后转发」，检查全局或该来源的 `forward.target` 是否填写成另一个 Bot；**`saved` / `pending_approval` / `failed` / 系统通知** 则检查 `telegram.owner_id` 是否是你**自己的 Telegram 用户数字 ID**，而不是控制 Bot ID。首次接收 Bot 私聊通常需要先向它发送 `/start`。
+- 新版直接将 `UserIsBotError` 的通知标记为 `failed`（不会重试同一个错误目标 8 次），保留 Outbox 记录供核对；修正目标后到「总览 → 通知发送 → 重发失败」手动恢复。**不要在接收目标仍错误时批量重发。**
+- `telethon ... Server closed the connection` 是另一种网络中断；如果 Telegram 监听和控制 Bot 能自动重连，一两次警告不说明发送目标有问题。持续断开时再排查 `proxy.telegram` 与代理连通性。
+- 容器内可只读排查最近错误事件类别，避免打印 Bot Token、分享消息或 Telegram 账号数字 ID：
+
+  ```bash
+  docker exec -i aliyundrive-subscribe-telegram-worker-1 python - <<'PY'
+  import sqlite3
+  db = sqlite3.connect("file:/app/data/reelay.db?mode=ro", uri=True)
+  for row in db.execute("""
+      SELECT event, status, error, COUNT(*)
+      FROM outbox WHERE error = 'UserIsBotError'
+      GROUP BY event, status, error ORDER BY COUNT(*) DESC
+  """):
+      print(*row)
+  db.close()
+  PY
+  ```
+
+### 成功入库后发现云盘文件被删除：按文件补转
+
+- 在任务详情选择状态为「已入库」的阿里云盘任务，点击 **「核验已入库文件」**。这一步只读取原文件 ID、文件大小及保存目录，不会创建转存或删除网盘文件。
+- 系统分别显示「仍存在」「确认丢失」「状态不确定」。勾选确实丢失的文件后，点击 **「确认补转」**，后台会创建一条独立的补转任务；原任务仍是 `done`，原转存回执和去重记录不变。
+- 同一集在云盘中仍存在、只是改名/移动、目标目录存在同名同大小文件时**不会**重复复制。目录、资源库或文件身份无法可靠核验时，宁可停止让你人工确认，也不冒险复制。
+- Worker 在准备转存前、发送复制请求前再次读云盘；如果排队期间文件已恢复，立即停止补转。仅对指定的、实时确认丢失的集号临时绕过陈旧的成功去重记录，不等于开启自动洗版或覆盖。
+- 保留上次分享源文件 ID、文件大小和命名结果，防止转存成另一种 HDR/DoVi 版本。原分享已失效、原视频不再存在、原文件夹已被整体删除、旧任务缺少逐文件/资源库信息、或者存在冲突/错片隔离时会拒绝自动补转。
+- 当前自动补转仅支持 **阿里云盘资源库**中有完整逐文件成功记录的影视任务；多季合集请每次只选一季，多文件电影需要人工核对。补转没有确认落地之前，不删除或撤销原成功任务。
 
 ### 115 请求限速（`p115`）
 

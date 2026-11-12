@@ -95,7 +95,7 @@ export default function InboxPage() {
       await taskApi.act(item.task_id, ACTION_ENDPOINT[action], actionBody(action, options));
       remove([item.task_id]);
       toast.success(options.conflict ? CONFLICT_DONE[options.conflict]
-        : action === 'approve' ? `已转存「${item.title ?? '资源'}」` : ACTION_DONE[action]);
+        : action === 'approve' ? `已确认「${item.title ?? '资源'}」，加入待转存队列` : ACTION_DONE[action]);
     } catch (err) {
       toast.error(errorMessage(err, '操作失败'));
     } finally {
@@ -112,7 +112,7 @@ export default function InboxPage() {
       const failedIds = new Set(result.failed.map((f) => f.task_id));
       remove(ids.filter((id) => !failedIds.has(id)));
       if (result.failed.length) toast.error(`${result.done} 条成功，${result.failed.length} 条失败：${result.failed[0].error}`);
-      else toast.success(action === 'approve' ? `已批准 ${result.done} 条，开始转存` : `已忽略 ${result.done} 条`);
+      else toast.success(action === 'approve' ? `已批准 ${result.done} 条，后台将再次检查是否已入库` : `已忽略 ${result.done} 条`);
     } catch (err) {
       toast.error(errorMessage(err, '批量操作失败'));
     } finally {

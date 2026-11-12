@@ -65,14 +65,30 @@ class AIServiceMixin(ServiceBase):
                        reasoning_effort: str | None = None, api_key: str | None = None) -> dict[str, Any]:
         """用一次很短的对话测试地址、密钥、模型与推理强度能否使用；不写入调用记录。"""
         from ..config import REASONING_EFFORTS
-        client, _, key = self._llm_client_for(base_url, api_key)
+        client, url, key = self._llm_client_for(base_url, api_key)
         model = (model or str(runtime.get("llm.model") or "")).strip()
         if not model:
             raise ValueError("请先填写模型")
         effort = (reasoning_effort if reasoning_effort is not None else str(runtime.get("llm.reasoning_effort") or ""))
         if effort not in REASONING_EFFORTS:
             raise ValueError("推理强度无效")
-        return await self._llm_try(client, model, effort, key=key)
+        result = await self._llm_try(client, model, effort, key=key)
+        # Manual success must clear the old red dashboard health indicator,
+        # but ONLY when it tests the model, URL, key and effort currently
+        # saved for Worker. A draft setting may succeed while the actual
+        # production configuration remains broken.
+        saved_url = str(runtime.get("llm.base_url") or "").strip().rstrip("/")
+        saved_model = str(runtime.get("llm.model") or "").strip()
+        saved_effort = str(runtime.get("llm.reasoning_effort") or "")
+        if (url == saved_url and model == saved_model and effort == saved_effort
+                and key == (secret_store.get("llm_api_key") or "")):
+            self.store.heartbeat(
+                "llm", status="active" if result["ok"] else "error",
+                event_driven=True, model=model,
+                error=None if result["ok"] else result.get("error", "模型连通性检查失败"),
+                source="manual_test",
+            )
+        return result
 
     async def _llm_try(self, client, model: str, effort: str, timeout: float = 60, key: str = "") -> dict[str, Any]:
         params: dict[str, Any] = {"model": model, "temperature": 0,

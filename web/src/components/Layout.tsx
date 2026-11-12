@@ -39,7 +39,7 @@ const SYSTEM: NavEntry[] = [
   { path: '/extensions', label: '插件', icon: Puzzle },
 ];
 const TOOLS: NavEntry[] = [
-  { path: '/storage', label: '115 目录', icon: FolderTree },
+  { path: '/storage', label: '网盘目录', icon: FolderTree },
   { path: '/logs', label: '运行日志', icon: ScrollText },
 ];
 const MOBILE_TABS: NavEntry[] = [...PRIMARY, MEDIA[0]];

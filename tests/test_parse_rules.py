@@ -12,7 +12,7 @@ from reelay.core.config import normalize_config
 from reelay.core.parse_rules import parse_115_url, regex_fields
 from reelay.core.service import ConflictError
 from reelay.main import _serve_fetch
-from reelay.providers.parser import _regex_parse
+from reelay.providers.parser import _regex_parse, sanitize_llm_title
 
 from tests.fakes import FakeAI, SHARE, ServiceCase, media, message
 
@@ -75,6 +75,15 @@ class TestGenericRules(unittest.TestCase):
             with self.subTest(text=text):
                 f = regex_fields(text)
                 self.assertEqual((f["title"], f["year"], f["season"], f["episodes"], f["resolution"]), expected)
+
+    def test_aliyun_url_and_manual_source_instruction_are_never_titles(self):
+        text = "https://www.alipan.com/s/gsQB8YFoLZQ 选择分享根目录中的 247"
+        self.assertIsNone(regex_fields(text)["title"])
+        self.assertEqual(regex_fields("片名：吞噬星空 (2020) 第247集")["title"], "吞噬星空")
+        self.assertIsNone(sanitize_llm_title(text))
+        self.assertIsNone(sanitize_llm_title("选择分享根目录中的 247"))
+        self.assertIsNone(sanitize_llm_title("www.alipan.com/s/gsQB8YFoLZQ"))
+        self.assertEqual(sanitize_llm_title("吞噬星空"), "吞噬星空")
 
     def test_numbers_on_other_lines_are_not_episodes_or_sizes(self):
         f = regex_fields("片名：繁花\n年份：2023\n集数：第5集\n清晰度：4K")
@@ -180,6 +189,28 @@ class TestDraftPreviews(ServiceCase):
         for bad in ({"bot": "@bot", "parse_rules": {"title": "("}}, {"bot": " "}, None):
             with self.assertRaises(ValueError):
                 self.service.draft_source_rule(bad)
+
+    async def test_aliyun_share_recognition_and_storage_route_preview(self):
+        from reelay.providers.storage import P115Storage
+        from reelay.core.contracts import NeedsManual
+
+        text = "名称：牧神记 (2024) 第106集 4K\n链接：https://www.alipan.com/s/DXVx8d8vce8"
+        # The parser correctly determines the share host independently of AI.
+        same = self.service.draft_source_rule({"bot": "@bot", "parser": "regex", "storage": "aliyun"})
+        result = await self.service.test_parse(text, [], "@bot", rule=same)
+        self.assertEqual(result["parsed"]["raw_fields"]["share_provider"], "aliyun")
+        self.assertEqual(result["parsed"]["share_code"], "DXVx8d8vce8")
+        self.assertEqual(result["routing"], {
+            "share_provider": "aliyun", "target_storage": "aliyun", "compatible": True,
+        })
+        # A source accidentally pointed at 115 must not claim copy readiness.
+        other = self.service.draft_source_rule({"bot": "@bot", "parser": "regex", "storage": "p115"})
+        mismatched = await self.service.test_parse(text, [], "@bot", rule=other)
+        self.assertEqual(mismatched["routing"]["compatible"], False)
+        ctx = message(text=text, urls=())
+        ctx.parsed = _regex_parse(ctx)
+        with self.assertRaisesRegex(NeedsManual, "阿里云盘分享链接"):
+            await P115Storage().prepare(ctx)
 
     def test_naming_preview_uses_the_unsaved_template(self):
         from reelay.core import runtime

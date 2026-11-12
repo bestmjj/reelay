@@ -4,7 +4,7 @@ from __future__ import annotations
 import unittest
 
 from reelay.core.media import (cn_number, episode_list, episode_of, format_episodes, resolution_label,
-                               resolution_name, resolution_rank, season_of)
+                               resolution_name, resolution_rank, season_of, variety_episode)
 
 
 class EpisodeOfTest(unittest.TestCase):
@@ -21,14 +21,51 @@ class EpisodeOfTest(unittest.TestCase):
             "[字幕组] 某番 S2 - 11v2 (1080p).mkv": (2, 11),
             "[字幕组][某番][07][1080p].mp4": (None, 7),
             "05.mkv": (None, 5),
+            "41 4K.mp4": (None, 41),
+            "106 4K.mp4": (None, 106),
+            "106.2160p.mkv": (None, 106),
+            "106 - 4K HDR.mp4": (None, 106),
+            "106_1080p_HEVC.mp4": (None, 106),
         }
         for name, expected in cases.items():
             with self.subTest(name=name):
                 self.assertEqual(episode_of(name), expected)
 
     def test_years_and_resolutions_are_not_episodes(self):
-        for name in ("House.1080p.03.mkv", "Movie.2023.2160p.mkv", "2021.mkv", "1080.mkv", "Movie.mkv"):
+        for name in ("House.1080p.03.mkv", "Movie.2023.2160p.mkv", "2021.mkv", "1080.mkv",
+                     "Movie.mkv", "2024 4K.mp4", "1080p.mp4", "Season 4K.mp4",
+                     "41 travel 4K.mp4", "4K HDR.mp4", "42 4K movie.mp4"):
             with self.subTest(name=name):
+                self.assertIsNone(episode_of(name)[1])
+
+    def test_variety_periods_dates_and_editions(self):
+        sample = {
+            "20261026.第3期加更.mp4": (3, "bonus"),
+            "20261025.第3期下.mkv": (3, "lower"),
+            "20261024.第3期上.mp4": (3, "upper"),
+            "20261020.第2期还有加更.mp4": (2, "bonus_more"),
+            "20261019.第2期加更.mp4": (2, "bonus"),
+            "20261018.第2期下.mp4": (2, "lower"),
+            "20261017.第2期上.mp4": (2, "upper"),
+            "20261013.第1期还有加更：王安宇脑力下线白敬亭直跺脚.mkv": (1, "bonus_more"),
+            "20261012.第1期加更：王楚然猜词变造词“气疯”沈腾.mp4": (1, "bonus"),
+            "20261010.纯享 第01期上·慢速目击证人纯享.mp4": (1, "pure_upper"),
+            "某节目 - S01E03 - 第 3 期（上） - 2160p.mkv": (3, "upper"),
+            "某节目 - S01E03 - 第 3 期（下）.mp4": (3, "lower"),
+            "某节目 - S01E03 - 第 3 期（加更） - 2160p H265 10bit AAC.mp4": (3, "bonus"),
+            "20261026.第3期.mp4": (3, "main"),
+        }
+        for name, expected in sample.items():
+            with self.subTest(name=name):
+                self.assertEqual(variety_episode(name), expected)
+                self.assertEqual(episode_of(name), (1, expected[0]) if name.startswith("某节目") else (None, expected[0]))
+
+    def test_variety_periods_fail_closed_for_unknown_editions_or_date_only(self):
+        for name in ("20261026.mp4", "20261026.加更.mp4", "第03期未知版.mkv",
+                     "第3期（删减版）.mp4", "第3期 第4期加更.mkv",
+                     "第0期加更.mp4", "第3期上和下.mp4"):
+            with self.subTest(name=name):
+                self.assertIsNone(variety_episode(name))
                 self.assertIsNone(episode_of(name)[1])
 
     def test_season_marker_without_episode(self):

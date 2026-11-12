@@ -2,29 +2,21 @@
 import { confirmDialog } from './confirm';
 import type { IOrganizeConflict, ITransferPartial } from './types';
 
-export type ConflictChoice = 'skip' | 'replace';
+export type ConflictChoice = 'suffix';
 
 export const CONFLICT_DONE: Record<ConflictChoice, string> = {
-  skip: '已排队：删除本次转存的文件',
-  replace: '已排队：覆盖保存',
+  suffix: '已排队：保留旧文件，给新文件加序号',
 };
 
-/** 两种处理都会把一份文件移进 115 回收站，执行前确认。 */
-export function confirmConflict(choice: ConflictChoice, conflict: IOrganizeConflict): Promise<boolean> {
-  const existing = conflict.existing.name ?? '（未知文件名）';
-  const incoming = conflict.incoming.name ?? '（未知文件名）';
-  return confirmDialog(choice === 'skip' ? {
-    title: '删除本次转存的文件？',
-    description: '保留库里原有的文件，本次转存的这份移进 115 回收站。',
-    details: [{ label: '保留', value: existing }, { label: '删除', value: incoming }],
-    confirmText: '删除转存文件',
-    destructive: true,
-  } : {
-    title: '覆盖库里的文件？',
-    description: '本次转存的文件按命名规则放进库里，原有的那份移进 115 回收站。',
-    details: [{ label: '删除', value: existing }, { label: '换成', value: incoming }],
-    confirmText: '覆盖保存',
-    destructive: true,
+/** Default conflict action is non-destructive. */
+export function confirmConflict(_choice: ConflictChoice, conflict: IOrganizeConflict): Promise<boolean> {
+  return confirmDialog({
+    title: '保留库里与新转存的两份文件？',
+    description: '原文件保持不变，新文件用数字后缀避免重名，不删除或覆盖任何一份。',
+    details: [{ label: '原文件', value: conflict.existing.name ?? '（未知）' },
+      { label: '新文件', value: conflict.incoming.name ?? '（未知）' }],
+    confirmText: '保留两份',
+    destructive: false,
   });
 }
 

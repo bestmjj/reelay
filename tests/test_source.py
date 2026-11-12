@@ -248,6 +248,52 @@ class TestSourceBackfillAndAlerts(PipelineCase):
             "SELECT task_id FROM outbox WHERE event='pending_approval'")]
         self.assertEqual(cards, [live.task_id])
 
+    async def test_connected_source_starts_proactive_search_without_interrupting_listener(self):
+        from reelay.main import _source_loop
+
+        called = asyncio.Event()
+
+        class DiscoverySource:
+            name = "fake"
+            backfill_done = True
+            backfilled = 0
+            def configure(self, targets):
+                self.targets = targets
+
+            async def listen(self, emit):
+                await asyncio.Event().wait()
+
+            async def discover_subscriptions(self, emit, active, load, save):
+                self.assert_called_with = (len(active), sorted(self.targets))
+                called.set()
+                return {"status": "ok", "queries": 1, "candidates": 0}
+
+            def health(self):
+                return {"status": "connected"}
+
+        source = DiscoverySource()
+        registry = Registry()
+        registry.add_provider("source", source)
+        pipeline = self.pipeline({
+            "save_dirs": {"默认": "1"},
+            "defaults": {"save_to": "默认"},
+            "sources": [{"bot": "@shareAliyun"}],
+            "providers": {"source": "fake", "notify": ["console"]},
+        }, registry)
+        runner = asyncio.create_task(_source_loop(pipeline, lambda raw: None, poll_interval=0.01))
+        try:
+            await asyncio.wait_for(called.wait(), 1)
+            for _ in range(30):
+                if self.store.health_status().get("subscription_discovery", {}).get("status") == "ok":
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(source.assert_called_with, (0, ["@shareAliyun"]))
+            self.assertEqual(self.store.health_status()["subscription_discovery"]["status"], "ok")
+            self.assertFalse(runner.done())  # periodic search must not close live listening
+        finally:
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+
     async def test_source_loop_sends_one_backfill_summary(self):
         from reelay.main import _source_loop
 

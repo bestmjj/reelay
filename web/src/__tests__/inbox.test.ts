@@ -92,7 +92,7 @@ describe('任务操作的接口与请求体', () => {
   it('确认与重新整理带上保存目录，处理冲突带上选择', () => {
     expect(actionBody('approve', { dir: '剧集' })).toEqual({ save_dir_alias: '剧集' });
     expect(actionBody('reorganize')).toEqual({ save_dir_alias: null });
-    expect(actionBody('resolve_conflict', { conflict: 'replace', dir: '剧集' })).toEqual({ conflict: 'replace' });
+    expect(actionBody('resolve_conflict', { conflict: 'suffix', dir: '剧集' })).toEqual({ conflict: 'suffix' });
     expect(actionBody('retry')).toBeUndefined();
   });
 });

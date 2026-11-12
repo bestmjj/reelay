@@ -23,6 +23,7 @@ from typing import Any, Iterator
 NAMES = {
     "llm_api_key": "AI 接口密钥",
     "tmdb_api_key": "TMDB API Key",
+    "aliyun_refresh_token": "阿里云盘 Refresh Token",
     "telegram_api_id": "Telegram API ID",
     "telegram_api_hash": "Telegram API Hash",
     "control_bot_token": "控制 Bot Token",

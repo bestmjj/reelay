@@ -6,12 +6,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import secrets
 import time
 from typing import Any
 
-from .. import ai, ignored, messages, subscriptions, tmdb, works
-from ..contracts import PipelineContext, TaskState
+from .. import ai, discovery, existing_media, ignored, library_scan_progress, messages, subscriptions, tmdb, works
+from ..contracts import ParsedResource, PipelineContext, RawMessage, TaskState
+from ..parse_rules import parse_share_url, share_provider
+from ..validation import validate_resource
 from ..media import format_episodes
 from ..rules import tv_category
 from .base import ConflictError, NotFoundError, ServiceBase
@@ -20,6 +25,29 @@ log = logging.getLogger("reelay.service")
 
 # 订阅时从 TMDB 取到的题材（{tmdbid: [题材 ID]}），订阅列表按它显示类型，不必每次都查 TMDB
 GENRES = ("subscriptions", "genres")
+
+# Subscription rows are real-time ledger views. The episode tracker report is
+# updated only on its daily run and must not cause an episode already in the
+# current verified ledger to be presented as still missing.
+MAX_VISIBLE_EPISODES = 5000
+SIMULATION_TOKEN_NAMESPACE = "subscription_simulation_promotions"
+SIMULATION_TOKEN_TTL = 30 * 60
+SIMULATION_TOKEN_LIMIT = 60
+
+
+def subscription_unrecorded(have: list[int], total: int | None, report: dict) -> tuple[list[int], bool]:
+    """Unrecorded is NOT proof of absence in the cloud or current unavailability.
+
+    The API continues returning integer episodes to support the old client.
+    Bound potentially enormous user-supplied totals to prevent accidental
+    CPU/memory spikes; expose truncation rather than pretending completeness.
+    """
+    verified = {int(ep) for ep in have if type(ep) is int and ep > 0}
+    previous = {int(ep) for ep in report.get("missing", []) if type(ep) is int and ep > 0}
+    upper = max(int(total or 0), int(report.get("aired") or 0),
+                max(verified, default=0), max(previous, default=0))
+    limited = min(upper, MAX_VISIBLE_EPISODES)
+    return [ep for ep in range(1, limited + 1) if ep not in verified], upper > limited
 
 
 class FollowMixin(ServiceBase):
@@ -34,20 +62,464 @@ class FollowMixin(ServiceBase):
         cfg = self.get_config()
         subs = self.store.subscriptions()
         stored = self.store.stored_series()
+        scan = self.store.state_get("library_scan", "snapshot") or {}
+        observed_files = existing_media.apply_associations(
+            existing_media.scan_observations(self.store),
+            self.store.state_get("media_associations", "confirmed", {}) or {})
         report = (self.pipeline.query("episode_report") or {}).get("series", {})
+        # A wrong-source quarantine withdraws the original task's episode
+        # ledger claim. Do not display that episode as safely received.
+        quarantines = [self.store.disputed_transfer(task_id)
+                       for task_id in self.store.disputed_task_ids()]
         items = []
+        destinations = self.store.state_get("subscription_destinations", "items", {}) or {}
+        discovery_state = self.store.state_items(discovery.NAMESPACE)
         for item in subs:
             titles = {item["title"], *(self.store.titles_for_tmdbid(item["tmdbid"]) if item["tmdbid"] else [])}
             have = sorted(works.episodes(stored, works.identity(item["title"], tmdbid=item["tmdbid"]), item["season"]))
             entry = next((report[f"{title}|S{item['season']:02d}"] for title in titles
                           if f"{title}|S{item['season']:02d}" in report), {})
-            items.append({**item, "have": have, "missing": entry.get("missing", []), "aired": entry.get("aired"),
-                          "category": self._tv_category(item, sorted(titles))})
+            checks = [discovery.safe_status(value) for key, value in discovery_state.items()
+                      if key.rsplit(":", 1)[-1] == str(item["id"])]
+            latest = max(checks, key=lambda check: float(check.get("checked_at") or 0), default=None)
+            observed = existing_media.observed_for_subscription(observed_files, item)
+            missing, missing_truncated = subscription_unrecorded(have, item.get("total"), entry)
+            work = works.identity(item["title"], tmdbid=item["tmdbid"])
+            quarantined = sorted({int(ep) for dispute in quarantines if dispute and dispute.get("active")
+                                  and works.same(dispute["work"], work)
+                                  for season, ep in dispute.get("pairs", [])
+                                  if int(season) == item["season"]})
+            items.append({**item, "have": have, "observed": observed,
+                          "aliases": sorted(titles - {item["title"]}),
+                          "quarantined": quarantined,
+                          "destination": destinations.get(str(item["id"])),
+                          "scan_complete": bool(scan.get("complete")),
+                          "missing": missing, "missing_truncated": missing_truncated,
+                          "aired": entry.get("aired"),
+                          "category": self._tv_category(item, sorted(titles)), "discovery": latest})
         # 转存方式按来源设置，defaults 只是兜底，只报告实际在监听的来源
         deciders = self.pipeline.reg.providers.get("decision", {})
         inactive = [s["bot"] for s in cfg["sources"]
                     if not getattr(deciders.get({**cfg["defaults"], **s}.get("decision")), "releases_subscriptions", False)]
-        return {"items": items, "suggestions": self.subscription_suggestions(subs), "inactive": inactive}
+        return {"items": items, "suggestions": self.subscription_suggestions(subs),
+                "inactive": inactive, "save_dirs": cfg["save_dirs"],
+                "sources": [source["bot"] for source in cfg["sources"]]}
+
+    async def simulate_subscription(self, subscription_id: int, *, text: str | None = None,
+                                    source: str | None = None) -> dict[str, Any]:
+        """Read-only diagnostic: use the real parser/decision, never accept tasks.
+
+        If no message is supplied, use the latest locally received matching
+        message from a configured Telegram source. A subscription alone is not
+        a share or a promise of new episodes; report 'no_sample' honestly.
+        """
+        entry = self.store.subscription(subscription_id)
+        if not entry:
+            raise NotFoundError("该追剧订阅不存在")
+        cfg = self.get_config()
+        sources = [rule["bot"] for rule in cfg["sources"]]
+        if source:
+            matched_sources = [bot for bot in sources if bot.casefold() == source.casefold()]
+            if not matched_sources:
+                raise ValueError("只能测试已配置的 Telegram 监听来源")
+            sources = matched_sources
+        if not sources:
+            return {"status": "no_source", "reason": "请先在设置中配置一个 Telegram 监听来源",
+                    "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
+                    "task_created": False}
+        sample = None
+        example_origin = "pasted" if text and text.strip() else "local"
+        search_problem = ""
+        if text and text.strip():
+            if len(text) > 12000:
+                raise ValueError("模拟消息不能超过 12000 个字符")
+            sample = {"source": sources[0], "text": text.strip(), "urls": []}
+        else:
+            # The received-message store is local and read-only. The background
+            # discoverer will add more recent matching posts as they are found.
+            for bot in sources:
+                for message in self.store.source_messages(bot, limit=200):
+                    if discovery.contains_title(message["text"], entry["title"]):
+                        sample = {"source": bot, "text": message["text"], "urls": message["urls"]}
+                        break
+                if sample:
+                    break
+        if not sample:
+            # A locally empty task history does not mean a configured channel
+            # has never published this show. Search its authorized Telegram
+            # history as a READ-ONLY request to the listener process.
+            for bot in sources:
+                try:
+                    response = await self.source_messages(bot, limit=5, search=entry["title"])
+                except (ValueError, ConflictError) as exc:
+                    search_problem = str(exc)
+                    continue
+                rows = response.get("messages") or []
+                if rows:
+                    msg = rows[0]
+                    sample = {"source": bot, "text": msg["text"], "urls": msg.get("urls") or []}
+                    example_origin = response.get("origin", "telegram_search")
+                    break
+                search_problem = response.get("problem") or "已查询频道历史，没有找到符合条件的分享消息"
+        if not sample:
+            return {"status": "no_sample",
+                    "reason": search_problem or "目前没有可用于模拟的分享消息；可以粘贴频道消息测试。",
+                    "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
+                    "source": sources[0], "task_created": False}
+
+        preview = await self.test_parse(sample["text"], sample["urls"], sample["source"])
+        matched = preview.get("matched_subscription")
+        same = bool(matched and matched["id"] == entry["id"])
+        route = preview.get("routing") or {}
+        decision = preview.get("decision")
+        released = bool(preview.get("released_by_subscription"))
+        if not same:
+            status, reason = "not_matched", "这条消息未匹配到当前订阅的 TMDB 作品与季号"
+        elif not route.get("compatible"):
+            status, reason = "blocked", "分享网盘与来源配置的存储网盘不一致"
+        elif decision == "skip":
+            status, reason = "blocked", "消息被过滤规则拒绝，请检查下方识别轨迹"
+        elif decision == "save" and released:
+            status, reason = "automatic", "订阅新集满足放行条件，将进入自动转存队列"
+        else:
+            status, reason = "manual", "不满足自动放行条件，会进入待审批，请查看识别轨迹"
+        result = {
+            "status": status, "reason": reason,
+            "subscription": {"id": entry["id"], "title": entry["title"], "season": entry["season"]},
+            "source": sample["source"], "example_origin": example_origin, "parsed": preview["parsed"],
+            "matched_subscription": matched,
+            "decision": decision, "routing": route,
+            "target_preview": preview.get("target_preview"),
+            "confidence": preview.get("confidence"),
+            "trail": preview["trail"][-20:],
+            "task_created": False,
+            "share_checked": False, "dedup_checked": False,
+        }
+        parsed = preview.get("parsed") or {}
+        share_url, code, _ = parse_share_url(sample["text"], sample["urls"])
+        # Offer promotion only for an unambiguous single-episode preview
+        # with a real share extracted from the server-selected message.
+        eligible = bool(
+            status == "automatic" and entry.get("auto")
+            and parsed.get("is_media") is True
+            and parsed.get("media_type") in ("tv", "anime")
+            and type(parsed.get("season")) is int
+            and parsed["season"] == entry["season"]
+            and type(parsed.get("episodes")) is list
+            and len(parsed["episodes"]) == 1
+            and type(parsed["episodes"][0]) is int
+            and parsed.get("share_code") == code
+            and share_provider(share_url) in ("aliyun", "p115")
+            and route.get("share_provider") == share_provider(share_url)
+            and route.get("target_storage") == share_provider(share_url)
+            and sample.get("source") in sources
+        )
+        if eligible:
+            try:
+                validate_resource(dict(parsed))
+            except ValueError:
+                eligible = False
+        if eligible:
+            now = time.time()
+            previews = self.store.state_items(SIMULATION_TOKEN_NAMESPACE)
+            for key, row in previews.items():
+                if now - float((row or {}).get("created_at") or 0) > SIMULATION_TOKEN_TTL:
+                    self.store.state_delete(SIMULATION_TOKEN_NAMESPACE, key)
+            active = sorted(
+                ((key, row) for key, row in previews.items()
+                 if now - float((row or {}).get("created_at") or 0) <= SIMULATION_TOKEN_TTL),
+                key=lambda item: float(item[1].get("created_at") or 0))
+            for key, _ in active[:max(0, len(active) - SIMULATION_TOKEN_LIMIT + 1)]:
+                self.store.state_delete(SIMULATION_TOKEN_NAMESPACE, key)
+            token = secrets.token_urlsafe(24)
+            self.store.state_set(SIMULATION_TOKEN_NAMESPACE, token, {
+                "created_at": now, "subscription_id": entry["id"],
+                "subscription": {field: entry.get(field) for field in
+                                 ("id", "title", "season", "tmdbid", "auto", "start_episode")},
+                "source_rule": self.pipeline.rule_for(sample["source"]),
+                "sample": {"source": sample["source"], "text": sample["text"],
+                           "urls": list(sample["urls"])},
+                "parsed": parsed,
+            })
+            result["simulation_token"] = token
+            result["promotion_expires_in"] = SIMULATION_TOKEN_TTL
+        return result
+
+    async def submit_simulated_subscription(self, subscription_id: int, token: str) -> dict[str, Any]:
+        """Promote ONE verified automatic preview to a durable normal task.
+
+        The token is server-generated, single-use, and contains the exact raw
+        source text, entity URLs, and parsed result of the simulation. It
+        never calls a cloud write; the normal Worker still checks source
+        files, dedup, destination, and transfer receipt before organizing.
+        """
+        if not token or len(token) > 128:
+            raise ConflictError("模拟凭证无效；请重新模拟后再提交")
+        record = self.store.state_take(SIMULATION_TOKEN_NAMESPACE, token)
+        if (not isinstance(record, dict)
+                or record.get("subscription_id") != subscription_id
+                or time.time() - float(record.get("created_at") or 0) > SIMULATION_TOKEN_TTL):
+            raise ConflictError("模拟已过期或已经提交，请重新模拟；没有重复发送转存")
+        entry = self.store.subscription(subscription_id)
+        if not entry or not entry.get("auto") or any(
+                entry.get(field) != record["subscription"].get(field)
+                for field in ("id", "title", "season", "tmdbid", "auto", "start_episode")):
+            raise ConflictError("订阅已更改或停止自动转存，请重新模拟")
+        sample = record["sample"]
+        source = sample["source"]
+        configured = {str(rule["bot"]).casefold() for rule in self.get_config()["sources"]}
+        if (source.casefold() not in configured
+                or self.pipeline.rule_for(source) != record["source_rule"]):
+            raise ConflictError("Telegram 来源或转存规则已改变，请重新模拟")
+        parsed = ParsedResource(**validate_resource(dict(record["parsed"])))
+        share_url, code, _ = parse_share_url(sample["text"], sample["urls"])
+        if (not parsed.is_media or parsed.is_ad
+                or parsed.media_type not in ("tv", "anime")
+                or parsed.season != entry["season"]
+                or len(parsed.episodes) != 1
+                or not parsed.title or not parsed.share_code
+                or code != parsed.share_code
+                or share_provider(share_url) != self.pipeline.rule_for(source).get("storage")):
+            raise ConflictError("模拟的作品、来源或唯一集号无法再次核对，请重新模拟")
+        # Repeat promotions of the same source text/episode have a stable
+        # message ID, even if the user runs a brand-new simulation.
+        digest = hashlib.sha256(json.dumps({
+            "subscription": subscription_id, "source": source,
+            "text": sample["text"], "urls": sample["urls"],
+            "share_code": parsed.share_code, "season": parsed.season,
+            "episodes": parsed.episodes,
+        }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:32]
+        raw = RawMessage(source=source, msg_id="simulation-" + digest,
+                         text=sample["text"], urls=sample["urls"],
+                         extra={"simulation_import": True, "simulation_subscription_id": subscription_id})
+        ctx = PipelineContext(raw=raw)
+        ctx.ns("task")["promoted_simulation"] = {
+            "subscription_id": subscription_id, "parsed": record["parsed"],
+        }
+        ctx.log("用户确认复用订阅模拟的识别结果；创建正式任务，仍须重新核验真实云盘与去重")
+        accepted = await self.pipeline.accept(ctx)
+        if not accepted:
+            raise ConflictError("这条模拟资源已有任务，不会重复提交；请查看任务列表")
+        return {"task_id": accepted.task_id, "state": accepted.state.value,
+                "note": "已提交正式任务，沿用模拟识别结果；Worker 将重新核验分享、目标与去重。"
+                        "规则变化或来源不匹配时会转人工，不直接复制。" }
+
+    def scan_existing_subscription_folder(self, subscription_id: int,
+                                          provider: str, cid: str) -> dict[str, Any]:
+        """User-selected folder inventory, not a saved destination or a transfer.
+
+        Keep its resume cursor separate from the configured library scan. The
+        selected folder's title is only a *candidate* for this show; individual
+        remote file identities require explicit selection and live verification.
+        """
+        from ..media import season_of
+
+        item = self.store.subscription(subscription_id)
+        if not item:
+            raise NotFoundError("该订阅不存在")
+        if not item.get("tmdbid"):
+            raise ValueError("请先选择正确的 TMDB 作品，再关联已有视频")
+        if provider not in ("p115", "aliyun") or not isinstance(cid, str) or len(cid) > 128:
+            raise ValueError("请选择有效的网盘和文件夹")
+        if provider == "p115":
+            if not cid.isascii() or not cid.isdecimal() or cid == "0":
+                raise ValueError("请选择 115 网盘中的具体影视文件夹，不能选根目录")
+        elif cid in ("0", "root") or not cid.isascii() or not cid.replace("_", "").replace("-", "").isalnum():
+            raise ValueError("请选择阿里云盘资源库中的具体影视文件夹，不能选根目录")
+
+        storage = self.pipeline.reg.get_provider("storage", provider)
+        if not storage.ready():
+            raise ValueError("网盘尚未登录，请在设置中连接后选择")
+        with self.pipeline.scope():
+            listing = storage.browse(cid, 0, 1)
+        nodes = listing.get("path") or []
+        if not nodes or str(nodes[-1].get("id")) != cid:
+            raise ConflictError("选中目录的实际路径无法核验，请重新选择")
+        drive_id = str(storage.client.drive_id) if provider == "aliyun" else "115"
+        if provider == "aliyun" and str(listing.get("drive_id")) != drive_id:
+            raise ConflictError("阿里云盘资源库发生变化，请刷新后重新选择")
+        path = " / ".join(str(node.get("name") or "") for node in nodes
+                          if str(node.get("id")) not in ("0", "root"))
+        # Root folder names may carry "Season 02", even if video names only
+        # contain "41 4K.mp4". This preserves the actual season boundary.
+        folder_season = next((s for node in reversed(nodes) if
+                              (s := season_of(str(node.get("name") or ""))) is not None), None)
+
+        key = str(subscription_id)
+        scopes = self.store.state_get("subscription_folder_scan", "scopes", {}) or {}
+        old = scopes.get(key) or {}
+        same = (old.get("provider") == provider and old.get("cid") == cid
+                and old.get("drive_id") == drive_id)
+        scan_cfg = {"save_dirs": {"所选文件夹": f"aliyun:{cid}" if provider == "aliyun" else cid},
+                    "defaults": {"storage": provider, "save_to": "所选文件夹"},
+                    "sources": []}
+        snapshot, progress = library_scan_progress.step(
+            scan_cfg, lambda name: self.pipeline.reg.get_provider("storage", name),
+            cursor=old.get("cursor") if same else None)
+        if not snapshot["scanned_roots"] and not snapshot["has_more"]:
+            raise ValueError("无法读取所选文件夹：" + ("；".join(snapshot["errors"][:2]) or "请检查目录权限"))
+        matched, skipped = [], 0
+        for row in progress["records"]:
+            # Ignore internal staging, unrelated seasons and conflicting work IDs.
+            if any(str(part).startswith(".reelay-") for part in row.get("parents") or []):
+                skipped += 1
+                continue
+            ep = row.get("episode")
+            explicit_season = season_of(row["name"])
+            season = explicit_season or next(
+                (s for part in reversed(row.get("parents") or []) if
+                 (s := season_of(part)) is not None), folder_season or 1)
+            if (type(ep) is not int or ep <= 0 or season != item["season"]
+                    or (row.get("tmdbid") and row["tmdbid"] != item["tmdbid"])):
+                skipped += 1
+                continue
+            matched.append({**row, "title": item["title"], "media_type": "tv",
+                            "season": season, "alias": "手选文件夹",
+                            "parents": [*[node.get("name", "") for node in nodes
+                                           if str(node.get("id")) not in ("0", "root")],
+                                        *(row.get("parents") or [])]})
+        scopes[key] = {"provider": provider, "cid": cid, "drive_id": drive_id,
+                       "path": path, "snapshot": snapshot,
+                       "cursor": progress if snapshot["has_more"] else None,
+                       "records": matched, "skipped": skipped}
+        self.store.state_set("subscription_folder_scan", "scopes", scopes)
+        return {"ok": True, "provider": provider, "path": path,
+                "file_count": snapshot["file_count"], "eligible": len(matched),
+                "skipped": skipped, "complete": snapshot["complete"],
+                "has_more": snapshot["has_more"], "errors": snapshot["errors"]}
+
+    def set_existing_subscription_destination(self, subscription_id: int, *,
+                                              naming_mode: str = "simple") -> dict[str, Any]:
+        """Opt-in: send FUTURE subscribed releases directly to the scanned old folder.
+
+        Does not move/rename existing files, change global aliases or mutate
+        queued/finished tasks. A fresh resource-drive and path read is mandatory.
+        """
+        item = self.store.subscription(subscription_id)
+        if not item:
+            raise NotFoundError("该订阅不存在")
+        if naming_mode not in ("simple", "default"):
+            raise ValueError("只能选择保持原命名或标准命名")
+        scan = (self.store.state_get("subscription_folder_scan", "scopes", {}) or {}).get(str(subscription_id))
+        if not scan or not scan.get("snapshot", {}).get("complete") or not scan.get("records"):
+            raise ValueError("请先选择含有已识别剧集的旧视频文件夹，并完成只读扫描")
+        provider_name, cid = scan["provider"], scan["cid"]
+        storage = self.pipeline.reg.get_provider("storage", provider_name)
+        if not storage.ready():
+            raise ConflictError("网盘未登录，不能设置未来转存目录")
+        with self.pipeline.scope():
+            live = storage.browse(cid, 0, 1)
+            real_path = storage.dir_path(cid)
+        disk = str(storage.client.drive_id) if provider_name == "aliyun" else "115"
+        if not real_path or disk != scan["drive_id"] or str(live.get("drive_id")) != disk:
+            raise ConflictError("所选文件夹所属网盘发生变化，请重新扫描")
+        if not live.get("path") or str(live["path"][-1].get("id")) != cid:
+            raise ConflictError("无法确认所选文件夹的真实 ID，请重新选择")
+        actual = "/" + "/".join(str(part.get("name") or "") for part in live["path"]
+                                if str(part.get("id")) not in ("0", "root"))
+        if actual != real_path:
+            raise ConflictError("所选文件夹的层级与云盘实际路径不一致，请重新选择")
+        if naming_mode == "simple":
+            from ..media import episode_of
+            import re
+            # Never guess the user's naming convention from one unrelated file.
+            pattern = re.compile(rf"^{re.escape(item['title'])}-S{item['season']:02d}E\d{{2,4}}\.[A-Za-z0-9]+$", re.I)
+            if not any(pattern.fullmatch(row["name"]) and
+                       episode_of(row["name"])[1] == row["episode"]
+                       for row in scan["records"]):
+                raise ValueError("旧文件不是「片名-S01E01.mp4」格式，不能自动套用此命名")
+        entry = {"provider": provider_name, "cid": cid, "drive_id": disk,
+                 "path": real_path, "naming_mode": naming_mode}
+        destinations = self.store.state_get("subscription_destinations", "items", {}) or {}
+        destinations[str(subscription_id)] = entry
+        self.store.state_set("subscription_destinations", "items", destinations)
+        return {"ok": True, "destination": entry,
+                "note": "仅影响之后接收的订阅新集；现有文件和已排队的任务均不改动"}
+
+    def clear_existing_subscription_destination(self, subscription_id: int) -> dict[str, Any]:
+        if not self.store.subscription(subscription_id):
+            raise NotFoundError("该订阅不存在")
+        destinations = self.store.state_get("subscription_destinations", "items", {}) or {}
+        destinations.pop(str(subscription_id), None)
+        self.store.state_set("subscription_destinations", "items", destinations)
+        return {"ok": True}
+
+    def existing_subscription_candidates(self, subscription_id: int, *, offset: int = 0) -> dict[str, Any]:
+        """Only suggest strongly named historical files; never move or mark transfers."""
+        item = self.store.subscription(subscription_id)
+        if not item:
+            raise NotFoundError("该订阅不存在")
+        scanned = existing_media.scan_observations(self.store)
+        found = existing_media.candidates_for_subscription(scanned, item, limit=10000)
+        if not 0 <= offset <= len(found):
+            raise ValueError("分页偏移量无效")
+        bound = self.store.state_get("media_associations", "confirmed", {}) or {}
+        folder = (self.store.state_get("subscription_folder_scan", "scopes", {}) or {}).get(str(subscription_id))
+        return {"items": [{
+            "file_key": existing_media.record_key(row), "provider": row["provider"],
+            "alias": row["alias"], "drive_id": row["drive_id"], "name": row["name"],
+            "path": "/".join([*row.get("parents", []), row["name"]]),
+            "episode": row["episode"], "season": row["season"],
+            "size": row.get("size"),
+            "associated": existing_media.same_observed_file(bound.get(existing_media.record_key(row), {}), row),
+        } for row in found[offset:offset + 50]], "total": len(found),
+            "next_offset": offset + 50 if offset + 50 < len(found) else None,
+            "scan_complete": bool((folder or {}).get("snapshot", {}).get("complete")
+                                  if folder else (self.store.state_get("library_scan", "snapshot") or {}).get("complete")),
+            "folder": ({key: folder.get(key) for key in
+                        ("provider", "cid", "path", "drive_id", "skipped", "snapshot")} if folder else None),
+            "subscription": {"id": item["id"], "title": item["title"], "season": item["season"],
+                             "tmdbid": item.get("tmdbid")}}
+
+    async def associate_existing_subscription(self, subscription_id: int,
+                                              file_keys: list[str]) -> dict[str, Any]:
+        """User-confirmed show identity for existing cloud IDs; all validation is read-only.
+
+        No file mutation and no verified transfer dedup mark. The authoritative
+        transfer gate rechecks the remote file each time before skipping.
+        """
+        item = self.store.subscription(subscription_id)
+        if not item:
+            raise NotFoundError("该订阅不存在")
+        if not item.get("tmdbid"):
+            raise ValueError("需要先为订阅匹配正确的 TMDB 作品，才能关联历史文件")
+        if not file_keys or len(file_keys) > 50 or len(set(file_keys)) != len(file_keys):
+            raise ValueError("请选择 1–50 个不重复的历史文件")
+        records = existing_media.scan_observations(self.store)
+        candidates = {existing_media.record_key(row): row
+                      for row in existing_media.candidates_for_subscription(records, item, limit=10000)}
+        if not set(file_keys).issubset(candidates):
+            raise ConflictError("所选文件与当前订阅不匹配，或扫描索引已变化，请重新预览")
+        from ..media import is_video
+        for key in file_keys:
+            record = candidates[key]
+            if not is_video(record["name"]):
+                raise ConflictError("不能把非视频文件关联为剧集")
+            provider = self.pipeline.reg.get_provider("storage", record["provider"])
+            if not provider.ready():
+                raise ConflictError("网盘未登录，禁止盲目关联")
+            if record["provider"] == "aliyun" and str(provider.client.drive_id) != record["drive_id"]:
+                raise ConflictError("阿里云盘资源库已变化，请重新扫描")
+            fs = provider.library()
+            try:
+                with self.pipeline.scope():
+                    valid = await asyncio.to_thread(existing_media.verify_record, fs, record)
+            except Exception:
+                valid = False
+            if not valid:
+                raise ConflictError("已有文件可能移动、改名或大小变化，请重新扫描后再关联")
+        confirmed = self.store.state_get("media_associations", "confirmed", {}) or {}
+        for key in file_keys:
+            row = candidates[key]
+            confirmed[key] = {
+                **{field: row.get(field) for field in
+                   ("provider", "drive_id", "id", "parent_id", "name", "size", "sha1")},
+                "tmdbid": item["tmdbid"], "title": item["title"],
+                "season": item["season"], "year": row.get("year"),
+            }
+        self.store.state_set("media_associations", "confirmed", confirmed)
+        return {"ok": True, "associated": len(file_keys), "file_keys": file_keys,
+                "note": "仅确认历史文件对应作品；没有移动或转存，后续去重仍会实时核验网盘文件"}
 
     def find_subscription(self, item: dict[str, Any]) -> dict[str, Any]:
         """按 id，或片名、季与 tmdbid 找到一条订阅；没有时抛 NotFoundError。"""
@@ -175,6 +647,8 @@ class FollowMixin(ServiceBase):
     async def add_subscription(self, item: dict[str, Any]) -> dict[str, Any]:
         """新增订阅；同时返回待审批里属于这部剧这一季的任务，供用户一并批准。"""
         entry = subscriptions.normalize(item)
+        if entry["save_to"] and entry["save_to"] not in self.get_config()["save_dirs"]:
+            raise ValueError(f"订阅指定的保存目录「{entry['save_to']}」不存在")
         record = self.store.add_subscription(subscriptions.key(entry), entry)
         if record is None:
             raise ConflictError(f"已经订阅过《{entry['title']}》第 {entry['season']} 季")
@@ -209,6 +683,28 @@ class FollowMixin(ServiceBase):
                 pass
         return await self.add_subscription(item)
 
+    def set_subscription_destination(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Set or clear a per-season folder alias without changing existing queued tasks."""
+        found = self.find_subscription(item)
+        alias = item.get("save_to")
+        if alias is not None and (type(alias) is not str or not alias.strip() or alias != alias.strip()):
+            raise ValueError("保存目录必须是已有的目录别名，或 null（按来源自动保存）")
+        if alias and alias not in self.get_config()["save_dirs"]:
+            raise ValueError(f"保存目录「{alias}」不存在")
+        if not self.store.set_subscription_destination(found["id"], alias):
+            raise NotFoundError("这条订阅已经不存在")
+        return self.store.subscription(found["id"])
+
+    def set_subscription_start(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Set an explicit episode floor for future automatic releases."""
+        found = self.find_subscription(item)
+        floor = item.get("start_episode")
+        if floor is not None and (type(floor) is not int or not 1 <= floor <= 100000):
+            raise ValueError("最早自动接收集号只能是 1–100000，或留空")
+        if not self.store.set_subscription_start(found["id"], floor):
+            raise NotFoundError("该订阅已不存在")
+        return self.store.subscription(found["id"])
+
     def reopen_subscription(self, item: dict[str, Any]) -> None:
         """已完结的订阅继续订阅：恢复自动放行与缺集巡检（如出了特别篇、补了集）。"""
         found = self.find_subscription(item)
@@ -218,6 +714,9 @@ class FollowMixin(ServiceBase):
     async def remove_subscription(self, item: dict[str, Any]) -> None:
         found = self.find_subscription(item)
         self.store.remove_subscription(found["id"])
+        destinations = self.store.state_get("subscription_destinations", "items", {}) or {}
+        if destinations.pop(str(found["id"]), None):
+            self.store.state_set("subscription_destinations", "items", destinations)
 
     async def _remember_genres(self, item: dict[str, Any]) -> None:
         """还没有这部剧的入库任务时，从 TMDB 记下它的题材，订阅列表据此显示类型（动漫、综艺……）。"""

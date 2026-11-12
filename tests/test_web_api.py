@@ -32,6 +32,20 @@ class TestManagementApi(WebCase):
         self.assertIn("save_dirs", response.json()["config"])
         self.assertNotIn("REELAY_115_COOKIES", response.text)
 
+    def test_directory_picker_selects_aliyun_without_115_login(self):
+        provider = self.app.state.pipeline.reg.get_provider("storage", "aliyun")
+        with patch.object(provider, "browse", return_value={
+            "items": [{"id": "folder_123", "name": "动漫"}],
+            "cid": "0", "path": [{"id": "0", "name": "根目录"}],
+            "next_offset": None, "via": "aliyun",
+        }) as browse:
+            result = self.client.get("/api/storage/dirs", params={"provider": "aliyun", "cid": "0"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["items"][0]["id"], "folder_123")
+        browse.assert_called_once_with("0", 0, 100)
+        self.assertEqual(self.client.get("/api/storage/dirs", params={
+            "provider": "unknown", "cid": "0"}).status_code, 422)
+
     def test_logs_can_be_cleared(self):
         root = self.root
         (root / "reelay.log").write_text("2026-10-23 10:00:00 INFO reelay | 一行\n", encoding="utf-8")
@@ -146,6 +160,18 @@ class TestManagementApi(WebCase):
         store.heartbeat("p115_cookie", status="expired", error="登录失效", check_interval=30)
         self.assertEqual(p115_status(), "expired")
 
+    def test_search_fetch_request_is_migrated_and_remains_read_only(self):
+        store = self.app.state.store
+        columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(source_fetches)")}
+        self.assertIn("search_query", columns)
+        request_id = store.request_source_fetch("@shareAliyun", 5, search="牧神记")
+        requests = store.claim_source_fetches()
+        self.assertEqual(requests[0]["id"], request_id)
+        self.assertEqual(requests[0]["search_query"], "牧神记")
+        self.assertEqual(store.counts_by_state(), {})
+        with self.assertRaises(ValueError):
+            store.request_source_fetch("@shareAliyun", 5, search="")
+
     def test_failed_delivery_can_be_requeued_without_mutating_resource_task(self):
         from reelay.core.contracts import TaskState
         store = self.app.state.store
@@ -160,6 +186,11 @@ class TestManagementApi(WebCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("snapshot", response.text)
         self.assertEqual(response.json()["items"][0]["attempts"], 8)
+        summary = self.client.get("/api/dashboard").json()
+        self.assertEqual(summary["failed_deliveries"][0]["id"], row["id"])
+        self.assertEqual(summary["failed_deliveries"][0]["error"], "TimeoutError")
+        self.assertNotIn("snapshot", str(summary["failed_deliveries"]))
+        self.assertNotIn("text", summary["failed_deliveries"][0])
         self.assertEqual(self.client.post(f"/api/deliveries/{row['id']}/retry").status_code, 200)
         self.assertEqual(self.client.post(f"/api/deliveries/{row['id']}/retry").status_code, 409)
         self.assertEqual(store.get_task(ctx.task_id).state, TaskState.DONE)

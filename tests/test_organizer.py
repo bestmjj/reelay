@@ -57,6 +57,22 @@ class TestLibraryRouter(unittest.TestCase):
         asyncio.run(self.router.run(c))
         self.assertEqual(c.trail[-1][9:], "按媒体类型归入「剧集」")
 
+    def test_category_alias_does_not_cross_clouds(self):
+        from reelay.core import runtime
+        from reelay.plugins.organizer import route
+        cfg = normalize_config({"save_dirs": {
+            "默认": "2", "动漫": "3", "阿里动漫": "aliyun:Folder_abc",
+            "阿里来源": "aliyun:0"}})
+        runtime.set_process_config(cfg)
+        resource = self._ctx(media_type="movie", genre_ids=[16]).parsed
+        target = route(resource, {"save_to": "阿里来源", "storage": "aliyun"}, current="阿里来源")
+        self.assertEqual(target["alias"], "阿里来源")
+        self.assertEqual(target["relative_category"], "动漫/动画电影")
+        self.assertIn("另一网盘", target["note"])
+        target = route(resource, {"save_to": "默认", "storage": "p115"}, current="默认")
+        self.assertEqual(target["alias"], "动漫")
+        self.assertEqual(target["relative_category"], "动画电影")
+
     def test_media_type_layout_without_anime_folder(self):
         self._layout("media_type", type_dirs={"movie": "电影", "tv": "剧集", "anime": ""})
         self.assertEqual(self._routed(media_type="anime"), ("剧集", ""))

@@ -243,7 +243,11 @@ class TestMultiSeasonAndShareProbe(ServiceCase):
             return await (provider or SubscriptionDecision()).decide(ctx)
 
     async def test_subscription_uses_the_share_season_and_pins_it(self):
-        ctx = self.probed([(2, 1), (2, 2)])
+        # Explicit one-episode update is safe to autopromote, a two-episode
+        # historical pack is not (avoid blind recopying old episodes).
+        historical = self.probed([(2, 1), (2, 2)], msg_id="oldpack")
+        self.assertEqual(await self.decide(historical), Decision.ASK)
+        ctx = self.probed([(2, 2)])
         self.assertEqual(await self.decide(ctx), Decision.SAVE)
         self.assertEqual(ctx.parsed.season, 2)  # 转存时只取订阅的这一季
         self.assertTrue(any("记为第 2 季" in line for line in ctx.trail))

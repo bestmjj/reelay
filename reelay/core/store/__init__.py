@@ -7,6 +7,7 @@ from .base import (DEDUP_EPISODE, DEDUP_MESSAGE, DEDUP_SHARE, MIGRATIONS, SCHEMA
                    _dump_ctx, _load_ctx)
 from .configs import ConfigSnapshotRepository
 from .dedup import DedupRepository
+from .disputes import DisputedTransferRepository
 from .feedback import FeedbackRepository
 from .follow import FollowRepository
 from .health import HealthRepository
@@ -21,7 +22,8 @@ __all__ = ["Store", "DEDUP_EPISODE", "DEDUP_MESSAGE", "DEDUP_SHARE", "MIGRATIONS
            "_dump_ctx", "_load_ctx"]
 
 
-class Store(TaskRepository, DedupRepository, OutboxRepository, HealthRepository, PluginStateRepository,
+class Store(TaskRepository, DedupRepository, DisputedTransferRepository,
+            OutboxRepository, HealthRepository, PluginStateRepository,
             SessionRepository, FeedbackRepository, SourceRepository, FollowRepository, ConfigSnapshotRepository,
             ReportRepository, Database):
     """线程安全的 SQLite 封装：各领域的读写方法来自对应的仓储，连接与锁来自 ``Database``。"""

@@ -158,5 +158,17 @@ class TestSecretStore(unittest.TestCase):
             self.assertEqual(secret_store.get("llm_api_key"), "k")
 
 
+class AliyunDirectoryConfigTests(unittest.TestCase):
+    def test_provider_qualified_directory_survives_normalization(self):
+        cfg = normalize_config({"save_dirs": {"默认": "0", "动漫": "aliyun:folder_Abc-123"}})
+        self.assertEqual(cfg["save_dirs"]["默认"], "0")
+        self.assertEqual(cfg["save_dirs"]["动漫"], "aliyun:folder_Abc-123")
+
+    def test_invalid_directory_reference_is_rejected(self):
+        for ref in ("aliyun:", "aliyun:../private", "aliyun:bad/name", "dropbox:file", "-1"):
+            with self.subTest(ref=ref), self.assertRaises(ValueError):
+                normalize_config({"save_dirs": {"默认": ref}})
+
+
 if __name__ == "__main__":
     unittest.main()

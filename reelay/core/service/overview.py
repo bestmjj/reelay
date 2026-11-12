@@ -27,7 +27,13 @@ class OverviewMixin(ServiceBase):
             TaskState.SAVING, TaskState.STORED, TaskState.ORGANIZING,
         ))
         connections = self.connection_status()
-        live_ready = connections["telegram"]["configured"] and connections["p115"]["configured"]
+        self.pipeline.reload_config()
+        defaults = self.pipeline.cfg["defaults"]
+        rules = self.pipeline.cfg.get("sources") or [defaults]
+        storages = {rule.get("storage") or defaults["storage"] for rule in rules}
+        live_ready = connections["telegram"]["configured"] and all(
+            connections.get(name, {}).get("configured", True) for name in storages
+        )
         health = self.store.health_status()
         worker = health.get("worker", {})
         source = health.get("source", {})
@@ -45,6 +51,13 @@ class OverviewMixin(ServiceBase):
             "alerts": self.store.active_alerts(),
             "recent": self._recent(),
             "deliveries": self.store.delivery_counts(),
+            # Historical failed deliveries remain failed after Bot reconnects.
+            # Show bounded per-recipient diagnostics instead of guessing the Bot is offline.
+            "failed_deliveries": [
+                {key: item[key] for key in ("id", "kind", "event", "target", "attempts",
+                                             "error", "updated_at")}
+                for item in self.store.list_deliveries(status="failed", limit=5)
+            ],
             "config_revision": self.pipeline.revision,
             "mode": "live" if live_running else ("not_running" if live_ready else "not_configured"),
             "version": __version__,
@@ -69,6 +82,10 @@ class OverviewMixin(ServiceBase):
                 "configured": self._p115_configured(),
                 "label": "115 网盘",
             },
+            "aliyun": {
+                "configured": bool(secret_store.get("aliyun_refresh_token")),
+                "label": "阿里云盘",
+            },
             "llm": {
                 "configured": bool(secret_store.get("llm_api_key")),
                 "label": "AI 解析",
@@ -79,10 +96,14 @@ class OverviewMixin(ServiceBase):
             },
         }
         health = self.store.health_status()
-        observed_as = {"telegram": "source", "p115": "p115_cookie"}
+        observed_as = {"telegram": "source", "p115": "p115_cookie", "aliyun": "aliyun"}
         for key, conn in connections.items():
             conn["status"] = "unverified" if conn["configured"] else "not_configured"
             observation = health.get(observed_as.get(key, key))
+            # A deleted Aliyun credential must never appear connected solely
+            # because a previously successful probe remains in runtime_health.
+            if key == "aliyun" and not conn["configured"]:
+                continue
             if observation and observation.get("status") != "unknown":
                 stale = observation["stale"]
                 if observation.get("check_interval"):  # 定时探活：超过两个探活周期没有新结果才算过期
@@ -101,12 +122,40 @@ class OverviewMixin(ServiceBase):
         from ..auth115 import get_store
         return get_store().has_cookie
 
+    @staticmethod
+    def _skip_info(ctx: PipelineContext | None) -> dict[str, str | None]:
+        """Include historical dedup skips whose snapshots predate skip_kind.
+
+        Use the durable trail, never infer that an approved task was copied.
+        """
+        if not ctx or ctx.state != TaskState.SKIPPED:
+            return {"skip_kind": None, "skip_reason": None}
+        saved = (ctx.meta.get("task") or {}).get("skip") or {}
+        if saved.get("kind"):
+            return {"skip_kind": saved["kind"], "skip_reason": saved.get("reason")}
+        for line in reversed(ctx.trail):
+            if "去重命中" in line or "均已入库" in line:
+                return {"skip_kind": "duplicate", "skip_reason": line.split(" ", 1)[-1][:500]}
+            if "管理端忽略" in line or "用户明确点击忽略" in line:
+                return {"skip_kind": "user", "skip_reason": "用户主动忽略了这条任务"}
+        return {"skip_kind": None, "skip_reason": None}
+
     def list_tasks(self, **filters: Any) -> list[dict[str, Any]]:
         """state 可以是逗号分隔的多个状态，如 "received,queued,saving"。"""
         state_value = filters.pop("state", None)
         states = [TaskState(item.strip()) for item in str(state_value).split(",") if item.strip()] \
             if state_value else None
-        return self.store.list_tasks(states=states, **filters)
+        rows = self.store.list_tasks(states=states, **filters)
+        # A historical DONE receipt can be disputed without changing the
+        # immutable task history. Never render a misleading green-only status.
+        quarantined = self.store.disputed_task_ids()
+        result = []
+        for row in rows:
+            item = {**row, "wrong_source_quarantined": row["task_id"] in quarantined}
+            if row["state"] == TaskState.SKIPPED.value and not row.get("skip_kind"):
+                item.update(self._skip_info(self.store.get_task(row["task_id"])))
+            result.append(item)
+        return result
 
     def explanation(self, task_id: str, state: str | None = None) -> dict | None:
         """失败解释扩展写下的原因与建议操作（见 plugins/failure_explainer/）；与任务当前状态不符的旧解释不返回。"""
@@ -127,6 +176,10 @@ class OverviewMixin(ServiceBase):
             raise NotFoundError("任务不存在")
         ctx = self.store.get_task(task_id)
         record["actions"] = self.task_actions(ctx)
+        # Make the actual source provenance visible even for a completed task.
+        # A verified copy does not establish the correctness of its media.
+        record["source_audit"] = self.transfer_source_audit(task_id)
+        record.update(self._skip_info(ctx))
         record.update(self._auto_target(ctx if record["state"] == TaskState.PENDING_APPROVAL.value else None))
         if record["state"] in (TaskState.FAILED.value, TaskState.NEED_MANUAL.value):
             record["explanation"] = self.explanation(task_id, record["state"])
