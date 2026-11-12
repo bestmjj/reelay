@@ -78,7 +78,8 @@ interface TaskMeta {
   share_selection?: { folder_id?: string; path?: string; file_id?: string; only_episodes?: number[];
     file_name?: string; file_path?: string; file_size?: number };
   task?: { force_single_copy?: { season: number; episode: number };
-    force_missing_range?: { season: number; episodes: number[]; effective_episodes?: number[] } };
+    force_missing_range?: { season: number; episodes: number[]; effective_episodes?: number[] };
+    force_copy_all?: { season: number; approved_files?: Array<{ id: string; name: string; episode: number }> } };
 }
 
 export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDetailSheetProps) {
@@ -174,9 +175,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         : actionBody(action, { dir: targetDir, conflict });
       await taskApi.act(detail.task_id, ACTION_ENDPOINT[action], body);
       finish(conflict ? CONFLICT_DONE[conflict]
-        : action === 'approve' && forcedRange
-          ? '已加入缺集核验队列；仅复制最终云盘目录实际缺少的集数'
-          : ACTION_DONE[action]);
+        : action === 'approve' && forcedAll
+          ? '已加入全部转存队列；所选来源的每一集都会安全复制，不会删除旧文件'
+          : action === 'approve' && forcedRange
+            ? '已加入缺集核验队列；仅复制最终云盘目录实际缺少的集数'
+            : ACTION_DONE[action]);
     } catch (err) {
       toast.error(errorMessage(err, '操作失败'));
     } finally {
@@ -281,12 +284,14 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
     setShareFolderBusy(true);
     try {
       const preview = await taskApi.chooseShareFolder(
-        detail.task_id, shareFolderId, rememberShareFolder,
+        detail.task_id, shareFolderId, forcedAll ? false : rememberShareFolder,
       );
       setShareFolders(preview);
       setShareFolderId(preview.selected_folder_id ?? '');
       setShareFileId('');
-      toast.success('已选定分享来源文件夹；可在安全核验后转存指定集');
+      toast.success(forcedAll
+        ? '已锁定该来源文件夹；全部集数将在确认入队前再次核验'
+        : '已选定分享来源文件夹；可在安全核验后转存指定集');
       loaded.reload();
       onChanged?.();
     } catch (err) {
@@ -330,6 +335,32 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       onChanged?.();
     } catch (err) {
       toast.error(errorMessage(err, '无法启用强制转存'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const forceCopyAll = async () => {
+    if (!detail || !window.confirm(
+      '确定要复制选定分享版本中的全部剧集吗？\\n即使原来有入库记录、目标目录已有相同集数，也会完整转存。'
+      + '\\n必须选择一个准确的来源版本文件夹及最终目标文件夹；不会自动删除或覆盖旧文件。'
+    )) return;
+    setBusy(true);
+    try {
+      const next = await taskApi.forceCopyAll(detail.task_id);
+      if (next.task_id === detail.task_id) {
+        loaded.mutate(() => next);
+      } else {
+        setNavigation({ parent: taskId, child: next.task_id });
+      }
+      setShareFolders(null);
+      setShareFolderId('');
+      setShareFileId('');
+      setRememberShareFolder(false);
+      toast.success('已开启全部转存模式：请选择完整分享版本及目标 Season 文件夹');
+      onChanged?.();
+    } catch (err) {
+      toast.error(errorMessage(err, '无法开启全部转存'));
     } finally {
       setBusy(false);
     }
@@ -469,6 +500,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const meta = (detail?.context.meta ?? {}) as TaskMeta;
   const forcedCopy = Boolean(meta.task?.force_single_copy);
   const forcedRange = meta.task?.force_missing_range;
+  const forcedAll = meta.task?.force_copy_all;
   const isAliyun = detail?.context.source_rule.storage === 'aliyun'
     || (detail?.context.meta?.storage as { provider?: string } | undefined)?.provider === 'aliyun';
   const plan = meta.organize?.plan ?? [];
@@ -477,12 +509,14 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const conflict = can('resolve_conflict') ? meta.organize?.pending_conflict : undefined;
   const reorganize = () => (conflict ? setChoosing(true) : void run('reorganize'));
   const currentSeason = `Season ${String(parsed?.season ?? 1).padStart(2, '0')}`;
-  const forceBlockReason = !forcedCopy && !forcedRange ? null
+  const forceBlockReason = !forcedCopy && !forcedRange && !forcedAll ? null
     : hasPendingMetadataEdits ? '识别结果有未保存的修改，请先点击「保存修改」'
     : forcedCopy && !meta.share_selection?.file_id
       ? '请在「选择分享源文件或文件夹」中锁定准确的单集视频'
     : forcedRange && !meta.share_selection?.folder_id
       ? '请在「选择分享源文件或文件夹」中读取分享并确认一个包含所需集数的版本文件夹'
+    : forcedAll && !meta.share_selection?.folder_id
+      ? '请在「选择分享源文件或文件夹」中确认一个完整的单季来源版本文件夹'
     : !existingFolder ? `请在上方「指定阿里云盘保存目录」选择已有的 ${currentSeason} 最终文件夹`
     : !existingFolder.driveId ? '所选文件夹缺少阿里云盘资源库 ID，请重新选择'
     : destinationMode !== 'exact' ? '保存方式必须选择「直接存入所选文件夹」'
@@ -519,6 +553,11 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             <RefreshCw />批量补回缺集
           </Button>
         ) : null}
+        {can('force_copy_all') ? (
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => void forceCopyAll()}>
+            <FolderTree />全部转存（不去重）
+          </Button>
+        ) : null}
         {can('reconcile') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reconcile')}><ShieldCheck />核验转存</Button> : null}
         {can('accept_partial') ? (
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('accept_partial')}>
@@ -543,7 +582,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               disabled={busy || Boolean(forceBlockReason) || Boolean(hasPendingMetadataEdits)
                 || (requireExplicitTarget && !targetDir && !existingFolder)
                 || Boolean(existingFolder && !existingFolder.driveId)}
-              onClick={() => void run('approve')}><Check />{forcedRange ? '确认批量补回缺集' : forcedCopy ? '确认强制转存本集' : '确认转存'}</Button> : null}
+              onClick={() => void run('approve')}><Check />{forcedAll ? '确认全部转存' : forcedRange ? '确认批量补回缺集' : forcedCopy ? '确认强制转存本集' : '确认转存'}</Button> : null}
       </div>
     </div>
   ) : null;
@@ -713,6 +752,24 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             </Section>
           ) : null}
 
+          {forcedAll ? (
+            <Section title="人工全部转存（不去重）" icon={AlertTriangle}>
+              <p className="text-xs leading-5 text-muted-foreground">
+                本次以您确认的来源版本文件夹为准，完整复制第 {forcedAll.season} 季所有能识别集号的视频，
+                不受消息中的最新集号及旧入库记录限制。必须选定一个来源版本和最终
+                {currentSeason} 目标文件夹，保存方式「直接存入」。
+              </p>
+              <p className="text-xs text-destructive">
+                即使云盘中已存在同集，也会重新复制；不删除、不覆盖旧文件，同名时添加数字后缀。
+                若分享内容改变、文件集号无法识别或出现多个版本，将停止，避免误存。
+              </p>
+              {forcedAll.approved_files?.length ? (
+                <p className="text-xs text-primary">
+                  已核验完整来源清单：{forcedAll.approved_files.length} 个视频，准备完整转存。
+                </p>
+              ) : null}
+            </Section>
+          ) : null}
           {forcedRange ? (
             <Section title="批量补回缺集" icon={ShieldCheck}>
               <p className="text-xs leading-5 text-muted-foreground">
@@ -773,16 +830,18 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
           {can('choose_share_folder') ? (
             <Section title="选择分享源文件或文件夹" icon={FolderTree}>
               <p className="text-xs leading-5 text-muted-foreground">
-                {forcedRange
-                  ? '批量补回需要选择一个包含所需集数的完整分享版本文件夹；不能混用 DoVi/HDR，也不要逐个选择源视频。'
-                  : '想只转存 E247：先确认季与集号，再读取分享并选中精确的「247 4K.mp4」源视频。多集转存可选择版本文件夹。'}
+                {forcedAll
+                  ? '全部转存：请选择一个完整的来源版本文件夹。即使原消息只写 E46，也会复制该文件夹中所有明确编号的剧集。'
+                  : forcedRange
+                    ? '批量补回需要选择一个包含所需集数的完整分享版本文件夹；不能混用 DoVi/HDR，也不要逐个选择源视频。'
+                    : '想只转存 E247：先确认季与集号，再读取分享并选中精确的「247 4K.mp4」源视频。多集转存可选择版本文件夹。'}
                 这里选择的是分享来源，不会改变下方「保存到」的目标目录。
               </p>
               <Button variant="outline" size="sm" disabled={shareFolderBusy || busy}
                 onClick={() => void browseShareFolders()}>
                 <FolderTree />{shareFolders ? '刷新分享文件夹' : '读取分享文件夹'}
               </Button>
-              {shareFolders?.files?.length ? (
+              {!forcedAll && shareFolders?.files?.length ? (
                 <div className="space-y-2 rounded-lg border p-3">
                   <p className="text-sm font-semibold">精确选择单集源视频（推荐）</p>
                   <Select aria-label="精确选择分享源文件" value={shareFileId}
@@ -813,7 +872,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               ) : null}
               {shareFolders ? (
                 <div className="space-y-2 rounded-lg border p-3">
-                  <p className="text-sm font-semibold">按整个来源文件夹选择（慎用于多个视频）</p>
+                  <p className="text-sm font-semibold">{forcedAll ? '选择要全部转存的来源版本文件夹' : '按整个来源文件夹选择（慎用于多个视频）'}</p>
                   <Select value={shareFolderId} onValueChange={setShareFolderId}
                     aria-label="分享版本"
                     options={shareFolders.folders.map((folder) => ({
@@ -830,11 +889,13 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                         : ''}。所选版本缺集时会停止，不会改用另一个文件夹。
                     </p>
                   ) : null}
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <input type="checkbox" checked={rememberShareFolder}
-                      onChange={(e) => setRememberShareFolder(e.target.checked)} />
-                    此分享链接以后沿用该版本（文件夹改变时仍会停止核对）
-                  </label>
+                  {!forcedAll ? (
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <input type="checkbox" checked={rememberShareFolder}
+                        onChange={(e) => setRememberShareFolder(e.target.checked)} />
+                      此分享链接以后沿用该版本（文件夹改变时仍会停止核对）
+                    </label>
+                  ) : null}
                   {shareFolderId ? (
                     <div className="max-h-36 space-y-1 overflow-y-auto rounded border bg-muted/30 p-2 text-xs">
                       {(shareFolders.folders.find((folder) => folder.folder_id === shareFolderId)?.samples ?? []).map((file, i) => (
@@ -849,7 +910,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
                     </div>
                   ) : null}
                   <Button size="sm" disabled={shareFolderBusy || busy || !shareFolderId}
-                    onClick={() => void chooseShareFolder()}>确认这个版本</Button>
+                    onClick={() => void chooseShareFolder()}>{forcedAll ? '确认全部来源版本' : '确认这个版本'}</Button>
                 </div>
               ) : null}
               {meta.share_selection?.file_id ? (
@@ -860,7 +921,8 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               ) : meta.share_selection?.folder_id ? (
                 <p className="text-xs text-muted-foreground">
                   已选择来源目录：{meta.share_selection.path || '分享根目录（仅当前层）'}。
-                  不会修改已经开始转存的任务。
+                  {forcedAll ? '本次将完整复制该版本所有编号明确的集数（最多 100 集），不会按旧入库记录跳过。'
+                    : '不会修改已经开始转存的任务。'}
                 </p>
               ) : null}
             </Section>
@@ -945,7 +1007,7 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
               {requireExplicitTarget ? (
                 <p className="mt-1.5 text-xs text-muted-foreground">
                   这条任务最初只有网盘分享链接，必须明确选择保存目录。
-                  请确认该目录属于阿里云盘资源库，并与《吞噬星空》之前的集数所在位置一致。
+                  请确认该目录属于阿里云盘资源库，并与当前作品原有剧集的保存位置一致。
                 </p>
               ) : null}
               {targetDir && targetDir !== autoAlias
