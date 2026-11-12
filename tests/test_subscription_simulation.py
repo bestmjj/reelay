@@ -1,10 +1,15 @@
 """Subscription simulation does not enqueue tasks or interact with cloud storage."""
 from __future__ import annotations
 
+import asyncio
+import time
 import unittest
+from dataclasses import asdict
 from unittest.mock import AsyncMock, patch
 
 from reelay.core import discovery, subscriptions
+from reelay.core.contracts import ParsedResource, TaskState
+from reelay.core.service.follow import SIMULATION_TOKEN_NAMESPACE, SIMULATION_TOKEN_TTL
 from tests.fakes import WebCase
 
 
@@ -112,6 +117,136 @@ class SubscriptionSimulationWebTests(WebCase):
                 "id": sub["id"], "text": "牧神记 第106集"})
         self.assertEqual(blocked.json()["status"], "blocked")
         self.assertEqual(self.app.state.store.counts_by_state(), {})
+
+    def auto_preview(self, sub, episode=106, *, share="abc123"):
+        parsed = asdict(ParsedResource(
+            is_media=True, media_type="anime", title="牧神记", year=2024,
+            season=1, episodes=[episode], share_code=share,
+            raw_fields={"share_provider": "aliyun"},
+        ))
+        return {
+            "parsed": parsed,
+            "matched_subscription": {"id": sub["id"], "title": "牧神记", "season": 1},
+            "released_by_subscription": True, "decision": "save",
+            "routing": {"share_provider": "aliyun", "target_storage": "aliyun",
+                        "compatible": True},
+            "target_preview": "动漫/国产动漫", "confidence": {}, "trail": ["订阅新集自动放行"],
+        }
+
+    def test_confirmed_simulation_creates_exactly_one_task_without_copy_or_reparse(self):
+        sub = self.subscribe()
+        service = self.app.state.service
+        raw = "牧神记 (2024) S01E106 https://www.alipan.com/s/abc123"
+        with patch.object(service, "test_parse", new_callable=AsyncMock,
+                          return_value=self.auto_preview(sub)):
+            preview = self.client.post("/api/subscriptions/simulate", json={
+                "id": sub["id"], "text": raw,
+            })
+        self.assertEqual(preview.status_code, 200, preview.text)
+        data = preview.json()
+        self.assertEqual(data["status"], "automatic")
+        self.assertFalse(data["task_created"])
+        self.assertFalse(data["share_checked"])
+        self.assertFalse(data["dedup_checked"])
+        self.assertTrue(data.get("simulation_token"))
+        self.assertEqual(self.app.state.store.counts_by_state(), {})
+        promoted = self.client.post("/api/subscriptions/submit-simulation", json={
+            "id": sub["id"], "token": data["simulation_token"],
+        })
+        self.assertEqual(promoted.status_code, 200, promoted.text)
+        task_id = promoted.json()["task_id"]
+        ctx = self.app.state.store.get_task(task_id)
+        self.assertEqual(ctx.state, TaskState.RECEIVED)
+        self.assertEqual(ctx.raw.source, "@shareAliyun")
+        self.assertEqual(ctx.raw.text, raw)
+        self.assertTrue(ctx.raw.extra["simulation_import"])
+        self.assertEqual(ctx.ns("task")["promoted_simulation"]["parsed"]["episodes"], [106])
+        self.assertIsNone(ctx.parsed)  # Worker has not executed; no cloud mutation
+        self.assertEqual(self.app.state.store.counts_by_state().get("received"), 1)
+        with patch.object(self.app.state.pipeline.reg.get_provider("parser", "regex"),
+                          "parse", new_callable=AsyncMock) as parser:
+            asyncio.run(self.app.state.pipeline.process_received(ctx))
+        parser.assert_not_awaited()
+        saved = self.app.state.store.get_task(task_id)
+        self.assertEqual(saved.parsed.episodes, [106])
+        self.assertEqual(saved.parsed.share_code, "abc123")
+        self.assertIn(saved.state, (TaskState.PENDING_APPROVAL, TaskState.QUEUED))
+        replay = self.client.post("/api/subscriptions/submit-simulation", json={
+            "id": sub["id"], "token": data["simulation_token"],
+        })
+        self.assertEqual(replay.status_code, 409)
+        self.assertEqual(self.app.state.store.counts_by_state().get("received", 0), 0)
+
+    def test_new_simulation_for_same_message_is_deduped(self):
+        sub = self.subscribe()
+        service = self.app.state.service
+        raw = "牧神记 S01E106 https://www.alipan.com/s/abc123"
+        with patch.object(service, "test_parse", new_callable=AsyncMock,
+                          return_value=self.auto_preview(sub)):
+            first = self.client.post("/api/subscriptions/simulate", json={
+                "id": sub["id"], "text": raw,
+            }).json()
+            second = self.client.post("/api/subscriptions/simulate", json={
+                "id": sub["id"], "text": raw,
+            }).json()
+        one = self.client.post("/api/subscriptions/submit-simulation", json={
+            "id": sub["id"], "token": first["simulation_token"],
+        })
+        self.assertEqual(one.status_code, 200)
+        duplicate = self.client.post("/api/subscriptions/submit-simulation", json={
+            "id": sub["id"], "token": second["simulation_token"],
+        })
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(self.app.state.store.counts_by_state().get("received"), 1)
+
+    def test_expired_and_changed_subscription_preview_fail_without_task(self):
+        sub = self.subscribe()
+        service = self.app.state.service
+        with patch.object(service, "test_parse", new_callable=AsyncMock,
+                          return_value=self.auto_preview(sub)):
+            first = self.client.post("/api/subscriptions/simulate", json={
+                "id": sub["id"],
+                "text": "牧神记 S01E106 https://www.alipan.com/s/abc123",
+            }).json()
+            second = self.client.post("/api/subscriptions/simulate", json={
+                "id": sub["id"],
+                "text": "牧神记 S01E107 https://www.alipan.com/s/abc123",
+            }).json()
+        token = first["simulation_token"]
+        old = self.app.state.store.state_get(SIMULATION_TOKEN_NAMESPACE, token)
+        old["created_at"] = time.time() - SIMULATION_TOKEN_TTL - 2
+        self.app.state.store.state_set(SIMULATION_TOKEN_NAMESPACE, token, old)
+        self.assertEqual(self.client.post("/api/subscriptions/submit-simulation", json={
+            "id": sub["id"], "token": token,
+        }).status_code, 409)
+        self.assertEqual(self.client.post("/api/subscriptions/start", json={
+            "id": sub["id"], "start_episode": 110,
+        }).status_code, 200)
+        self.assertEqual(self.client.post("/api/subscriptions/submit-simulation", json={
+            "id": sub["id"], "token": second["simulation_token"],
+        }).status_code, 409)
+        self.assertEqual(self.app.state.store.counts_by_state(), {})
+
+    def test_simulation_without_exact_cloud_share_has_no_submit_token(self):
+        sub = self.subscribe()
+        service = self.app.state.service
+        base = self.auto_preview(sub)
+        for wrong in (
+                {**base, "parsed": {**base["parsed"], "share_code": "other"}},
+                {**base, "parsed": {**base["parsed"], "episodes": [1, 106]}},
+                {**base, "routing": {**base["routing"], "share_provider": None}},
+        ):
+            with self.subTest(wrong=wrong.get("parsed", {}).get("episodes")):
+                with patch.object(service, "test_parse", new_callable=AsyncMock,
+                                  return_value=wrong):
+                    result = self.client.post("/api/subscriptions/simulate", json={
+                        "id": sub["id"],
+                        "text": "牧神记 S01E106 https://www.alipan.com/s/abc123",
+                    })
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.json()["status"], "automatic")
+                self.assertNotIn("simulation_token", result.json())
+                self.assertEqual(self.app.state.store.counts_by_state(), {})
 
     def test_subscribe_start_api_changes_only_future_episode_floor(self):
         sub = self.subscribe()
