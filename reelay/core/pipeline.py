@@ -454,6 +454,23 @@ class Pipeline:
         # “更新至 E106” is a release announcement, not a request to copy E01-E106.
         # Only a verified, active subscription can select the latest episode.
         progress_scope = subscriptions.scope_latest_progress(ctx, self.store.subscriptions())
+        if preview:
+            # A promoted automatic simulation is a request for precisely its
+            # confirmed one episode. In particular, never let a source with
+            # episodes_from='share' copy E01-E18 for an E18 simulation.
+            snapshot = preview["parsed"]
+            if (not ctx.parsed or ctx.parsed.share_code != snapshot["share_code"]
+                    or ctx.parsed.media_type != snapshot["media_type"]
+                    or ctx.parsed.title != snapshot["title"]
+                    or ctx.parsed.season != snapshot["season"]
+                    or ctx.parsed.episodes != snapshot["episodes"]):
+                ctx.ns("task")["simulation_identity_changed"] = True
+                ctx.log("模拟身份或集数在真实核对时变化：必须人工检查，禁止自动转存")
+            else:
+                ctx.source_rule["episodes_from"] = "message"
+                ctx.ns("share_selection")["only_episodes"] = list(snapshot["episodes"])
+                ctx.log(f"锁定本次模拟源文件范围：仅 S{snapshot['season']:02d}"
+                        f"E{snapshot['episodes'][0]:03d}，不会自动补转整季")
         blocked = ignored.match(self.store.ignored_works(), ctx.parsed, ctx.meta.get("tmdb", {}))
         if blocked:
             ctx.decision = Decision.SKIP
@@ -475,6 +492,8 @@ class Pipeline:
             with self.scope(ctx):
                 ctx.decision = await decider.decide(ctx)
         if ctx.decision == Decision.SAVE and ctx.meta.get("parse", {}).get("fallback"):
+            ctx.decision = Decision.ASK
+        if preview and ctx.ns("task").get("simulation_identity_changed") and ctx.decision != Decision.SKIP:
             ctx.decision = Decision.ASK
         if progress_scope == "below_floor" and ctx.decision == Decision.SAVE:
             ctx.decision = Decision.ASK
