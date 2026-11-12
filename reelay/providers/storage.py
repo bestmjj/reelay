@@ -669,14 +669,16 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
     @staticmethod
     def _select(ctx: PipelineContext, listing: list[dict], hints: dict | None = None) -> dict:
         only = ctx.ns('share_selection').get('only_episodes') or []
+        full_copy = bool(ctx.ns('task').get('force_copy_all'))
         return _select_video_items(listing, ctx.parsed,
-                                   stored=ctx.ns('storage').get('stored_episodes') or [],
-                                   scope='message' if only else ctx.source_rule.get('episodes_from', 'share'),
+                                   stored=[] if full_copy else ctx.ns('storage').get('stored_episodes') or [],
+                                   scope='share' if full_copy else (
+                                       'message' if only else ctx.source_rule.get('episodes_from', 'share')),
                                    only_episodes=only, hints=hints,
                                    stored_variety_parts=ctx.ns('storage').get('stored_variety_parts') or [],
                                    share_folder_id=ctx.ns('share_selection').get('folder_id'),
                                    share_folder_path=ctx.ns('share_selection').get('path'),
-                                   required_latest=None if only else _announced_latest(ctx),
+                                   required_latest=None if only or full_copy else _announced_latest(ctx),
                                    blocked_episodes=ctx.ns('storage').get('blocked_episodes') or [],
                                    share_file_id=ctx.ns('share_selection').get('file_id'),
                                    share_file_name=ctx.ns('share_selection').get('file_name'),
@@ -688,7 +690,7 @@ class ShareStorage(ai.UsesAI):  # 转人工前的 AI 兜底
         try:
             return self._select(ctx, listing)
         except NeedsManual as exc:
-            if ctx.ns("task").get("force_missing_range"):
+            if ctx.ns("task").get("force_missing_range") or ctx.ns("task").get("force_copy_all"):
                 raise  # Never let AI guess among versions or episodes for a forced bulk copy.
             if str(exc).startswith(("分享包含多个版本文件夹", "选中的分享版本文件夹",
                                     "选中版本缺少", "分享不同目录混有",

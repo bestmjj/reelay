@@ -103,13 +103,12 @@ class TaskOpsMixin(ServiceBase):
                 raise ConflictError("人工提交的分享请先填写真实片名、类型，保存后再确认转存")
             if p.media_type in ("anime", "tv"):
                 is_bulk_recovery = bool(ctx.ns("task").get("force_missing_range"))
-                if len(ctx.episode_pairs()) != 1 and not is_bulk_recovery:
+                is_full_copy = bool(ctx.ns("task").get("force_copy_all"))
+                if len(ctx.episode_pairs()) != 1 and not (is_bulk_recovery or is_full_copy):
                     raise ConflictError("人工单集转存必须明确唯一季集号，禁止盲目整季复制")
-                # Original manual-import rule applies to a single exact episode.
-                # Bulk recovery validates its immutable season/range and chosen
-                # source folder below, even if a prior "保存修改" reset the
-                # legacy episodes_from rule to "share".
-                if not is_bulk_recovery and ctx.source_rule.get("episodes_from") != "message":
+                # Full-copy mode binds the entire checked source version, not
+                # the single episode originally announced in the Telegram post.
+                if not (is_bulk_recovery or is_full_copy) and ctx.source_rule.get("episodes_from") != "message":
                     raise ConflictError("已修正的单集范围未绑定，请先保存识别结果")
                 if not (ctx.ns("share_selection").get("file_id")
                         or ctx.ns("share_selection").get("folder_id")):
@@ -135,6 +134,48 @@ class TaskOpsMixin(ServiceBase):
             # Persist the reviewed subset as the source scope. A no-op parsed
             # save must never turn this authorized 1-15 batch into whole-share.
             ctx.source_rule["episodes_from"] = "message"
+        full_copy = ctx.ns("task").get("force_copy_all") or {}
+        if full_copy:
+            selected = ctx.ns("share_selection")
+            if (ctx.source_rule.get("storage") != "aliyun"
+                    or not ctx.parsed or ctx.parsed.share_code != full_copy.get("share_code")
+                    or ctx.parsed.season != full_copy.get("season")
+                    or not selected.get("folder_id") or selected.get("file_id")
+                    or selected.get("share_code") != ctx.parsed.share_code
+                    or selected.get("provider") != "aliyun"
+                    or selected.get("only_episodes")):
+                raise ConflictError("全部转存必须确认正确的作品季号和一个完整的分享来源文件夹")
+            if not existing_folder_id or destination_mode != "exact":
+                raise ConflictError("全部转存需明确选择阿里云盘最终 Season 文件夹，并使用直接存入")
+            ctx.source_rule["episodes_from"] = "share"
+            try:
+                from ...providers.storage import ShareStorage, share_folder_choices
+                provider = self.pipeline.reg.get_provider("storage", "aliyun")
+                with self.pipeline.scope(ctx):
+                    listing = await asyncio.to_thread(provider._share_files, ctx)
+                    choice = ShareStorage._select(ctx, listing)
+                folders = share_folder_choices(listing)
+                folder = next((x for x in folders if x["folder_id"] == selected["folder_id"]), None)
+                files = choice.get("files") or []
+                if (not folder or not 1 <= len(files) <= 100
+                        or len(files) != folder["count"]
+                        or any(x.get("season") != full_copy["season"]
+                               or type(x.get("episode")) is not int
+                               or not x.get("id") or not x.get("name")
+                               or type(x.get("size")) is not int or x["size"] <= 0
+                               for x in files)
+                        or len({x["episode"] for x in files}) != len(files)
+                        or len({str(x["id"]) for x in files}) != len(files)):
+                    raise ValueError("选中的来源文件夹存在其他季、重复、未识别或超过 100 个视频，无法安全全部转存")
+                full_copy["approved_files"] = sorted(
+                    [{"id": str(x["id"]), "name": x["name"], "size": x["size"],
+                      "season": x["season"], "episode": x["episode"],
+                      "share_path": x.get("share_path") or ""} for x in files],
+                    key=lambda x: (x["season"], x["episode"]))
+                ctx.log(f"人工核对来源版本「{selected.get('path')}」共 {len(files)} 个视频："
+                        "强制完整转存，已存在的集数也不跳过；原文件会安全保留")
+            except Exception as exc:
+                raise ConflictError(f"无法核验全部源文件，未排队：{exc}") from exc
         forced = ctx.ns("task").get("force_single_copy") or {}
         if forced:
             selected = ctx.ns("share_selection")
@@ -414,6 +455,54 @@ class TaskOpsMixin(ServiceBase):
             self._update(ctx, expected=previous_state, reset_retries=previous_state == TaskState.FAILED)
         return self.get_task(ctx.task_id)
 
+    def force_copy_all(self, task_id: str) -> dict[str, Any]:
+        """Explicitly copy every verified episode in ONE selected source folder.
+
+        Different from normal dedup and missing-only repair: user authorizes
+        copying even if an earlier receipt or same-episode file exists. Never
+        delete original cloud content. DONE tasks get independent drafts.
+        """
+        ctx = self._require_context(task_id)
+        if "force_copy_all" not in self.task_actions(ctx):
+            raise ConflictError("仅支持阿里云盘可人工处理的剧集/动漫任务；执行中不能改为全部转存")
+        original = ctx if ctx.state == TaskState.DONE else None
+        previous_state = ctx.state
+        if original:
+            ctx = PipelineContext(copy.deepcopy(original.raw))
+            ctx.raw.msg_id = f"{original.raw.msg_id}:all:{ctx.task_id}"
+            ctx.raw.extra["bulk_from"] = original.task_id
+            ctx.parsed = copy.deepcopy(original.parsed)
+            ctx.source_rule = copy.deepcopy(original.source_rule)
+            ctx.source_rule["storage"] = "aliyun"
+            ctx.save_dir_alias = original.save_dir_alias
+            ctx.meta["runtime"] = copy.deepcopy(original.meta.get("runtime") or {})
+            ctx.meta["tmdb"] = copy.deepcopy(original.meta.get("tmdb") or {})
+        ctx.ns("task")["force_copy_all"] = {
+            "season": ctx.parsed.season, "share_code": ctx.parsed.share_code,
+        }
+        ctx.ns("task").pop("force_missing_range", None)
+        ctx.ns("task").pop("force_single_copy", None)
+        ctx.ns("task")["generation"] = ctx.ns("task").get("generation", 0) + 1
+        ctx.ns("task")["user_reopened_duplicate"] = True
+        ctx.ns("task").pop("skip", None)
+        ctx.ns("share_selection").clear()
+        ctx.ns("library").pop("direct_existing", None)
+        ctx.state, ctx.decision = TaskState.PENDING_APPROVAL, Decision.ASK
+        ctx.source_rule["approval_mode"] = "manual"
+        ctx.source_rule["episodes_from"] = "share"
+        ctx.log(f"人工选择第 {ctx.parsed.season} 季「全部转存」："
+                "须先选择分享版本文件夹和现有 Season 目标文件夹；"
+                "忽略旧入库集数但不删除、覆盖现有文件")
+        if original:
+            try:
+                self.store.queue_bulk_missing_draft(original, ctx)
+            except ValueError as exc:
+                raise ConflictError(str(exc)) from exc
+        else:
+            self._update(ctx, expected=previous_state,
+                         reset_retries=previous_state == TaskState.FAILED)
+        return self.get_task(ctx.task_id)
+
     def set_episode_selection(self, task_id: str, episodes: list[int]) -> dict[str, Any]:
         """Per-task subset of episodes, with mandatory existing-content dedup.
 
@@ -422,8 +511,9 @@ class TaskOpsMixin(ServiceBase):
         """
         ctx = self._require_context(task_id)
         storage = ctx.ns("storage")
-        if ctx.ns("task").get("force_single_copy") or ctx.ns("task").get("force_missing_range"):
-            raise ConflictError("强制转存已锁定申请集数；如需修改，请重新提交新的人工补集任务")
+        if (ctx.ns("task").get("force_single_copy") or ctx.ns("task").get("force_missing_range")
+                or ctx.ns("task").get("force_copy_all")):
+            raise ConflictError("强制转存已固定来源范围；如需更改请选择新的人工任务")
         if ctx.state not in (TaskState.PENDING_APPROVAL, TaskState.FAILED):
             raise ConflictError("只能在待确认或尚未转存的失败任务中指定补集")
         if storage.get("manifest") or storage.get("landed") or storage.get("phase") == "receiving":
@@ -481,6 +571,24 @@ class TaskOpsMixin(ServiceBase):
                 and type(ctx.parsed.season) is int and 1 <= ctx.parsed.season <= 100
                 and not (self.store.disputed_transfer(ctx.task_id) or {}).get("active")):
             out.append("force_missing_range")
+        eligible_all = (
+            ctx.parsed and ctx.parsed.title
+            and ctx.parsed.media_type in ("anime", "tv")
+            and ctx.parsed.share_code
+            and type(ctx.parsed.season) is int and 1 <= ctx.parsed.season <= 100
+            and (ctx.ns("storage").get("provider") or ctx.source_rule.get("storage")) == "aliyun"
+            and (ctx.parsed.raw_fields or {}).get("share_provider") == "aliyun"
+            and not ctx.ns("task").get("force_copy_all")
+            and (state == TaskState.DONE and (ctx.result or {}).get("storage_verified")
+                 and not (self.store.disputed_transfer(ctx.task_id) or {}).get("active")
+                 or state in (TaskState.PENDING_APPROVAL, TaskState.FAILED)
+                 and not storage.get("manifest") and not storage.get("landed")
+                 or state == TaskState.SKIPPED
+                 and (ctx.ns("task").get("skip") or {}).get("kind") == "duplicate"
+                 and not storage.get("manifest") and not storage.get("landed"))
+        )
+        if eligible_all:
+            out.append("force_copy_all")
         if state == TaskState.PENDING_APPROVAL:
             out += ["approve", "reject"]
             if subscriptions.subscribable(ctx) and not subscriptions.subscribed(self.store.subscriptions(), ctx):
@@ -495,6 +603,7 @@ class TaskOpsMixin(ServiceBase):
         if (state in (TaskState.PENDING_APPROVAL, TaskState.FAILED)
                 and not ctx.ns("task").get("force_single_copy")
                 and not ctx.ns("task").get("force_missing_range")
+                and not ctx.ns("task").get("force_copy_all")
                 and not storage.get("manifest") and not storage.get("landed")
                 and ctx.parsed and ctx.parsed.title and ctx.parsed.media_type in ("tv", "anime")):
             out.append("select_episodes")
@@ -611,7 +720,9 @@ class TaskOpsMixin(ServiceBase):
                          provider=provider, share_code=ctx.parsed.share_code)
         ctx.log(f"人工选择分享版本「{folder['path']}」，只从所选文件夹取文件；其他版本不参与转存")
         self._update(ctx, expected=previous)
-        if remember:
+        if remember and not ctx.ns("task").get("force_copy_all"):
+            # A one-time full copy must not persist its release-version choice
+            # as a default for future automatic subscription episodes.
             key = f"{provider}:{ctx.parsed.share_code}"
             choices = self.store.state_get("share_folder_preferences", "items", {}) or {}
             choices[key] = {"folder_id": folder_id, "path": folder["path"]}
@@ -625,8 +736,8 @@ class TaskOpsMixin(ServiceBase):
         prepare; plain filenames/paths are only audit evidence.
         """
         ctx, provider = self._selectable_share_task(task_id)
-        if ctx.ns("task").get("force_missing_range"):
-            raise ConflictError("批量补集必须选择同一分享版本文件夹，而不是单个源文件")
+        if ctx.ns("task").get("force_missing_range") or ctx.ns("task").get("force_copy_all"):
+            raise ConflictError("批量/全部转存必须选择一个完整分享版本文件夹，而不是单集视频")
         if not file_id or len(file_id) > 128:
             raise ValueError("源文件 ID 无效")
         only = ctx.ns("share_selection").get("only_episodes") or []
@@ -858,6 +969,14 @@ class TaskOpsMixin(ServiceBase):
                               for key in ("title", "media_type", "year", "season", "episodes"))):
             ctx.ns("task").pop("force_single_copy", None)
             ctx.log("修改作品身份或季集后已取消此前的强制转存授权")
+        if ctx.ns("task").get("force_copy_all"):
+            forced = ctx.ns("task")["force_copy_all"]
+            if (ctx.parsed.share_code != forced["share_code"]
+                    or ctx.parsed.season != forced["season"]
+                    or any(before.get(key) != getattr(ctx.parsed, key)
+                           for key in ("title", "year", "media_type", "season"))):
+                ctx.ns("task").pop("force_copy_all", None)
+                ctx.log("作品身份或季号已变化，取消原「全部转存」授权，请重新选择")
         if ctx.ns("task").get("force_missing_range"):
             forced = ctx.ns("task")["force_missing_range"]
             if (ctx.parsed.share_code != forced["share_code"]
@@ -887,7 +1006,10 @@ class TaskOpsMixin(ServiceBase):
         # selector to that one episode, not the original whole-share scope.
         # This is a per-task source rule, never a persistent bot setting.
         if ctx.raw.extra.get("manual_import"):
-            if ctx.ns("task").get("force_missing_range"):
+            if ctx.ns("task").get("force_copy_all"):
+                ctx.source_rule["episodes_from"] = "share"
+                ctx.log("人工全部转存模式仍按选定的分享版本读取完整季，不按消息最新集限制")
+            elif ctx.ns("task").get("force_missing_range"):
                 # A bulk recovery approved by a human is always restricted
                 # to its already-bound episode subset. Saving title/reason
                 # again must not silently revert the source scope to "share".

@@ -130,6 +130,10 @@ def router(service) -> APIRouter:
     async def force_missing_range(task_id: str, payload: ForceMissingRangePayload):
         return service.force_missing_range(task_id, payload.episodes)
 
+    @api.post("/api/tasks/{task_id}/force-copy-all")
+    async def force_copy_all(task_id: str):
+        return service.force_copy_all(task_id)
+
     @api.post("/api/tasks/{task_id}/approve")
     async def approve(task_id: str, payload: ActionPayload | None = None):
         await service.approve(
