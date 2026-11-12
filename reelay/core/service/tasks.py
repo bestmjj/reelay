@@ -149,31 +149,12 @@ class TaskOpsMixin(ServiceBase):
                 raise ConflictError("全部转存需明确选择阿里云盘最终 Season 文件夹，并使用直接存入")
             ctx.source_rule["episodes_from"] = "share"
             try:
-                from ...providers.storage import ShareStorage, share_folder_choices
-                provider = self.pipeline.reg.get_provider("storage", "aliyun")
-                with self.pipeline.scope(ctx):
-                    listing = await asyncio.to_thread(provider._share_files, ctx)
-                    choice = ShareStorage._select(ctx, listing)
-                folders = share_folder_choices(listing)
-                folder = next((x for x in folders if x["folder_id"] == selected["folder_id"]), None)
-                files = choice.get("files") or []
-                if (not folder or not 1 <= len(files) <= 100
-                        or len(files) != folder["count"]
-                        or any(x.get("season") != full_copy["season"]
-                               or type(x.get("episode")) is not int
-                               or not x.get("id") or not x.get("name")
-                               or type(x.get("size")) is not int or x["size"] <= 0
-                               for x in files)
-                        or len({x["episode"] for x in files}) != len(files)
-                        or len({str(x["id"]) for x in files}) != len(files)):
-                    raise ValueError("选中的来源文件夹存在其他季、重复、未识别或超过 100 个视频，无法安全全部转存")
-                full_copy["approved_files"] = sorted(
-                    [{"id": str(x["id"]), "name": x["name"], "size": x["size"],
-                      "season": x["season"], "episode": x["episode"],
-                      "share_path": x.get("share_path") or ""} for x in files],
-                    key=lambda x: (x["season"], x["episode"]))
-                ctx.log(f"人工核对来源版本「{selected.get('path')}」共 {len(files)} 个视频："
-                        "强制完整转存，已存在的集数也不跳过；原文件会安全保留")
+                fresh = await asyncio.to_thread(self._checked_full_share_snapshot, ctx)
+                if fresh != full_copy.get("source_files"):
+                    raise ValueError("选定版本文件夹的文件清单已经改变，先重新选择来源版本")
+                full_copy["approved_files"] = fresh
+                ctx.log(f"严格核对来源版本「{selected.get('path')}」共 {len(fresh)} 个视频："
+                        "本次全部复制，旧入库集数不跳过；已有文件不覆盖")
             except Exception as exc:
                 raise ConflictError(f"无法核验全部源文件，未排队：{exc}") from exc
         forced = ctx.ns("task").get("force_single_copy") or {}
@@ -455,6 +436,42 @@ class TaskOpsMixin(ServiceBase):
             self._update(ctx, expected=previous_state, reset_retries=previous_state == TaskState.FAILED)
         return self.get_task(ctx.task_id)
 
+    def _checked_full_share_snapshot(self, ctx: PipelineContext) -> list[dict[str, Any]]:
+        """Read-only authoritative source list for human-authorized full copy.
+
+        The same file IDs/names/sizes must survive source-folder confirmation,
+        approval, and Worker preparation; never use a different version if the
+        share changes. This method performs no cloud mutations.
+        """
+        from ...providers.storage import ShareStorage, share_folder_choices
+
+        selected = ctx.ns("share_selection")
+        full = ctx.ns("task").get("force_copy_all") or {}
+        if not selected.get("folder_id") or not full:
+            raise ValueError("请先确认要全部转存的来源版本文件夹")
+        provider = self.pipeline.reg.get_provider("storage", "aliyun")
+        with self.pipeline.scope(ctx):
+            listing = provider._share_files(ctx)
+            choice = ShareStorage._select(ctx, listing)
+        folders = share_folder_choices(listing)
+        folder = next((x for x in folders if x["folder_id"] == selected["folder_id"]), None)
+        files = choice.get("files") or []
+        if (not folder or not 1 <= len(files) <= 100
+                or len(files) != folder["count"]
+                or any(x.get("season") != full["season"]
+                       or type(x.get("episode")) is not int
+                       or not x.get("id") or not x.get("name")
+                       or type(x.get("size")) is not int or x["size"] <= 0
+                       for x in files)
+                or len({x["episode"] for x in files}) != len(files)
+                or len({str(x["id"]) for x in files}) != len(files)):
+            raise ValueError("分享版本中存在其他季、重复、未识别或超过 100 个视频，不能全部转存")
+        return sorted(
+            [{"id": str(x["id"]), "name": x["name"], "size": x["size"],
+              "season": x["season"], "episode": x["episode"],
+              "share_path": x.get("share_path") or ""} for x in files],
+            key=lambda x: (x["season"], x["episode"]))
+
     def force_copy_all(self, task_id: str) -> dict[str, Any]:
         """Explicitly copy every verified episode in ONE selected source folder.
 
@@ -718,7 +735,17 @@ class TaskOpsMixin(ServiceBase):
             selection.pop(key, None)
         selection.update(folder_id=folder_id, path=folder["path"],
                          provider=provider, share_code=ctx.parsed.share_code)
-        ctx.log(f"人工选择分享版本「{folder['path']}」，只从所选文件夹取文件；其他版本不参与转存")
+        if ctx.ns("task").get("force_copy_all"):
+            try:
+                source_files = self._checked_full_share_snapshot(ctx)
+            except Exception as exc:
+                raise ConflictError(f"此来源版本不适合全部转存：{exc}") from exc
+            ctx.ns("task")["force_copy_all"]["source_files"] = source_files
+            ctx.log(f"人工选定完整来源版本「{folder['path']}」，"
+                    f"核实 {len(source_files)} 个视频（最多 100 集）；"
+                    "正式审批与复制前还会核验相同的文件清单")
+        else:
+            ctx.log(f"人工选择分享版本「{folder['path']}」，只从所选文件夹取文件；其他版本不参与转存")
         self._update(ctx, expected=previous)
         if remember and not ctx.ns("task").get("force_copy_all"):
             # A one-time full copy must not persist its release-version choice
