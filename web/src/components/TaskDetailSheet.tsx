@@ -75,7 +75,8 @@ interface TaskMeta {
   confidence?: { score?: number; caps?: string[] };
   organize?: { plan?: Array<{ target_dir: string; target_name: string }>;
     error?: string; pending_conflict?: IOrganizeConflict;
-    partial_completed?: { season: number; episode: number; source_id: string; remaining: number } };
+    partial_completed?: { season: number; episode: number; source_id: string; remaining: number;
+      target_path?: string; target_name?: string } };
   storage?: { partial?: ITransferPartial };
   share_selection?: { folder_id?: string; path?: string; file_id?: string; only_episodes?: number[];
     file_name?: string; file_path?: string; file_size?: number };
@@ -104,6 +105,10 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const [onlyEpisodesText, setOnlyEpisodesText] = useState('');
   const [targetDir, setTargetDir] = useState('');
   const [existingPickerOpen, setExistingPickerOpen] = useState(false);
+  const [singlePickerOpen, setSinglePickerOpen] = useState(false);
+  const [singleFolder, setSingleFolder] = useState<PickedDir | null>(null);
+  const [singleLocation, setSingleLocation] = useState<Awaited<ReturnType<typeof taskApi.locateSingleEpisode>> | null>(null);
+  const [singleLocationLoading, setSingleLocationLoading] = useState(false);
   const [existingFolder, setExistingFolder] = useState<PickedDir | null>(null);
   const [destinationMode, setDestinationMode] = useState<'exact' | 'organized'>('exact');
   const [repairReport, setRepairReport] = useState<IRepairReport | null>(null);
@@ -140,6 +145,9 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
       setExistingFolder(null);
       setDestinationMode('exact');
       setExistingPickerOpen(false);
+      setSinglePickerOpen(false);
+      setSingleFolder(null);
+      setSingleLocation(null);
     }
     setRepairReport(null);
     setRepairSelected([]);
@@ -515,20 +523,32 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
   const organizeError = meta.organize?.error;
   const partial = meta.storage?.partial;
   const conflict = can('resolve_conflict') ? meta.organize?.pending_conflict : undefined;
+  const locateSingleEpisode = async () => {
+    if (!detail) return;
+    setSingleLocationLoading(true);
+    try {
+      setSingleLocation(await taskApi.locateSingleEpisode(detail.task_id));
+    } catch (err) {
+      toast.error(errorMessage(err, '无法查到已转存文件的实际位置'));
+    } finally {
+      setSingleLocationLoading(false);
+    }
+  };
   const reorganizeSingleEpisode = async () => {
-    if (!detail || !parsed?.episodes || parsed.episodes.length !== 1) return;
+    if (!detail || !singleFolder || !parsed?.episodes || parsed.episodes.length !== 1) return;
     const ep = parsed.episodes[0];
-    if (!window.confirm(
-      `只整理这次已经转存的 S${String(parsed.season ?? 1).padStart(2, '0')}E${String(ep).padStart(3, '0')}？`
-      + '\\n不会重新转存，也不会删除或覆盖任何文件；同名时另存带后缀的新文件。'
-      + '\\n分享里其他已转存文件留在暂存目录，任务仍会提示需要人工处理剩余文件。',
+    if (!singleFolder.driveId || !window.confirm(
+      `将已转存的 E${String(ep).padStart(3, '0')} 移动到以下文件夹？`
+      + `\\n/${singleFolder.path.replaceAll(' / ', '/')}`
+      + '\\n不会重新转存分享，也不会删除、覆盖或移动其他集数。',
     )) return;
     setBusy(true);
     try {
-      await taskApi.organizeSingleEpisode(detail.task_id);
-      finish(`已排队：仅整理 E${String(ep).padStart(3, '0')}，其余已转存文件原样保留`);
+      await taskApi.organizeSingleEpisode(detail.task_id, singleFolder.id, singleFolder.driveId);
+      setSingleLocation(null);
+      finish(`已提交：移动现有 E${String(ep).padStart(3, '0')} 到所选 Season 文件夹，后台将按文件 ID 读回核验`);
     } catch (err) {
-      toast.error(errorMessage(err, '无法只整理本集'));
+      toast.error(errorMessage(err, '无法移动已转存的单集文件'));
     } finally {
       setBusy(false);
     }
@@ -559,12 +579,6 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
         {can('correct') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void saveParsed()}>保存修改</Button> : null}
         {can('reparse') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('reparse')}><RotateCcw />重新识别</Button> : null}
         {can('retry') ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run('retry')}><RefreshCw />重试</Button> : null}
-        {can('organize_single_episode') ? (
-          <Button variant="outline" size="sm" disabled={busy || hasPendingMetadataEdits}
-            onClick={() => void reorganizeSingleEpisode()}>
-            <ShieldCheck />仅整理 E{String(parsed?.episodes?.[0] ?? '').padStart(2, '0')}（不重复转存）
-          </Button>
-        ) : null}
         {can('repair_missing') ? (
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void checkMissingFiles()}>
             <ShieldCheck />核验已入库文件
@@ -676,20 +690,68 @@ export function TaskDetailSheet({ taskId, onClose, onChanged, saveDirs }: TaskDe
             </div>
           ) : null}
 
-          {meta.organize?.partial_completed ? (
-            <div className="rounded-lg border p-3 text-sm leading-6">
-              <p className="font-medium text-primary">
-                已完成 S{String(meta.organize.partial_completed.season).padStart(2, '0')}
-                E{String(meta.organize.partial_completed.episode).padStart(3, '0')} 的单集整理。
+          {can('organize_single_episode') || meta.organize?.partial_completed ? (
+            <Section title={`确认 S${String(parsed?.season ?? 1).padStart(2, '0')}E${String(parsed?.episodes?.[0] ?? '').padStart(3, '0')} 的最终位置`} icon={FolderSearch}>
+              <p className="text-sm text-muted-foreground">
+                不用重新转存。先查已转存文件现在实际在哪里，再选原来存放 E01–E17 的
+                Season {String(parsed?.season ?? 1).padStart(2, '0')} 文件夹，系统只移动这一集。
               </p>
-              <p className="text-muted-foreground">
-                仅移动已转存的目标文件，没有重新转存；其他
-                {meta.organize.partial_completed.remaining} 个文件保留在暂存目录，没有删除或覆盖。
-                原整季任务仍待人工处理剩余文件。
+              {meta.organize?.partial_completed?.target_path ? (
+                <p className="break-all text-xs text-primary">
+                  上次整理记录目标：{meta.organize.partial_completed.target_path}/{meta.organize.partial_completed.target_name}
+                </p>
+              ) : meta.organize?.partial_completed ? (
+                <p className="text-xs text-muted-foreground">
+                  旧版只记录移动完成，未记录最终路径，不能据此认定已存入正确的 Season 文件夹。
+                </p>
+              ) : null}
+              <Button variant="outline" size="sm" disabled={busy || singleLocationLoading}
+                onClick={() => void locateSingleEpisode()}>
+                {singleLocationLoading ? <Loader2 className="animate-spin" /> : <FolderSearch />}
+                定位已转存的 E{String(parsed?.episodes?.[0] ?? '').padStart(2, '0')} 文件
+              </Button>
+              {singleLocation ? (
+                <p role="status" className="break-all rounded-md border p-2 text-sm">
+                  当前实际云盘路径：{singleLocation.file_path}
+                </p>
+              ) : null}
+              {can('organize_single_episode') ? (
+                <>
+                  <Button variant="outline" size="sm" disabled={busy}
+                    onClick={() => setSinglePickerOpen(true)}>
+                    <FolderSearch />{singleFolder ? '更换 Season 目标文件夹' : '选择 E01–E17 所在的 Season 文件夹'}
+                  </Button>
+                  {singleFolder ? (
+                    <div className="space-y-2 rounded-md border p-3 text-sm">
+                      <p className="break-all">最终目标：/{singleFolder.path.replaceAll(' / ', '/')}</p>
+                      <p className="text-xs text-muted-foreground">
+                        只将已转存的本集移动到该目录；不会复制分享、删除旧文件或移动其余剧集。
+                      </p>
+                      <Button size="sm" disabled={busy || hasPendingMetadataEdits || !singleFolder.driveId}
+                        onClick={() => void reorganizeSingleEpisode()}>
+                        <ShieldCheck />确认把现有 E{String(parsed?.episodes?.[0] ?? '').padStart(2, '0')} 移入此目录
+                      </Button>
+                    </div>
+                  ) : null}
+                  {singlePickerOpen ? (
+                    <DirectoryPicker open initialProvider="aliyun" fixedProvider="aliyun" forbidRoot
+                      onOpenChange={setSinglePickerOpen}
+                      onSelect={(dir) => {
+                        if (!dir.driveId || dir.id === '0') {
+                          toast.error('必须选择原有作品的 Season 最终文件夹');
+                          return;
+                        }
+                        setSingleFolder(dir);
+                      }} />
+                  ) : null}
+                </>
+              ) : null}
+              <p className="text-xs text-muted-foreground">
+                原整季任务里尚有其他文件，因此状态仍可能是「待人工」。这不代表 E18 再次转存失败。
               </p>
-            </div>
+            </Section>
           ) : null}
-          {detail.error || organizeError || detail.explanation ? (
+          {(detail.error || organizeError || (detail.explanation && !meta.organize?.partial_completed)) ? (
             <div className="flex gap-2.5 rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">
               <AlertTriangle className="mt-0.5 size-4 shrink-0" />
               <div className="min-w-0 space-y-1">

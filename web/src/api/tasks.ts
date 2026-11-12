@@ -99,9 +99,16 @@ export const taskApi = {
     post<ITaskDetail>(`tasks/${taskId}/force-missing-range`, { episodes }),
   /** Manual full-season copy of all identified videos from one selected share folder. */
   forceCopyAll: (taskId: string) => post<ITaskDetail>(`tasks/${taskId}/force-copy-all`),
-  /** Reuse an already transferred, verified single E18 file; no new share copy. */
-  organizeSingleEpisode: (taskId: string) =>
-    post<{ ok: boolean }>(`tasks/${taskId}/organize-single-episode`),
+  /** Find the real current path of the already-copied episode by cloud file ID. */
+  locateSingleEpisode: (taskId: string) =>
+    get<{ season: number; episode: number; file_id: string; name: string;
+      parent_id: string; parent_path: string; file_path: string; size: number }>(
+      `tasks/${taskId}/single-episode-location`),
+  /** Move exactly one existing copied file into the user's actual Season folder. */
+  organizeSingleEpisode: (taskId: string, folderId: string, driveId: string) =>
+    post<{ ok: boolean }>(`tasks/${taskId}/organize-single-episode`, {
+      existing_folder_id: folderId, existing_drive_id: driveId, destination_mode: 'exact',
+    }),
   /** Read-only inspection; old DONE record remains unchanged. */
   repairCheck: (taskId: string) =>
     get<IRepairReport>(`tasks/${taskId}/repair-check`),
