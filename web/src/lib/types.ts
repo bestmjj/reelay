@@ -103,7 +103,7 @@ export interface ITaskSummary {
   title: string | null;
   error: string | null;
   /** A deduplicated task did not result in another cloud copy. */
-  skip_kind?: 'duplicate' | 'rule' | 'user' | null;
+  skip_kind?: 'duplicate' | 'rule' | 'user' | 'preserved_transfer' | null;
   skip_reason?: string | null;
   wrong_source_quarantined?: boolean;
   retries: number;
