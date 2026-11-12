@@ -457,7 +457,20 @@ class Organizer(_MediaLibrary):
             selected = organize.pop("single_episode", None)
             if selected:
                 remaining = len(ctx.ns("storage").get("landed") or []) - 1
-                organize["partial_completed"] = {**selected, "remaining": remaining}
+                # _apply_sync read-back only proves the file is in the target
+                # directory selected for THIS pass. Persist that identity so
+                # the UI does not claim a successful library placement without
+                # displaying its exact location.
+                final = drive.get_attr(selected["source_id"])
+                target = ctx.ns("library").get("direct_existing") or {}
+                if (not target or str(final.get("parent_id")) != target.get("id")
+                        or final.get("size") != selected["size"]):
+                    raise ValueError("单集移动后的最终目录或大小未通过读回核验")
+                organize["partial_completed"] = {
+                    **selected, "remaining": remaining,
+                    "target_id": target["id"], "target_path": target["path"],
+                    "target_name": final["name"],
+                }
                 organize["applied"] = False  # whole season was NOT organized
                 ctx.result["verified"] = False  # keep the original task pending
                 ctx.log(f"已整理 S{selected['season']:02d}E{selected['episode']:03d}："

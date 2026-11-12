@@ -624,7 +624,7 @@ class TaskOpsMixin(ServiceBase):
                 and not storage.get("manifest") and not storage.get("landed")
                 and ctx.parsed and ctx.parsed.title and ctx.parsed.media_type in ("tv", "anime")):
             out.append("select_episodes")
-        if self._landed_single_episode(ctx):
+        if self._landed_single_episode(ctx, allow_completed=True):
             out.append("organize_single_episode")
         if state == TaskState.NEED_MANUAL:
             if unknown_transfer:
@@ -940,7 +940,7 @@ class TaskOpsMixin(ServiceBase):
         self._update(ctx, expected=TaskState.NEED_MANUAL, reset_retries=True)
 
     @staticmethod
-    def _landed_single_episode(ctx: PipelineContext) -> dict[str, Any] | None:
+    def _landed_single_episode(ctx: PipelineContext, *, allow_completed: bool = False) -> dict[str, Any] | None:
         """Find one immutable already-landed file for the approved single ep.
 
         A historic season-pack transfer may have copied E01-E18 while the
@@ -987,21 +987,78 @@ class TaskOpsMixin(ServiceBase):
         if len(matched) != 1:
             return None
         previous = ctx.ns("organize").get("partial_completed") or {}
-        if previous.get("source_id") == matched[0]["source_id"]:
+        if previous.get("source_id") == matched[0]["source_id"] and not allow_completed:
             return None
         return matched[0]
 
-    def requeue_organize_single_episode(self, task_id: str) -> None:
+    def locate_single_episode(self, task_id: str) -> dict[str, Any]:
+        """Read the live cloud file ID and its actual directory, no mutations."""
+        ctx = self._require_context(task_id)
+        selected = self._landed_single_episode(ctx, allow_completed=True)
+        if not selected:
+            raise ConflictError("无法唯一确认已转存的目标集文件，禁止猜测保存位置")
+        storage = self.pipeline.reg.get_provider("storage", "aliyun")
+        try:
+            with self.pipeline.scope(ctx):
+                storage._assert_manifest_drive(ctx.ns("storage")["manifest"])
+                file = storage.library().get_attr(selected["source_id"])
+                if (str(file.get("id")) != selected["source_id"]
+                        or file.get("is_dir") or file.get("size") != selected["size"]
+                        or not file.get("parent_id") or not file.get("name")):
+                    raise ValueError("云盘中原始文件 ID 或大小发生变化")
+                parent_path = storage.dir_path(str(file["parent_id"]))
+                if not parent_path or not parent_path.startswith("/"):
+                    raise ValueError("无法读取该文件的实际保存路径")
+        except Exception as exc:
+            raise ConflictError(f"只读定位 E{selected['episode']:03d} 失败：{exc}") from exc
+        return {
+            "season": selected["season"], "episode": selected["episode"],
+            "file_id": selected["source_id"], "name": str(file["name"]),
+            "size": selected["size"], "parent_id": str(file["parent_id"]),
+            "parent_path": parent_path,
+            "file_path": f"{parent_path.rstrip('/')}/{file['name']}",
+        }
+
+    def requeue_organize_single_episode(self, task_id: str, *, folder_id: str, drive_id: str) -> None:
         """Queue *organize only* for the already copied E18, never a share copy.
 
         A successful partial move does not mark the entire season pack DONE:
         the other landed files remain untouched in .reelay- staging.
         """
         ctx = self._require_context(task_id)
-        selection = self._landed_single_episode(ctx)
+        selection = self._landed_single_episode(ctx, allow_completed=True)
         if not selection or "organize_single_episode" not in self.task_actions(ctx):
             raise ConflictError("这条任务没有可核验的已转存单集；不能将整季误当成一集重新整理")
+        # Require explicit existing Season XX folder. Previously we reused
+        # the automatic category root, which could put a correctly moved E18
+        # in a completely different directory than the user's E01-E17.
+        destination = self._verify_existing_episode_folder(ctx, folder_id, drive_id, "exact")
+        from ..media import season_of, episode_of
+        from pathlib import PurePosixPath
+
+        target_path = PurePosixPath(destination["path"])
+        expected_season = selection["season"]
+        if (season_of(target_path.name) != expected_season
+                or ctx.parsed.title.casefold() not in target_path.parent.as_posix().casefold()):
+            raise ConflictError(
+                f"必须选中《{ctx.parsed.title}》原有的 Season {expected_season:02d} 最终目录，"
+                "不能只选择动漫分类目录")
+        storage = self.pipeline.reg.get_provider("storage", "aliyun")
+        current = self.locate_single_episode(task_id)
+        with self.pipeline.scope(ctx):
+            contents = storage.library().iterdir(folder_id)
+        if not any(not row.get("is_dir")
+                   and episode_of(str(row.get("name") or ""))[1] in range(1, 1000)
+                   and episode_of(str(row.get("name") or ""))[1] != selection["episode"]
+                   for row in contents):
+            raise ConflictError("所选 Season 文件夹没有可以核对的其他剧集；请选 E01-E17 原本所在的目录")
         organize = ctx.ns("organize")
+        ctx.ns("library")["direct_existing"] = destination
+        ctx.ns("library").pop("relative_category", None)
+        ctx.ns("library").pop("category_path", None)
+        ctx.save_dir_cid = folder_id
+        ctx.log(f"人工核对 E{selection['episode']:03d} 实际位置：{current['file_path']}；"
+                f"目标为 {destination['path']}；不重新转存也不删除其他剧集")
         for key in ("plan", "base_cid", "pending_conflict", "resolve", "applied", "error"):
             organize.pop(key, None)
         organize["single_episode"] = selection
@@ -1011,6 +1068,8 @@ class TaskOpsMixin(ServiceBase):
         self.pipeline.stamp_config(ctx)
         ctx.ns("task")["retry_from"] = TaskState.QUEUED.value
         remaining = len(ctx.ns("storage").get("landed") or []) - 1
+        ctx.log(f"已指定《{ctx.parsed.title}》的真实 Season 文件夹 {destination['path']}；"
+                f"只移动 E{selection['episode']:03d}，不重复转存")
         ctx.log(f"人工确认只整理已转存的 S{selection['season']:02d}E{selection['episode']:03d}；"
                 f"其余 {remaining} 个文件继续保留在暂存目录；不请求分享复制，不删除或覆盖")
         self._update(ctx, expected=TaskState.NEED_MANUAL, reset_retries=True)

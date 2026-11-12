@@ -165,9 +165,17 @@ def router(service) -> APIRouter:
         await service.requeue_organize(task_id, save_dir_alias=payload.save_dir_alias, conflict=payload.conflict)
         return {"ok": True}
 
+    @api.get("/api/tasks/{task_id}/single-episode-location")
+    async def single_episode_location(task_id: str):
+        return await asyncio.to_thread(service.locate_single_episode, task_id)
+
     @api.post("/api/tasks/{task_id}/organize-single-episode")
-    async def organize_single_episode(task_id: str):
-        service.requeue_organize_single_episode(task_id)
+    async def organize_single_episode(task_id: str, payload: ActionPayload):
+        await asyncio.to_thread(
+            service.requeue_organize_single_episode, task_id,
+            folder_id=payload.existing_folder_id or "",
+            drive_id=payload.existing_drive_id or "",
+        )
         return {"ok": True}
 
     @api.post("/api/tasks/{task_id}/accept-partial")
