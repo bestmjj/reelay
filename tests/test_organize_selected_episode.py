@@ -247,7 +247,7 @@ class OnlyE18FromCopiedSeason(WebCase):
 
     def test_explicit_target_and_live_id_required_before_reorganizing(self):
         self.assertEqual(self.client.post(self.url + "/organize-single-episode",
-                         json={}).status_code, 409)
+                         json={}).status_code, 422)
         self.assertEqual(self.client.post(self.url + "/organize-single-episode", json={
             "existing_folder_id": "season-dir", "existing_drive_id": "other-drive",
         }).status_code, 409)
